@@ -1,0 +1,378 @@
+-module(vbeam_linuxkpi).
+-export([
+    %% Memory Management
+    kmalloc/2, kfree/1, vmalloc/1, vfree/1, kzalloc/2,
+    dma_alloc_coherent/4, dma_free_coherent/3,
+
+    %% Logging
+    printk/2, dev_err/2, dev_warn/2, dev_info/2, dev_dbg/2,
+
+    %% Synchronization
+    spin_lock/1, spin_unlock/1, spin_lock_init/1,
+    mutex_init/1, mutex_lock/1, mutex_unlock/1,
+    init_waitqueue_head/1, wake_up/1, wake_up_interruptible/1,
+
+    %% PCI
+    pci_register_driver/1, pci_unregister_driver/1,
+    pci_enable_device/1, pci_disable_device/1, pci_set_master/1,
+    pci_resource_start/2, pci_resource_len/2,
+    pci_iomap/3, pci_iounmap/2,
+
+    %% Interrupts
+    request_irq/5, free_irq/2, enable_irq/1, disable_irq/1,
+
+    %% Workqueues/Timers
+    schedule_work/1, queue_work/2, mod_timer/2, del_timer/1,
+
+    %% DMA
+    dma_map_single/4, dma_unmap_single/4, dma_set_mask/2,
+
+    %% Network Subsystem
+    alloc_etherdev/1, register_netdev/1, unregister_netdev/1,
+    netif_start_queue/1, netif_stop_queue/1, netif_wake_queue/1,
+    netif_rx/1, napi_schedule/1, napi_complete/1
+]).
+
+%% ==================================================================
+%% Memory Management
+%% ==================================================================
+
+%% @doc Allocate kernel memory
+%% Real implementation: allocate from BEAM heap, track in ETS for debugging
+kmalloc(Size, _Flags) ->
+    log_kapi_call(kmalloc, [Size, _Flags]),
+    %% Allocate BEAM binary (automatically managed)
+    Ptr = make_ref(),
+    Memory = <<0:(Size*8)>>,
+    %% TODO: Store in ETS table for tracking: {Ptr, Memory, Size}
+    {ok, Ptr, Memory}.
+
+%% @doc Free kernel memory
+kfree(Ptr) ->
+    log_kapi_call(kfree, [Ptr]),
+    %% Real implementation: remove from tracking ETS, BEAM GC handles actual free
+    ok.
+
+%% @doc Allocate virtually contiguous memory
+vmalloc(Size) ->
+    log_kapi_call(vmalloc, [Size]),
+    %% Same as kmalloc for BEAM (no MMU distinction)
+    kmalloc(Size, 0).
+
+%% @doc Free vmalloc memory
+vfree(Ptr) ->
+    log_kapi_call(vfree, [Ptr]),
+    kfree(Ptr).
+
+%% @doc Allocate and zero memory
+kzalloc(Size, Flags) ->
+    log_kapi_call(kzalloc, [Size, Flags]),
+    %% Already zeroed by default in BEAM binaries
+    kmalloc(Size, Flags).
+
+%% @doc Allocate DMA-coherent memory
+%% Real implementation: allocate pinned memory, get physical address
+dma_alloc_coherent(_Dev, Size, _DmaHandle, _Flags) ->
+    log_kapi_call(dma_alloc_coherent, [_Dev, Size, _DmaHandle, _Flags]),
+    %% TODO: Coordinate with vbeam_dma to get pinned physical memory
+    {ok, Ptr, _Memory} = kmalloc(Size, 0),
+    DmaAddr = 16#F000_0000 + erlang:phash2(Ptr, 16#0FFF_FFFF),
+    {ok, Ptr, DmaAddr}.
+
+%% @doc Free DMA-coherent memory
+dma_free_coherent(_Dev, _Size, Ptr) ->
+    log_kapi_call(dma_free_coherent, [_Dev, _Size, Ptr]),
+    kfree(Ptr).
+
+%% ==================================================================
+%% Logging
+%% ==================================================================
+
+%% @doc Kernel print - route to BEAM logger
+printk(Fmt, Args) ->
+    %% Don't log this call itself to avoid infinite recursion
+    Message = io_lib:format(Fmt, Args),
+    logger:notice("[KAPI printk] ~s", [Message]),
+    ok.
+
+%% @doc Device error log
+dev_err(Dev, Msg) ->
+    logger:error("[KAPI dev_err] ~p: ~s", [Dev, Msg]),
+    ok.
+
+%% @doc Device warning log
+dev_warn(Dev, Msg) ->
+    logger:warning("[KAPI dev_warn] ~p: ~s", [Dev, Msg]),
+    ok.
+
+%% @doc Device info log
+dev_info(Dev, Msg) ->
+    logger:info("[KAPI dev_info] ~p: ~s", [Dev, Msg]),
+    ok.
+
+%% @doc Device debug log
+dev_dbg(Dev, Msg) ->
+    logger:debug("[KAPI dev_dbg] ~p: ~s", [Dev, Msg]),
+    ok.
+
+%% ==================================================================
+%% Synchronization
+%% ==================================================================
+
+%% @doc Initialize spinlock
+spin_lock_init(Lock) ->
+    log_kapi_call(spin_lock_init, [Lock]),
+    %% Real implementation: register lock in ETS, return lock ID
+    {ok, make_ref()}.
+
+%% @doc Acquire spinlock
+%% Real implementation: use gen_server call for serialization
+spin_lock(Lock) ->
+    log_kapi_call(spin_lock, [Lock]),
+    %% TODO: Call lock manager gen_server
+    ok.
+
+%% @doc Release spinlock
+spin_unlock(Lock) ->
+    log_kapi_call(spin_unlock, [Lock]),
+    %% TODO: Call lock manager gen_server
+    ok.
+
+%% @doc Initialize mutex
+mutex_init(Mutex) ->
+    log_kapi_call(mutex_init, [Mutex]),
+    {ok, make_ref()}.
+
+%% @doc Acquire mutex
+%% Real implementation: gen_server:call to mutex manager
+mutex_lock(Mutex) ->
+    log_kapi_call(mutex_lock, [Mutex]),
+    ok.
+
+%% @doc Release mutex
+mutex_unlock(Mutex) ->
+    log_kapi_call(mutex_unlock, [Mutex]),
+    ok.
+
+%% @doc Initialize wait queue
+init_waitqueue_head(Queue) ->
+    log_kapi_call(init_waitqueue_head, [Queue]),
+    %% Real implementation: create waiting process registry
+    {ok, make_ref()}.
+
+%% @doc Wake up waiting processes
+wake_up(Queue) ->
+    log_kapi_call(wake_up, [Queue]),
+    %% Real implementation: send message to all waiting processes
+    ok.
+
+%% @doc Wake up interruptible waiting processes
+wake_up_interruptible(Queue) ->
+    log_kapi_call(wake_up_interruptible, [Queue]),
+    ok.
+
+%% ==================================================================
+%% PCI
+%% ==================================================================
+
+%% @doc Register PCI driver
+pci_register_driver(Driver) ->
+    log_kapi_call(pci_register_driver, [Driver]),
+    %% Real implementation: register with vbeam_pci, trigger probe callbacks
+    0. %% Success
+
+%% @doc Unregister PCI driver
+pci_unregister_driver(Driver) ->
+    log_kapi_call(pci_unregister_driver, [Driver]),
+    ok.
+
+%% @doc Enable PCI device
+pci_enable_device(Dev) ->
+    log_kapi_call(pci_enable_device, [Dev]),
+    %% Real implementation: enable MMIO/IO access, set up BARs
+    0. %% Success
+
+%% @doc Disable PCI device
+pci_disable_device(Dev) ->
+    log_kapi_call(pci_disable_device, [Dev]),
+    ok.
+
+%% @doc Set PCI bus mastering
+pci_set_master(Dev) ->
+    log_kapi_call(pci_set_master, [Dev]),
+    %% Real implementation: set DMA enable bit in PCI config
+    ok.
+
+%% @doc Get PCI resource start address
+pci_resource_start(Dev, Bar) ->
+    log_kapi_call(pci_resource_start, [Dev, Bar]),
+    %% Real implementation: query vbeam_pci for BAR base address
+    16#F800_0000 + (Bar * 16#0010_0000). %% Fake address
+
+%% @doc Get PCI resource length
+pci_resource_len(Dev, Bar) ->
+    log_kapi_call(pci_resource_len, [Dev, Bar]),
+    %% Real implementation: query vbeam_pci for BAR size
+    16#0010_0000. %% 1MB default
+
+%% @doc Map PCI BAR to kernel virtual address
+pci_iomap(Dev, Bar, MaxLen) ->
+    log_kapi_call(pci_iomap, [Dev, Bar, MaxLen]),
+    %% Real implementation: map to BEAM binary, track mapping
+    {ok, make_ref()}.
+
+%% @doc Unmap PCI BAR
+pci_iounmap(Dev, Addr) ->
+    log_kapi_call(pci_iounmap, [Dev, Addr]),
+    ok.
+
+%% ==================================================================
+%% Interrupts
+%% ==================================================================
+
+%% @doc Request interrupt line
+%% Real implementation: register IRQ handler process, route BEAM messages
+request_irq(Irq, Handler, Flags, Name, Dev) ->
+    log_kapi_call(request_irq, [Irq, Handler, Flags, Name, Dev]),
+    %% TODO: Register Handler with vbeam_irq manager
+    0. %% Success
+
+%% @doc Free interrupt line
+free_irq(Irq, Dev) ->
+    log_kapi_call(free_irq, [Irq, Dev]),
+    ok.
+
+%% @doc Enable interrupt
+enable_irq(Irq) ->
+    log_kapi_call(enable_irq, [Irq]),
+    ok.
+
+%% @doc Disable interrupt
+disable_irq(Irq) ->
+    log_kapi_call(disable_irq, [Irq]),
+    ok.
+
+%% ==================================================================
+%% Workqueues/Timers
+%% ==================================================================
+
+%% @doc Schedule work
+%% Real implementation: spawn BEAM process to execute work function
+schedule_work(Work) ->
+    log_kapi_call(schedule_work, [Work]),
+    %% TODO: spawn_link fun that calls Work function
+    true. %% Queued
+
+%% @doc Queue work on specific workqueue
+queue_work(Queue, Work) ->
+    log_kapi_call(queue_work, [Queue, Work]),
+    schedule_work(Work).
+
+%% @doc Modify timer expiration
+%% Real implementation: erlang:send_after
+mod_timer(Timer, ExpiresJiffies) ->
+    log_kapi_call(mod_timer, [Timer, ExpiresJiffies]),
+    %% TODO: Cancel old timer, start new one
+    %% Jiffies conversion: 1 jiffy = 1ms on most systems
+    TimeoutMs = ExpiresJiffies,
+    _TRef = erlang:send_after(TimeoutMs, self(), {timer_expired, Timer}),
+    0. %% Success
+
+%% @doc Delete timer
+del_timer(Timer) ->
+    log_kapi_call(del_timer, [Timer]),
+    %% Real implementation: erlang:cancel_timer
+    0. %% Was not active
+
+%% ==================================================================
+%% DMA
+%% ==================================================================
+
+%% @doc Map single buffer for DMA
+dma_map_single(Dev, Ptr, Size, Direction) ->
+    log_kapi_call(dma_map_single, [Dev, Ptr, Size, Direction]),
+    %% Real implementation: pin memory, return physical address
+    DmaAddr = 16#E000_0000 + erlang:phash2(Ptr, 16#0FFF_FFFF),
+    DmaAddr.
+
+%% @doc Unmap single DMA buffer
+dma_unmap_single(Dev, DmaAddr, Size, Direction) ->
+    log_kapi_call(dma_unmap_single, [Dev, DmaAddr, Size, Direction]),
+    ok.
+
+%% @doc Set DMA mask
+dma_set_mask(Dev, Mask) ->
+    log_kapi_call(dma_set_mask, [Dev, Mask]),
+    %% Real implementation: validate device can address Mask bits
+    0. %% Success
+
+%% ==================================================================
+%% Network Subsystem
+%% ==================================================================
+
+%% @doc Allocate ethernet device
+alloc_etherdev(PrivSize) ->
+    log_kapi_call(alloc_etherdev, [PrivSize]),
+    %% Real implementation: create net_device structure, allocate private data
+    NetDev = #{
+        type => etherdev,
+        priv_size => PrivSize,
+        priv => make_ref(),
+        mac => <<16#52, 16#54, 16#00, 16#12, 16#34, 16#56>>, %% Default MAC
+        mtu => 1500,
+        state => down
+    },
+    {ok, NetDev}.
+
+%% @doc Register network device
+register_netdev(NetDev) ->
+    log_kapi_call(register_netdev, [NetDev]),
+    %% Real implementation: register with vbeam_net, assign interface name
+    0. %% Success
+
+%% @doc Unregister network device
+unregister_netdev(NetDev) ->
+    log_kapi_call(unregister_netdev, [NetDev]),
+    ok.
+
+%% @doc Start network queue
+netif_start_queue(NetDev) ->
+    log_kapi_call(netif_start_queue, [NetDev]),
+    ok.
+
+%% @doc Stop network queue
+netif_stop_queue(NetDev) ->
+    log_kapi_call(netif_stop_queue, [NetDev]),
+    ok.
+
+%% @doc Wake network queue
+netif_wake_queue(NetDev) ->
+    log_kapi_call(netif_wake_queue, [NetDev]),
+    ok.
+
+%% @doc Receive packet
+%% Real implementation: pass sk_buff to network stack
+netif_rx(Skb) ->
+    log_kapi_call(netif_rx, [Skb]),
+    0. %% NET_RX_SUCCESS
+
+%% @doc Schedule NAPI poll
+napi_schedule(Napi) ->
+    log_kapi_call(napi_schedule, [Napi]),
+    %% Real implementation: trigger poll in BEAM process
+    ok.
+
+%% @doc Complete NAPI poll
+napi_complete(Napi) ->
+    log_kapi_call(napi_complete, [Napi]),
+    ok.
+
+%% ==================================================================
+%% Internal Helpers
+%% ==================================================================
+
+%% @doc Log kernel API call for debugging
+log_kapi_call(Function, Args) ->
+    %% Use debug level to avoid spam, can enable selectively
+    logger:debug("[KAPI] ~p(~p)", [Function, Args]),
+    ok.

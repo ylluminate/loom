@@ -1,0 +1,221 @@
+%% BEAM File Parser
+%% Parses .beam file binary format (IFF-like chunk structure)
+%% Reference: http://beam-wisdoms.clau.se/en/latest/indepth-beam-file.html
+
+-module(vbeam_beam_parser).
+-export([parse_file/1, parse_beam/1]).
+
+%% Parse a .beam file from disk
+parse_file(Path) ->
+    case file:read_file(Path) of
+        {ok, Binary} -> parse_beam(Binary);
+        {error, Reason} -> {error, {file_read, Reason}}
+    end.
+
+%% Parse BEAM binary format
+parse_beam(<<"FOR1", Size:32, "BEAM", Rest/binary>>) ->
+    case Size - 4 of  % Size includes "BEAM" tag (4 bytes)
+        ExpectedSize when ExpectedSize =:= byte_size(Rest) ->
+            parse_chunks(Rest, #{});
+        _ ->
+            {error, size_mismatch}
+    end;
+parse_beam(_) ->
+    {error, invalid_beam_format}.
+
+%% Parse all chunks in the BEAM file
+parse_chunks(<<>>, Acc) ->
+    {ok, Acc};
+parse_chunks(Binary, Acc) ->
+    case parse_chunk(Binary) of
+        {ok, ChunkName, ChunkData, Rest} ->
+            parse_chunks(Rest, Acc#{ChunkName => ChunkData});
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% Parse a single chunk
+parse_chunk(<<Name:4/binary, Size:32, Data:Size/binary, Rest/binary>>) ->
+    %% Chunks are aligned to 4-byte boundaries
+    Padding = case Size rem 4 of
+        0 -> 0;
+        N -> 4 - N
+    end,
+    case Rest of
+        <<_:Padding/binary, AlignedRest/binary>> ->
+            ChunkName = binary_to_atom(Name, latin1),
+            ParsedData = parse_chunk_data(ChunkName, Data),
+            {ok, ChunkName, ParsedData, AlignedRest};
+        _ ->
+            {error, truncated_chunk}
+    end;
+parse_chunk(_) ->
+    {error, invalid_chunk}.
+
+%% Parse chunk data based on chunk type
+parse_chunk_data('Code', Data) ->
+    %% Code chunk contains:
+    %% - SubSize (16 bits) - should be 16
+    %% - InstructionSet (32 bits) - BEAM version
+    %% - OpcodeMax (32 bits) - highest opcode used
+    %% - LabelCount (32 bits)
+    %% - FunctionCount (32 bits)
+    %% - Code (rest of binary)
+    case Data of
+        <<SubSize:32, InstructionSet:32, OpcodeMax:32,
+          LabelCount:32, FunctionCount:32, Code/binary>> ->
+            #{sub_size => SubSize,
+              instruction_set => InstructionSet,
+              opcode_max => OpcodeMax,
+              label_count => LabelCount,
+              function_count => FunctionCount,
+              code => Code};
+        _ ->
+            Data
+    end;
+
+parse_chunk_data('Atom', Data) ->
+    %% Atom chunk (old format): Count (32 bits) followed by atoms
+    parse_atoms(Data);
+
+parse_chunk_data('AtU8', Data) ->
+    %% AtU8 chunk (UTF-8 atoms): Count (32 bits) followed by UTF-8 atoms
+    parse_atoms(Data);
+
+parse_chunk_data('StrT', Data) ->
+    %% String table - just a binary of concatenated strings
+    Data;
+
+parse_chunk_data('ImpT', Data) ->
+    %% Import table: Count (32 bits) followed by {Module, Function, Arity} tuples
+    case Data of
+        <<Count:32, Rest/binary>> ->
+            parse_imports(Rest, Count, []);
+        _ ->
+            Data
+    end;
+
+parse_chunk_data('ExpT', Data) ->
+    %% Export table: Count (32 bits) followed by {Function, Arity, Label} tuples
+    case Data of
+        <<Count:32, Rest/binary>> ->
+            parse_exports(Rest, Count, []);
+        _ ->
+            Data
+    end;
+
+parse_chunk_data('FunT', Data) ->
+    %% Lambda/fun table
+    case Data of
+        <<Count:32, Rest/binary>> ->
+            parse_funs(Rest, Count, []);
+        _ ->
+            Data
+    end;
+
+parse_chunk_data('LitT', Data) ->
+    %% Literal table - compressed with zlib
+    case Data of
+        <<UncompressedSize:32, Compressed/binary>> ->
+            case catch zlib:uncompress(Compressed) of
+                Uncompressed when is_binary(Uncompressed) ->
+                    parse_literals(Uncompressed);
+                _ ->
+                    #{uncompressed_size => UncompressedSize,
+                      compressed => Compressed}
+            end;
+        _ ->
+            Data
+    end;
+
+parse_chunk_data('LocT', Data) ->
+    %% Local function table (optional, for debugging)
+    case Data of
+        <<Count:32, Rest/binary>> ->
+            parse_exports(Rest, Count, []);  % Same format as ExpT
+        _ ->
+            Data
+    end;
+
+parse_chunk_data('Attr', Data) ->
+    %% Attributes - Erlang term (external term format)
+    case catch binary_to_term(Data) of
+        Term when not is_reference(Term) -> Term;
+        _ -> Data
+    end;
+
+parse_chunk_data('CInf', Data) ->
+    %% Compilation info - Erlang term
+    case catch binary_to_term(Data) of
+        Term when not is_reference(Term) -> Term;
+        _ -> Data
+    end;
+
+parse_chunk_data('Abst', Data) ->
+    %% Abstract code - Erlang term
+    case catch binary_to_term(Data) of
+        Term when not is_reference(Term) -> Term;
+        _ -> Data
+    end;
+
+parse_chunk_data('Line', Data) ->
+    %% Line number information
+    Data;
+
+parse_chunk_data(_Other, Data) ->
+    %% Unknown chunk - keep as binary
+    Data.
+
+%% Parse atom table
+parse_atoms(<<Count:32, Rest/binary>>) ->
+    parse_atom_list(Rest, Count, []).
+
+parse_atom_list(Rest, 0, Acc) ->
+    {lists:reverse(Acc), Rest};
+parse_atom_list(<<Len:8, Atom:Len/binary, Rest/binary>>, Count, Acc) ->
+    parse_atom_list(Rest, Count - 1, [binary_to_atom(Atom, utf8) | Acc]);
+parse_atom_list(_, _, Acc) ->
+    {lists:reverse(Acc), <<>>}.
+
+%% Parse import table
+parse_imports(Rest, 0, Acc) ->
+    lists:reverse(Acc);
+parse_imports(<<Module:32, Function:32, Arity:32, Rest/binary>>, Count, Acc) ->
+    parse_imports(Rest, Count - 1, [{Module, Function, Arity} | Acc]);
+parse_imports(_, _, Acc) ->
+    lists:reverse(Acc).
+
+%% Parse export table
+parse_exports(Rest, 0, Acc) ->
+    lists:reverse(Acc);
+parse_exports(<<Function:32, Arity:32, Label:32, Rest/binary>>, Count, Acc) ->
+    parse_exports(Rest, Count - 1, [{Function, Arity, Label} | Acc]);
+parse_exports(_, _, Acc) ->
+    lists:reverse(Acc).
+
+%% Parse fun table
+parse_funs(Rest, 0, Acc) ->
+    lists:reverse(Acc);
+parse_funs(<<Function:32, Arity:32, CodePos:32, Index:32,
+             NumFree:32, OldUniq:32, Rest/binary>>, Count, Acc) ->
+    Fun = #{function => Function,
+            arity => Arity,
+            code_pos => CodePos,
+            index => Index,
+            num_free => NumFree,
+            old_uniq => OldUniq},
+    parse_funs(Rest, Count - 1, [Fun | Acc]);
+parse_funs(_, _, Acc) ->
+    lists:reverse(Acc).
+
+%% Parse literal table
+parse_literals(<<Count:32, Rest/binary>>) ->
+    parse_literal_list(Rest, Count, []).
+
+parse_literal_list(Rest, 0, Acc) ->
+    lists:reverse(Acc);
+parse_literal_list(<<Size:32, Literal:Size/binary, Rest/binary>>, Count, Acc) ->
+    Term = binary_to_term(Literal),
+    parse_literal_list(Rest, Count - 1, [Term | Acc]);
+parse_literal_list(_, _, Acc) ->
+    lists:reverse(Acc).
