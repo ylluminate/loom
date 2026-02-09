@@ -1,6 +1,11 @@
-# Build artifacts
+# Build output
+_build/
+ebin/
+
+# Compiled BEAM files (only _build/ should have these)
 *.beam
-beam_output/
+
+# Erlang crash dumps
 erl_crash.dump
 
 # QEMU artifacts
@@ -16,3 +21,6 @@ OVMF*.fd
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary
+/tmp/

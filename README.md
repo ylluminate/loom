@@ -20,18 +20,39 @@ Loom OS is a research operating system built on three insights:
 
 ```
 loom/
-├── src/
-│   ├── nucleus/       UEFI boot (PE32+, GOP framebuffer, VGA fonts)
-│   ├── beam_vm/       BEAM interpreter + standalone parser (no OTP deps)
-│   ├── kernel/        GDT/IDT, paging, heap, scheduler, I/O, IRQ, JIT
-│   ├── compat/        Linux syscalls (~450), ELF loader, LinuxKPI shims
-│   └── native/        x86_64 + ARM64 backends, IR, regalloc, PE/ELF/Mach-O
-├── tests/native/      V test programs for native compilation
-├── docs/              Architecture docs, boot sequence, syscall tables
-├── scripts/           Build, test, and QEMU scripts
-├── meta/              Hackathon submission materials
-├── assets/            Images and font previews
-└── thoughts/          Architecture sketches and design notes
+├── boot/                 UEFI boot (PE32+, GOP framebuffer, VGA fonts)
+│   ├── fonts/            VGA 8x16 + MonaSpice bitmap fonts
+│   └── esp/              EFI System Partition layout
+├── kernel/               Core kernel subsystems
+│   ├── boot/             Boot sequence orchestration (GDT→IDT→paging→stack→run)
+│   ├── mm/               Memory: page allocator, 4-level paging, BEAM heap
+│   ├── sched/            Preemptive round-robin scheduler (timer IRQ)
+│   ├── io/               Serial/framebuffer I/O, hardware IRQ→BEAM bridge
+│   └── arch/             x86_64 GDT and IDT setup
+├── vm/                   BEAM virtual machine
+│   ├── interp/           Interpreters: v1 (minimal), v2 (beam_disasm), bare (no OTP)
+│   ├── parser/           BEAM file parsers: standard (IFF) + standalone (zero OTP deps)
+│   └── jit/              BEAM bytecode → x86_64 machine code translator
+├── arch/                 Native code generation
+│   ├── x86_64/           x86_64 encoder + lowering (53 privileged instructions)
+│   ├── arm64/            ARM64 encoder + lowering (68/68 examples)
+│   ├── ir/               Intermediate representation, register allocator
+│   ├── link/             Internal linker (symbol resolution + relocation)
+│   └── formats/          Object file emitters: PE32+, ELF64, Mach-O
+├── compat/               Linux compatibility layer
+│   ├── syscall/          ~450 x86_64 Linux syscalls mapped to BEAM messages
+│   ├── elf/              ELF64 relocatable object loader (.ko modules)
+│   └── kpi/              66 Linux Kernel Programming Interface shims
+├── tests/                All tests (separated from source)
+│   ├── kernel/           Kernel module tests (*_test.erl)
+│   ├── vm/               VM module tests
+│   ├── native/           V test programs for native compilation
+│   └── data/             Test data files
+├── tools/                Build scripts, QEMU helpers, test runners
+├── docs/                 Architecture docs, boot sequence, syscall tables
+├── meta/                 Hackathon submission materials
+├── assets/               Images and font previews
+└── thoughts/             Architecture sketches and design notes
 ```
 
 ## The Pipeline
@@ -86,26 +107,33 @@ Update a running driver without stopping the system. Same PID. Same state. New c
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| UEFI boot nucleus | 5KB .efi, boots in QEMU | `src/nucleus/` |
-| Boot splash | GOP framebuffer, VGA fonts, loom grid | `src/nucleus/` |
-| BEAM interpreter | 30+ opcodes, runs V hello world | `src/beam_vm/` |
-| Standalone parser | No OTP deps, bare-metal ready | `src/beam_vm/` |
-| Kernel: scheduler | Preemptive, priority-based | `src/kernel/` |
-| Kernel: memory | Page allocator, paging, heap | `src/kernel/` |
-| Kernel: I/O + IRQ | Serial, framebuffer, interrupt bridge | `src/kernel/` |
-| BEAM-to-native JIT | BEAM bytecode -> x86_64 machine code | `src/kernel/` |
-| Linux syscall layer | ~450 syscalls mapped | `src/compat/` |
-| ELF .ko loader | Full ELF64 parsing, x86_64 relocations | `src/compat/` |
-| LinuxKPI shims | 66 Linux kernel API stubs | `src/compat/` |
-| Native x86_64 | 53 privileged instructions | `src/native/` |
-| Native ARM64 | 68/68 examples compile | `src/native/` |
-| IR + regalloc | Full pipeline, data type IR | `src/native/` |
-| PE/ELF/Mach-O | All three object formats | `src/native/` |
+| UEFI boot nucleus | 5KB .efi, boots in QEMU | `boot/` |
+| Boot splash | GOP framebuffer, VGA fonts, loom grid | `boot/` |
+| BEAM interpreter | 30+ opcodes, runs V hello world | `vm/interp/` |
+| Standalone parser | No OTP deps, bare-metal ready | `vm/parser/` |
+| BEAM-to-native JIT | BEAM bytecode -> x86_64 machine code | `vm/jit/` |
+| Kernel: boot sequence | GDT→IDT→paging→stack→kernel | `kernel/boot/` |
+| Kernel: memory mgmt | Page allocator, paging, heap | `kernel/mm/` |
+| Kernel: scheduler | Preemptive, priority-based | `kernel/sched/` |
+| Kernel: I/O + IRQ | Serial, framebuffer, interrupt bridge | `kernel/io/` |
+| Linux syscall layer | ~450 syscalls mapped | `compat/syscall/` |
+| ELF .ko loader | Full ELF64 parsing, x86_64 relocations | `compat/elf/` |
+| LinuxKPI shims | 66 Linux kernel API stubs | `compat/kpi/` |
+| Native x86_64 | 53 privileged instructions | `arch/x86_64/` |
+| Native ARM64 | 68/68 examples compile | `arch/arm64/` |
+| IR + regalloc | Full pipeline, data type IR | `arch/ir/` |
+| PE/ELF/Mach-O | All three object formats | `arch/formats/` |
 
 ## Build & Run
 
 ```bash
 # Prerequisites: Erlang/OTP 26+
+
+# Show all available targets
+make help
+
+# Build everything
+make all
 
 # Build the UEFI nucleus
 make nucleus
@@ -113,11 +141,21 @@ make nucleus
 # Test in QEMU (requires qemu-system-x86_64 + OVMF)
 make qemu-test
 
-# Run kernel tests
-make test-kernel
+# Run all tests
+make test
 
-# Compile all Erlang source modules
-make compile
+# Compile specific subsystems
+make boot-compile
+make kernel-compile
+make vm-compile
+make arch-compile
+make compat-compile
+
+# Project info (module counts, build status)
+make info
+
+# Syntax checking
+make check
 ```
 
 ## Relationship to vbeam
