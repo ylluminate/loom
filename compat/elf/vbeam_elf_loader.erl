@@ -290,15 +290,20 @@ load_impl(FilePath, SymbolTable) ->
                             case apply_relocations(ResolvedElf, BaseAddr) of
                                 {ok, Code} ->
                                     %% BUG 1 FIX: Pass SectionAddrs to extract functions
-                                    InitAddr = find_init_addr(ResolvedElf, SectionAddrs),
-                                    Exports = extract_exports(ResolvedElf, SectionAddrs),
-                                    Module = #{
-                                        code => Code,
-                                        data => <<>>,
-                                        init_addr => InitAddr,
-                                        exported_symbols => Exports
-                                    },
-                                    {ok, Module};
+                                    %% BUG 2 FIX: Wrap find_init_addr in try/catch
+                                    case catch find_init_addr(ResolvedElf, SectionAddrs) of
+                                        {'EXIT', {error, no_init_symbol, _}} ->
+                                            {error, no_init_symbol};
+                                        InitAddr when is_integer(InitAddr) ->
+                                            Exports = extract_exports(ResolvedElf, SectionAddrs),
+                                            Module = #{
+                                                code => Code,
+                                                data => <<>>,
+                                                init_addr => InitAddr,
+                                                exported_symbols => Exports
+                                            },
+                                            {ok, Module}
+                                    end;
                                 {error, _} = Err ->
                                     Err
                             end;
@@ -603,7 +608,16 @@ is_rela_section(_) -> false.
 resolve_symbol(#{shndx := ?SHN_UNDEF, name := <<>>} = Sym, _SymbolTable) ->
     %% Empty symbol name (null symbol) - skip
     {ok, Sym};
+resolve_symbol(#{shndx := ?SHN_UNDEF, name := Name, bind := weak} = Sym, SymbolTable) ->
+    %% Weak undefined symbols: try to resolve, but resolve to 0 if not found
+    case maps:find(Name, SymbolTable) of
+        {ok, Addr} ->
+            {ok, Sym#{resolved_addr := Addr}};
+        error ->
+            {ok, Sym#{resolved_addr := 0}}
+    end;
 resolve_symbol(#{shndx := ?SHN_UNDEF, name := Name} = Sym, SymbolTable) ->
+    %% Non-weak undefined symbols: must resolve or error
     case maps:find(Name, SymbolTable) of
         {ok, Addr} ->
             {ok, Sym#{resolved_addr := Addr}};

@@ -502,7 +502,6 @@ store_timer_ref(Timer, TRef) ->
                 NewSize when NewSize < 10000 ->
                     %% BUG 11 FIX: Key by {self(), Timer} to avoid namespace collision
                     OwnerPid = self(),
-                    erlang:monitor(process, OwnerPid),
                     ets:insert(?TIMER_TABLE, {{OwnerPid, Timer}, TRef}),
                     ok;
                 _ ->
@@ -511,7 +510,6 @@ store_timer_ref(Timer, TRef) ->
         _ ->
             %% BUG 11 FIX: Key by {self(), Timer} to avoid namespace collision
             OwnerPid = self(),
-            erlang:monitor(process, OwnerPid),
             ets:insert(?TIMER_TABLE, {{OwnerPid, Timer}, TRef}),
             ok
     end.
