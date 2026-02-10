@@ -408,7 +408,7 @@ builtin_function(Name, Target, Format) when is_atom(Target), is_atom(Format) ->
     builtin_function_impl(Name, Target, Format).
 
 %% Target-conditional register selection
-builtin_function_impl(<<"string__int">>, Target, _Format) ->
+builtin_function_impl(<<"string__int">>, Target) ->
     %% Define target-specific registers
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Convert string fat pointer to integer.
@@ -468,15 +468,15 @@ builtin_function_impl(<<"string__int">>, Target, _Format) ->
     }};
 
 %% int_to_str variants: various type names V uses for integers
-builtin_function_impl(<<"int literal__str">>, Target, _Format) ->
-    int_to_str_builtin(<<"int literal__str">>, Target, _Format);
-builtin_function_impl(<<"int__str">>, Target, _Format) ->
-    int_to_str_builtin(<<"int__str">>, Target, _Format);
-builtin_function_impl(<<"i64__str">>, Target, _Format) ->
-    int_to_str_builtin(<<"i64__str">>, Target, _Format);
+builtin_function_impl(<<"int literal__str">>, Target) ->
+    int_to_str_builtin(<<"int literal__str">>, Target);
+builtin_function_impl(<<"int__str">>, Target) ->
+    int_to_str_builtin(<<"int__str">>, Target);
+builtin_function_impl(<<"i64__str">>, Target) ->
+    int_to_str_builtin(<<"i64__str">>, Target);
 
 %% Print functions: println prints string + newline, print just prints string
-builtin_function_impl(<<"println">>, Target, _Format) ->
+builtin_function_impl(<<"println">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"println">>,
@@ -495,7 +495,7 @@ builtin_function_impl(<<"println">>, Target, _Format) ->
         ]
     }};
 
-builtin_function_impl(<<"print">>, Target, _Format) ->
+builtin_function_impl(<<"print">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"print">>,
@@ -510,14 +510,14 @@ builtin_function_impl(<<"print">>, Target, _Format) ->
         ]
     }};
 
-builtin_function_impl(<<"eprintln">>, Target, _Format) ->
+builtin_function_impl(<<"eprintln">>, Target) ->
     %% Print to stderr -- for now, just print to stdout
-    case builtin_function_impl(<<"println">>, Target, _Format) of
+    case builtin_function_impl(<<"println">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"eprintln">>}};
         none -> none
     end;
 
-builtin_function_impl(<<"intn">>, Target, _Format) ->
+builtin_function_impl(<<"intn">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Simple pseudo-random integer: returns n mod max.
     %% Uses a linear congruential generator with static state.
@@ -541,7 +541,7 @@ builtin_function_impl(<<"intn">>, Target, _Format) ->
         ]
     }};
 
-builtin_function_impl(<<"arguments">>, Target, _Format) ->
+builtin_function_impl(<<"arguments">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Return command-line arguments as an array.
     %% For native compilation, we can't easily access argc/argv without
@@ -559,7 +559,7 @@ builtin_function_impl(<<"arguments">>, Target, _Format) ->
         ]
     }};
 
-builtin_function_impl(<<"from">>, Target, _Format) ->
+builtin_function_impl(<<"from">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Error.from() — construct an error from a string
     %% For now, just return the input value as-is
@@ -575,7 +575,7 @@ builtin_function_impl(<<"from">>, Target, _Format) ->
         ]
     }};
 
-builtin_function_impl(<<"sqrt">>, arm64, _Format) ->
+builtin_function_impl(<<"sqrt">>, arm64) ->
     %% Square root: uses FSQRT hardware instruction.
     %% Input: float as int64 bit pattern. Output: float as int64 bit pattern.
     %% FMOV D0, X0; FSQRT D0, D0; FMOV X0, D0
@@ -598,7 +598,7 @@ builtin_function_impl(<<"sqrt">>, arm64, _Format) ->
             ret
         ]
     }};
-builtin_function_impl(<<"sqrt">>, x86_64, _Format) ->
+builtin_function_impl(<<"sqrt">>, x86_64) ->
     %% x86_64 sqrt: use SSE2 sqrtsd instruction
     %% For now, return 0 as placeholder - needs proper x86_64 implementation
     {ok, #{
@@ -613,14 +613,14 @@ builtin_function_impl(<<"sqrt">>, x86_64, _Format) ->
         ]
     }};
 
-builtin_function_impl(<<"atoi">>, Target, _Format) ->
+builtin_function_impl(<<"atoi">>, Target) ->
     %% atoi: C-style string-to-integer (same as string__int for our purposes)
-    case builtin_function_impl(<<"string__int">>, Target, _Format) of
+    case builtin_function_impl(<<"string__int">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"atoi">>}};
         none -> none
     end;
 
-builtin_function_impl(<<"gs">>, Target, _Format) ->
+builtin_function_impl(<<"gs">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% gs: string formatting function used in euler.v
     %% For now, return input as-is (approximate behavior)
@@ -636,7 +636,7 @@ builtin_function_impl(<<"gs">>, Target, _Format) ->
         ]
     }};
 
-builtin_function_impl(<<"log">>, Target, _Format) ->
+builtin_function_impl(<<"log">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% math.log: natural logarithm.
     %% This needs FPU support. For now, return 0.
@@ -698,7 +698,7 @@ builtin_function_impl(<<"panic">>, Target, Format) ->
     }};
 
 %% string__to_upper: convert a string to uppercase in-place (returns new fat pointer)
-builtin_function_impl(<<"string__to_upper">>, Target, _Format) ->
+builtin_function_impl(<<"string__to_upper">>, Target) ->
     {RetReg, HeapPtr} = case Target of
         x86_64 -> {rax, r15};
         arm64 -> {x0, x28}
@@ -749,7 +749,7 @@ builtin_function_impl(<<"string__to_upper">>, Target, _Format) ->
     }};
 
 %% string__index_after: find index of substring after position (stub: returns -1)
-builtin_function_impl(<<"string__index_after">>, Target, _Format) ->
+builtin_function_impl(<<"string__index_after">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__index_after">>,
@@ -764,7 +764,7 @@ builtin_function_impl(<<"string__index_after">>, Target, _Format) ->
     }};
 
 %% []int__clone: clone an array (just return the same pointer for now)
-builtin_function_impl(<<"[]int__clone">>, Target, _Format) ->
+builtin_function_impl(<<"[]int__clone">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"[]int__clone">>,
@@ -779,7 +779,7 @@ builtin_function_impl(<<"[]int__clone">>, Target, _Format) ->
     }};
 
 %% thread__wait: no-op stub for single-threaded native compilation
-builtin_function_impl(<<"thread__wait">>, Target, _Format) ->
+builtin_function_impl(<<"thread__wait">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"thread__wait">>,
@@ -794,7 +794,7 @@ builtin_function_impl(<<"thread__wait">>, Target, _Format) ->
     }};
 
 %% flush_stdout: no-op stub
-builtin_function_impl(<<"flush_stdout">>, _Target, _Format) ->
+builtin_function_impl(<<"flush_stdout">>, _Target) ->
     {ok, #{
         name => <<"flush_stdout">>,
         arity => 0,
@@ -807,7 +807,7 @@ builtin_function_impl(<<"flush_stdout">>, _Target, _Format) ->
     }};
 
 %% unbuffer_stdout: no-op stub
-builtin_function_impl(<<"unbuffer_stdout">>, _Target, _Format) ->
+builtin_function_impl(<<"unbuffer_stdout">>, _Target) ->
     {ok, #{
         name => <<"unbuffer_stdout">>,
         arity => 0,
@@ -820,7 +820,7 @@ builtin_function_impl(<<"unbuffer_stdout">>, _Target, _Format) ->
     }};
 
 %% error: construct an error (return input string as-is)
-builtin_function_impl(<<"error">>, Target, _Format) ->
+builtin_function_impl(<<"error">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"error">>,
@@ -835,7 +835,7 @@ builtin_function_impl(<<"error">>, Target, _Format) ->
     }};
 
 %% f: generic function reference (stub: return identity)
-builtin_function_impl(<<"f">>, Target, _Format) ->
+builtin_function_impl(<<"f">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"f">>,
@@ -850,7 +850,7 @@ builtin_function_impl(<<"f">>, Target, _Format) ->
     }};
 
 %% get_raw_line: read from stdin (stub: return empty string)
-builtin_function_impl(<<"get_raw_line">>, Target, _Format) ->
+builtin_function_impl(<<"get_raw_line">>, Target) ->
     {RetReg, HeapPtr} = case Target of
         x86_64 -> {rax, r15};
         arm64 -> {x0, x28}
@@ -875,7 +875,7 @@ builtin_function_impl(<<"get_raw_line">>, Target, _Format) ->
     }};
 
 %% info: log.info stub (print to stdout)
-builtin_function_impl(<<"info">>, _Target, _Format) ->
+builtin_function_impl(<<"info">>, _Target) ->
     {ok, #{
         name => <<"info">>,
         arity => 1,
@@ -889,7 +889,7 @@ builtin_function_impl(<<"info">>, _Target, _Format) ->
     }};
 
 %% warn: log.warn stub (print to stdout)
-builtin_function_impl(<<"warn">>, _Target, _Format) ->
+builtin_function_impl(<<"warn">>, _Target) ->
     {ok, #{
         name => <<"warn">>,
         arity => 1,
@@ -903,7 +903,7 @@ builtin_function_impl(<<"warn">>, _Target, _Format) ->
     }};
 
 %% debug: log.debug stub (no-op)
-builtin_function_impl(<<"debug">>, _Target, _Format) ->
+builtin_function_impl(<<"debug">>, _Target) ->
     {ok, #{
         name => <<"debug">>,
         arity => 1,
@@ -916,7 +916,7 @@ builtin_function_impl(<<"debug">>, _Target, _Format) ->
     }};
 
 %% sleep: stub (no-op)
-builtin_function_impl(<<"sleep">>, _Target, _Format) ->
+builtin_function_impl(<<"sleep">>, _Target) ->
     {ok, #{
         name => <<"sleep">>,
         arity => 1,
@@ -929,7 +929,7 @@ builtin_function_impl(<<"sleep">>, _Target, _Format) ->
     }};
 
 %% string__trim_space: return input as-is (stub)
-builtin_function_impl(<<"string__trim_space">>, Target, _Format) ->
+builtin_function_impl(<<"string__trim_space">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__trim_space">>,
@@ -944,7 +944,7 @@ builtin_function_impl(<<"string__trim_space">>, Target, _Format) ->
     }};
 
 %% string__repeat: return input as-is (stub)
-builtin_function_impl(<<"string__repeat">>, Target, _Format) ->
+builtin_function_impl(<<"string__repeat">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__repeat">>,
@@ -959,7 +959,7 @@ builtin_function_impl(<<"string__repeat">>, Target, _Format) ->
     }};
 
 %% string__f64: parse string to float (stub: return 0)
-builtin_function_impl(<<"string__f64">>, Target, _Format) ->
+builtin_function_impl(<<"string__f64">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__f64">>,
@@ -974,7 +974,7 @@ builtin_function_impl(<<"string__f64">>, Target, _Format) ->
     }};
 
 %% atof64: parse string to f64 (stub: return 0)
-builtin_function_impl(<<"atof64">>, Target, _Format) ->
+builtin_function_impl(<<"atof64">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"atof64">>,
@@ -989,14 +989,14 @@ builtin_function_impl(<<"atof64">>, Target, _Format) ->
     }};
 
 %% input_opt: read user input (stub: return empty string)
-builtin_function_impl(<<"input_opt">>, Target, _Format) ->
-    case builtin_function_impl(<<"get_raw_line">>, Target, _Format) of
+builtin_function_impl(<<"input_opt">>, Target) ->
+    case builtin_function_impl(<<"get_raw_line">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"input_opt">>}};
         none -> none
     end;
 
 %% new: generic constructor (stub: return 0)
-builtin_function_impl(<<"new">>, Target, _Format) ->
+builtin_function_impl(<<"new">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"new">>,
@@ -1011,14 +1011,14 @@ builtin_function_impl(<<"new">>, Target, _Format) ->
     }};
 
 %% int: alias for string__int
-builtin_function_impl(<<"int">>, Target, _Format) ->
-    case builtin_function_impl(<<"string__int">>, Target, _Format) of
+builtin_function_impl(<<"int">>, Target) ->
+    case builtin_function_impl(<<"string__int">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"int">>}};
         none -> none
     end;
 
 %% now: return 0 (stub for time)
-builtin_function_impl(<<"now">>, Target, _Format) ->
+builtin_function_impl(<<"now">>, Target) ->
     RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"now">>,
@@ -1034,12 +1034,12 @@ builtin_function_impl(<<"now">>, Target, _Format) ->
 
 %% Catch-all: generic pass-through builtins for common method-call patterns
 %% These let programs that call methods on types compile, even if behavior is stubbed
-builtin_function_impl(_, _, _) -> none.
+builtin_function_impl(_, _) -> none.
 
 %% Helper: create an int-to-string builtin with a given name.
 %% Takes an integer argument, returns a fat pointer string.
 %% Target-parametric: uses appropriate return register for architecture.
-int_to_str_builtin(Name, Target, _Format) ->
+int_to_str_builtin(Name, Target) ->
     %% CRITICAL FIX (Round 28, Finding 4): Explicitly move result to return register
     RetReg = case Target of
         x86_64 -> rax;

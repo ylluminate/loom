@@ -608,12 +608,11 @@ decode_compact_value(Byte, Rest) ->
             case (Byte band 16#10) of
                 0 ->
                     %% Medium: 11-bit value = 3 bits from byte (bits 7:5) + 8 from next
-                    %% Encoding: bits 7:5 hold high 3 bits, next byte holds low 8 bits
-                    %% Formula: ((Byte >> 5) & 7) | (NextByte << 3)
+                    %% Matches OTP beam_disasm: Val0 = B band 16#E0, N = (Val0 bsl 3) bor B1
                     case Rest of
                         <<Next:8, Rest2/binary>> ->
-                            HighBits = (Byte bsr 5) band 7,  %% Extract bits 7:5
-                            {HighBits bor (Next bsl 3), Rest2};
+                            Val0 = Byte band 16#E0,  %% Extract bits 7:5 (keep in position)
+                            {(Val0 bsl 3) bor Next, Rest2};
                         _ ->
                             {error, {truncated_compact_value, medium}}
                     end;

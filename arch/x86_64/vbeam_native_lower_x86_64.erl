@@ -1610,10 +1610,11 @@ break_all_cycles(Cycles, Moves, UsedCalleeSaved) ->
     CycleMoves = lists:flatmap(fun(Cycle) ->
         break_one_cycle(Cycle, MoveMap)
     end, Cycles),
-    %% Emit non-cycle moves
+    %% Emit non-cycle moves (reversed to match no-cycle path behavior)
     CycleRegs = lists:usort(lists:flatten(Cycles)),
-    NonCycleMoves = [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- Moves,
-                     not lists:member(Dst, CycleRegs)],
+    NonCycleMoves0 = [{Dst, Src} || {Dst, Src} <- Moves,
+                      not lists:member(Dst, CycleRegs)],
+    NonCycleMoves = [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- lists:reverse(NonCycleMoves0)],
     CycleMoves ++ NonCycleMoves.
 
 %% CRITICAL FIX: Break a single cycle by true rotation through temp register r11.

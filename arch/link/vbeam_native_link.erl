@@ -48,9 +48,20 @@ new() ->
     #{symbols => [], relocs => []}.
 
 %% @doc Add a symbol to the linker state.
+%% Detects duplicate symbols with different offsets and logs warnings.
 -spec add_symbol(linker_state(), binary(), non_neg_integer(),
                  text | data | bss, boolean()) -> linker_state().
 add_symbol(#{symbols := Syms} = State, Name, Offset, Section, Exported) ->
+    %% Check for existing symbol with same name but different offset
+    case lists:any(fun(#symbol{name = N, offset = O, section = S}) ->
+                       N =:= Name andalso (O =/= Offset orelse S =/= Section)
+                   end, Syms) of
+        true ->
+            io:format("WARNING: Duplicate symbol ~s at offset ~p in ~p (may overwrite)~n",
+                      [Name, Offset, Section]);
+        false ->
+            ok
+    end,
     Sym = #symbol{
         name = Name,
         offset = Offset,
@@ -130,13 +141,23 @@ resolve_labels(Instructions) ->
 %% ============================================================================
 
 %% @doc Build a map from symbol name to absolute virtual address.
+%% Detects duplicate symbol names with different addresses and logs warnings.
 -spec build_sym_map([#symbol{}], non_neg_integer(), non_neg_integer(),
                     non_neg_integer()) -> #{binary() => non_neg_integer()}.
 build_sym_map(Syms, TextBase, DataBase, BssBase) ->
     lists:foldl(
         fun(#symbol{name = Name, offset = Off, section = Sec}, Acc) ->
             Base = section_base(Sec, TextBase, DataBase, BssBase),
-            Acc#{Name => Base + Off}
+            Addr = Base + Off,
+            case maps:find(Name, Acc) of
+                {ok, ExistingAddr} when ExistingAddr =/= Addr ->
+                    %% Duplicate symbol with different address - log warning
+                    io:format("WARNING: Symbol collision: ~s at 0x~.16B (overwriting 0x~.16B)~n",
+                              [Name, Addr, ExistingAddr]),
+                    Acc#{Name => Addr};
+                _ ->
+                    Acc#{Name => Addr}
+            end
         end,
         #{},
         Syms).

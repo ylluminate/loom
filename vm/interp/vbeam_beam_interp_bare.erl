@@ -116,15 +116,33 @@ split_functions([{func_info, [{atom, _Mod}, {atom, Fun}, {integer, Arity}]} | Re
 
 split_functions([{label, [{integer, L}]} | Rest], Atoms, Imports,
                 FuncAcc, LabelAcc, CurrentFun, CurrentInstrs, PCOffset) ->
-    %% Label - record its position within current function
-    InstrIdx = length_bare(CurrentInstrs),  % Current position in this function
-    NewLabelAcc = case CurrentFun of
-        undefined -> LabelAcc;
-        _ -> LabelAcc#{L => {CurrentFun, InstrIdx}}
-    end,
-    NewInstrs = [{ label, L} | CurrentInstrs],  % Prepend to build in reverse
-    split_functions(Rest, Atoms, Imports, FuncAcc, NewLabelAcc,
-                    CurrentFun, NewInstrs, PCOffset + 1);
+    %% Check if next instruction is func_info - if so, label belongs to NEW function
+    %% and should be processed as the first instruction of that function
+    case Rest of
+        [{func_info, [{atom, _Mod}, {atom, Fun}, {integer, Arity}]} | Rest2] ->
+            %% Label before func_info - belongs to the NEW function
+            %% Finalize previous function
+            NewFuncAcc = case CurrentFun of
+                undefined -> FuncAcc;
+                _ -> FuncAcc#{CurrentFun => reverse_bare(CurrentInstrs)}
+            end,
+            %% Start new function with this label as first instruction
+            NewFun = {Fun, Arity},
+            NewInstrs = [{label, L}, {func_info, _Mod, Fun, Arity}],
+            NewLabelAcc = LabelAcc#{L => {NewFun, 0}},  % Label at position 0
+            split_functions(Rest2, Atoms, Imports, NewFuncAcc, NewLabelAcc,
+                            NewFun, NewInstrs, PCOffset + 2);
+        _ ->
+            %% Normal label within function
+            InstrIdx = length_bare(CurrentInstrs),
+            NewLabelAcc = case CurrentFun of
+                undefined -> LabelAcc;
+                _ -> LabelAcc#{L => {CurrentFun, InstrIdx}}
+            end,
+            NewInstrs = [{label, L} | CurrentInstrs],
+            split_functions(Rest, Atoms, Imports, FuncAcc, NewLabelAcc,
+                            CurrentFun, NewInstrs, PCOffset + 1)
+    end;
 
 split_functions([{return, []} | Rest], Atoms, Imports,
                 FuncAcc, LabelAcc, CurrentFun, CurrentInstrs, PCOffset) ->

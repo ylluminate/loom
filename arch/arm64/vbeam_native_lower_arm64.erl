@@ -69,11 +69,20 @@ emit_epilogue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_ldp_post(x29, x30, sp, FrameSize),
      ?ENC:encode_ret()];
 emit_epilogue(FrameSize, UsedCallee) ->
-    %% Large frame: restore callee-saved, mov sp,x29, then ldp x29,x30,[sp],#16
-    %% The mov sp,x29 restores sp to where FP/LR were saved (top of frame)
+    %% Large frame: restore callee-saved, add FrameDelta back, then ldp x29,x30,[sp],#16
+    %% Must be symmetric with prologue: prologue subtracts FrameDelta, epilogue adds it back
+    FrameDelta = FrameSize - 16,
+    AddInstr = case FrameDelta =< 4095 of
+        true ->
+            [?ENC:encode_add_imm(sp, sp, FrameDelta)];
+        false ->
+            [?ENC:encode_mov_imm64(x16, FrameDelta),
+             ?ENC:encode_add_rrr(sp, sp, x16)]
+    end,
     restore_callee_saved(UsedCallee, 16) ++
-    [?ENC:encode_mov_rr(sp, x29),
-     ?ENC:encode_ldp_post(x29, x30, sp, 16),
+    [?ENC:encode_mov_rr(sp, x29)] ++
+    AddInstr ++
+    [?ENC:encode_ldp_post(x29, x30, sp, 16),
      ?ENC:encode_ret()].
 
 %% Save callee-saved registers to stack frame.
@@ -378,13 +387,14 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
 
         %% CRITICAL FIX (Finding 5): INT64_MIN cannot be negated
         %% Check if value is INT64_MIN, if so add 1 before negating
-        ?ENC:encode_mov_imm64(x21, 0),                %% flag: 0 = normal
+        %% Use x10 as flag register (caller-saved, safe for scratch)
+        ?ENC:encode_mov_imm64(x10, 0),                %% flag: 0 = normal
         ?ENC:encode_mov_imm64(x9, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(x19, x9),
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, <<"__pi_not_min_", Uid/binary>>, -4},
         ?ENC:encode_add_imm(x19, x19, 1),             %% x19 = INT64_MIN + 1
-        ?ENC:encode_mov_imm64(x21, 1),                %% flag: was INT64_MIN
+        ?ENC:encode_mov_imm64(x10, 1),                %% flag: was INT64_MIN
         {label, <<"__pi_not_min_", Uid/binary>>},
 
         %% Negate value
@@ -410,8 +420,8 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, DivLoopLbl, -4},
 
-        %% CRITICAL FIX (Finding 5): If x21=1, fix last digit ('7'→'8')
-        ?ENC:encode_cmp_imm(x21, 0),
+        %% CRITICAL FIX (Finding 5): If x10=1, fix last digit ('7'→'8')
+        ?ENC:encode_cmp_imm(x10, 0),
         ?ENC:encode_b_cond(eq, 0),
         {reloc, arm64_cond_branch19, <<"__pi_no_fixup_", Uid/binary>>, -4},
         %% Last digit is at [sp + x20], increment it
@@ -1627,9 +1637,9 @@ break_each_cycle(Moves, Cycles, NumCalleeSaved) ->
     {CyclicMoves, AcyclicMoves} = lists:partition(
         fun({Dst, _}) -> lists:member(Dst, CycleSet) end, Moves),
 
-    %% Emit acyclic moves first
+    %% Emit acyclic moves first (reversed to match no-cycle path behavior)
     AcyclicCode = [emit_move_arm64(Dst, Src, NumCalleeSaved)
-                   || {Dst, Src} <- AcyclicMoves],
+                   || {Dst, Src} <- lists:reverse(AcyclicMoves)],
 
     %% Break each cycle independently
     CyclicCode = lists:flatmap(fun(Cycle) ->

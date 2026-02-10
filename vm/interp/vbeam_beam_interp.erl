@@ -589,5 +589,6 @@ execute_erlang_bif(io, format, [Format, Args], _Options) ->
     end;
 
 execute_erlang_bif(Mod, Fun, Args, _Options) ->
-    io:format("Warning: BIF ~p:~p/~p not implemented~n", [Mod, Fun, length(Args)]),
-    {ok, undefined}.
+    Arity = length(Args),
+    io:format("Warning: BIF ~p:~p/~p not implemented~n", [Mod, Fun, Arity]),
+    {error, {undef, Mod, Fun, Arity}}.
