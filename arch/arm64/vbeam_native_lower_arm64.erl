@@ -85,6 +85,27 @@ restore_callee_saved([], _Offset) -> [];
 restore_callee_saved([Reg | Rest], Offset) ->
     [?ENC:encode_ldr(Reg, x29, Offset) | restore_callee_saved(Rest, Offset + 8)].
 
+%% LARGE OFFSET HELPERS (Round 25, Finding 4)
+%% ARM64 ldr/str with immediate offset support range 0-32760 (0-4095 * 8).
+%% For larger offsets, materialize in x17 (scratch register) and use register addressing.
+-define(MAX_SCALED_OFFSET, 32760).
+
+emit_stack_load(Dst, Offset) when Offset =< ?MAX_SCALED_OFFSET ->
+    ?ENC:encode_ldr(Dst, x29, Offset);
+emit_stack_load(Dst, Offset) ->
+    %% Large offset: x17 = offset; x17 = x29 + x17; ldr Dst, [x17, #0]
+    [?ENC:encode_mov_imm64(x17, Offset),
+     ?ENC:encode_add_rrr(x17, x29, x17),
+     ?ENC:encode_ldr(Dst, x17, 0)].
+
+emit_stack_store(Src, Offset) when Offset =< ?MAX_SCALED_OFFSET ->
+    ?ENC:encode_str(Src, x29, Offset);
+emit_stack_store(Src, Offset) ->
+    %% Large offset: x17 = offset; x17 = x29 + x17; str Src, [x17, #0]
+    [?ENC:encode_mov_imm64(x17, Offset),
+     ?ENC:encode_add_rrr(x17, x29, x17),
+     ?ENC:encode_str(Src, x17, 0)].
+
 %% Lower body instructions.
 lower_body([], _FnName, _FS, _Fmt, _UC) -> [];
 lower_body([Inst | Rest], FnName, FS, Fmt, UC) ->
@@ -109,16 +130,16 @@ lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _FS, _Fmt, _UC) when is_
 %% MOV with stack slots
 lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _FS, _Fmt, UC) ->
     %% Store to [x29 + offset]
-    %% Offset must account for callee-saved registers after x29+x30
+    %% LARGE OFFSET FIX (Round 25, Finding 4): Handle offsets > 32760
     NumCalleeSaved = length(UC),
     Offset = 16 + NumCalleeSaved * 8 + Slot * 8,
-    [?ENC:encode_str(Src, x29, Offset)];
+    emit_stack_store(Src, Offset);
 lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _FS, _Fmt, UC) ->
     %% Load from [x29 + offset]
-    %% Offset must account for callee-saved registers after x29+x30
+    %% LARGE OFFSET FIX (Round 25, Finding 4): Handle offsets > 32760
     NumCalleeSaved = length(UC),
     Offset = 16 + NumCalleeSaved * 8 + Slot * 8,
-    [?ENC:encode_ldr(Dst, x29, Offset)];
+    emit_stack_load(Dst, Offset);
 
 %% LOAD from memory
 lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName, _FS, _Fmt, _UC) ->
@@ -1599,5 +1620,6 @@ emit_move_arm64(ArgReg, {preg, Reg}, _NumCalleeSaved) ->
 emit_move_arm64(ArgReg, {imm, Val}, _NumCalleeSaved) ->
     ?ENC:encode_mov_imm64(ArgReg, Val);
 emit_move_arm64(ArgReg, {stack, Slot}, NumCalleeSaved) ->
+    %% LARGE OFFSET FIX (Round 25, Finding 4): Use helper for large offsets
     Offset = 16 + NumCalleeSaved * 8 + Slot * 8,
-    ?ENC:encode_ldr(ArgReg, x29, Offset).
+    emit_stack_load(ArgReg, Offset).
