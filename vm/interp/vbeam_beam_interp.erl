@@ -180,15 +180,17 @@ find_function_label(#proc{exports = Exports, atoms = Atoms}, FunName, Arity) ->
     end.
 
 %% Convert atom binaries from parser to proper atoms
-%% Safely creates atoms only if they don't exceed the atom table limit
+%% FINDING R42-6 FIX: Use binary_to_existing_atom to prevent atom table exhaustion
+%% Only convert atoms that already exist in the VM - prevents DoS via atom flooding
 convert_atoms_to_atoms(AtomBinaries) when is_list(AtomBinaries) ->
     lists:map(fun(Bin) when is_binary(Bin) ->
-        %% Convert binary to atom safely
+        %% Try to convert using existing atom only
         try
-            binary_to_atom(Bin, utf8)
+            binary_to_existing_atom(Bin, utf8)
         catch
-            error:_ ->
-                %% If conversion fails, keep as binary
+            error:badarg ->
+                %% Atom doesn't exist - fallback to keeping as binary
+                %% This prevents exhaustion while allowing non-critical atoms
                 Bin
         end;
         (Other) -> Other

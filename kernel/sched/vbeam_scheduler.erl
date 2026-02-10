@@ -503,6 +503,7 @@ handle_cast(_Msg, State) ->
 %% Codex R34 Finding #2: Authenticate IRQ messages with capability token
 %% IRQ messages must include the unforgeable token generated at init.
 %% This prevents any process from spoofing timer ticks.
+%% FINDING R42-7 FIX: Acknowledge IRQ after processing to prevent mailbox buildup
 handle_info({irq, ?IRQ_TIMER, _Timestamp, ProvidedToken},
             #state{irq_capability_token = ExpectedToken} = State) ->
     %% Verify capability token
@@ -510,6 +511,8 @@ handle_info({irq, ?IRQ_TIMER, _Timestamp, ProvidedToken},
         ExpectedToken ->
             %% Token matches - process the tick
             NewState = tick(State),
+            %% FINDING R42-7 FIX: Acknowledge IRQ receipt
+            vbeam_irq_bridge:ack_irq(?IRQ_TIMER),
             {noreply, NewState};
         _ ->
             %% Invalid token - reject the message
@@ -517,10 +520,23 @@ handle_info({irq, ?IRQ_TIMER, _Timestamp, ProvidedToken},
             {noreply, State}
     end;
 
-%% Legacy 3-tuple format (tests, internal use) - accept in bare-metal context
-handle_info({irq, ?IRQ_TIMER, _Timestamp}, State) ->
-    NewState = tick(State),
-    {noreply, NewState};
+%% Legacy 3-tuple format (tests, internal use)
+%% FINDING R42-8 FIX: Gate legacy handler behind config or validate sender
+handle_info({irq, ?IRQ_TIMER, _Timestamp}, #state{config = Config, irq_bridge_pid = IrqBridgePid} = State) ->
+    %% Check if legacy format is allowed AND sender is authorized IRQ bridge
+    AllowLegacy = maps:get(allow_legacy_irq, Config, false),
+    %% Note: self() receives the message, we can't directly validate sender in handle_info
+    %% Instead, only allow legacy format if explicitly enabled in config
+    case AllowLegacy of
+        true ->
+            NewState = tick(State),
+            %% FINDING R42-7 FIX: Acknowledge IRQ after processing
+            vbeam_irq_bridge:ack_irq(?IRQ_TIMER),
+            {noreply, NewState};
+        false ->
+            %% Reject legacy format when not explicitly enabled - prevents auth bypass
+            {noreply, State}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.

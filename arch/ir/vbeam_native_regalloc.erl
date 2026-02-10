@@ -437,13 +437,13 @@ reassign_params_for_calls(ParamAssign, Intervals, CallPositions,
 reassign_params([], _FreeCallee, Assign) -> Assign;
 reassign_params([{Vreg, _OldReg} | Rest], [NewReg | FreeRest], Assign) ->
     reassign_params(Rest, FreeRest, maps:put(Vreg, NewReg, Assign));
-reassign_params([{Vreg, OldReg} | Rest], [], Assign) ->
-    %% CRITICAL FIX (Finding 3): When callee-saved regs are exhausted, don't drop
-    %% the param assignment silently. That causes params to get spilled to
-    %% uninitialized stack slots. Instead, keep the original caller-saved assignment
-    %% and let linear scan handle the conflict (will spill and generate entry copy).
-    %% This preserves param liveness from function entry.
-    reassign_params(Rest, [], maps:put(Vreg, OldReg, Assign)).
+reassign_params([{Vreg, _OldReg} | Rest], [], Assign) ->
+    %% CRITICAL FIX (Round 42, Finding 3): When callee-saved regs are exhausted,
+    %% REMOVE the param from ParamAssign so it re-enters linear scan.
+    %% Linear scan will allocate it (or spill it), and insert_param_copies will
+    %% generate the store_spill from the ABI register to the stack slot.
+    %% This prevents clobbering on calls.
+    reassign_params(Rest, [], maps:remove(Vreg, Assign)).
 
 %% Insert MOV instructions at function entry to copy parameter values
 %% from their original arg registers to their reassigned callee-saved registers.
@@ -630,14 +630,22 @@ rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
         0 ->
             %% No spills - just rewrite and return
             [rewrite_inst_operands(Inst, Assignments, undefined)];
-        N when N > 2 ->
-            error({too_many_spills_in_instruction, Inst, N,
-                   "Instruction has more than 2 spilled operands - not yet supported"});
         _ ->
-            %% 1 or 2 spills - assign ONE scratch per vreg
-            {ScratchRegs, _} = case Target of
-                x86_64 -> {[r11, r10], r11};
-                arm64 -> {[x15, x14], x15}
+            %% CRITICAL FIX (Round 42, Finding 5): Handle N spilled operands.
+            %% Use full scratch register pool (excludes registers already reserved
+            %% by available_regs, which already removed x14/x15 and r10/r11).
+            %% For instructions with >N scratches, we'd need staged rewriting,
+            %% but in practice no V IR instruction has >7 operands, and we have
+            %% 7 scratches on ARM64 and 7 on x86_64.
+            ScratchRegs = case Target of
+                x86_64 -> [r11, r10, rax, rcx, rdx, rsi, rdi];
+                arm64 -> [x15, x14, x9, x10, x11, x12, x13]
+            end,
+            case NumSpills > length(ScratchRegs) of
+                true ->
+                    error({too_many_spills_in_instruction, Inst, NumSpills,
+                           "Instruction has more spilled operands than available scratches"});
+                false -> ok
             end,
             %% Build vreg→slot map (use LoadsNeeded first, fall back to StoresNeeded)
             VregSlotMap = maps:from_list(LoadsNeeded ++ StoresNeeded),

@@ -43,10 +43,9 @@ emit_prologue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_mov_rr(x29, sp)] ++
     save_callee_saved(UsedCallee, 16);
 emit_prologue(FrameSize, UsedCallee) ->
-    %% CRITICAL FIX (Round 39, Finding 1): Reserve 16 bytes at TOP for FP/LR.
-    %% Large frame: sub sp,#FrameSize then stp x29,x30,[sp,#(FrameSize-16)] then mov x29,sp
-    %% This ensures FP/LR are at the top [sp + FrameSize - 16], and spills start from sp.
-    %% Spill offsets (computed as 16 + NumCalleeSaved*8 + Slot*8) will not reach FrameSize-16.
+    %% CRITICAL FIX (Round 42, Finding 1): Place FP/LR at frame BASE, not top.
+    %% Large frame: sub sp,#FrameSize then stp x29,x30,[sp,#0] then mov x29,sp
+    %% This places FP/LR at [sp+0]/[sp+8], and spills at 16+ won't overlap.
     SubInstr = case FrameSize =< 4095 of
         true ->
             [?ENC:encode_sub_imm(sp, sp, FrameSize)];
@@ -54,18 +53,8 @@ emit_prologue(FrameSize, UsedCallee) ->
             [?ENC:encode_mov_imm64(x16, FrameSize),
              ?ENC:encode_sub_rrr(sp, sp, x16)]
     end,
-    StpOffset = FrameSize - 16,
-    %% STP immediate offset range is -512 to 504 (signed 7-bit scaled by 8)
-    %% For offsets beyond this range, compute address in x17
-    StoreInstr = case StpOffset =< 32760 of
-        true ->
-            [?ENC:encode_stp(x29, x30, sp, StpOffset)];
-        false ->
-            %% Offset too large, compute address in x17
-            [?ENC:encode_mov_imm64(x17, StpOffset),
-             ?ENC:encode_add_rrr(x17, sp, x17),
-             ?ENC:encode_stp(x29, x30, x17, 0)]
-    end,
+    %% Store FP/LR at [sp, #0] (base of frame)
+    StoreInstr = [?ENC:encode_stp(x29, x30, sp, 0)],
     SubInstr ++
     StoreInstr ++
     [?ENC:encode_mov_rr(x29, sp)] ++
@@ -79,21 +68,11 @@ emit_epilogue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_ldp_post(x29, x30, sp, FrameSize),
      ?ENC:encode_ret()];
 emit_epilogue(FrameSize, UsedCallee) ->
-    %% CRITICAL FIX (Round 39, Finding 1): Symmetric with new prologue.
-    %% Large frame: restore callee-saved, mov sp,x29, ldp x29,x30,[sp,#(FrameSize-16)],
+    %% CRITICAL FIX (Round 42, Finding 1): Symmetric with new prologue.
+    %% Large frame: restore callee-saved, mov sp,x29, ldp x29,x30,[sp,#0],
     %% then add sp,#FrameSize, ret.
-    LdpOffset = FrameSize - 16,
-    %% LDP immediate offset range is -512 to 504 (signed 7-bit scaled by 8)
-    %% For offsets beyond this range, compute address in x17
-    LoadInstr = case LdpOffset =< 32760 of
-        true ->
-            [?ENC:encode_ldp(x29, x30, sp, LdpOffset)];
-        false ->
-            %% Offset too large, compute address in x17
-            [?ENC:encode_mov_imm64(x17, LdpOffset),
-             ?ENC:encode_add_rrr(x17, sp, x17),
-             ?ENC:encode_ldp(x29, x30, x17, 0)]
-    end,
+    %% Load FP/LR from [sp, #0] (base of frame)
+    LoadInstr = [?ENC:encode_ldp(x29, x30, sp, 0)],
     AddInstr = case FrameSize =< 4095 of
         true ->
             [?ENC:encode_add_imm(sp, sp, FrameSize)];

@@ -602,7 +602,7 @@ handle_local_call(Label, State, IsTailCall) ->
     case maps:get(Label, Labels, undefined) of
         undefined ->
             {error, {label_not_found, Label}};
-        {TargetFun, _InstrIndex} ->
+        {TargetFun, InstrIndex} ->
             Module = maps:get(module, State),
             case get_function_code(Module, element(1, TargetFun), element(2, TargetFun)) of
                 {ok, TargetInstrs} ->
@@ -613,11 +613,12 @@ handle_local_call(Label, State, IsTailCall) ->
                             PC = maps:get(pc, State),
                             [{CurrentFun, PC + 1} | maps:get(stack, State)]
                     end,
-                    %% FIXED: Don't clear Y stack on tail call - frame already deallocated if needed
+                    %% CRITICAL FIX (Round 42, Finding 4): Use InstrIndex from label.
+                    %% Labels can point to non-zero instruction offsets within a function.
                     NewState = State#{
                         current_fun => TargetFun,
                         current_instrs => TargetInstrs,
-                        pc => 0,
+                        pc => InstrIndex,
                         stack => NewStack
                     },
                     {continue, NewState};

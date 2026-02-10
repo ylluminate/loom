@@ -204,14 +204,16 @@ execute_instr({call, _Arity, {f, Label}}, Proc, _Options) ->
     case maps:get(Label, Proc#proc.labels, undefined) of
         undefined ->
             {error, {label_not_found, Label}};
-        {TargetFun, _InstrIndex} ->
+        {TargetFun, InstrIndex} ->
             TargetInstrs = maps:get(TargetFun, Proc#proc.code_map),
             %% Push return address
             NewStack = [{Proc#proc.module, Proc#proc.current_fun, Proc#proc.pc + 1} | Proc#proc.stack],
+            %% CRITICAL FIX (Round 42, Finding 4): Use InstrIndex from label, not 0.
+            %% Labels can point to non-zero instruction offsets within a function.
             {continue, Proc#proc{
                 current_fun = TargetFun,
                 current_instrs = TargetInstrs,
-                pc = 0,
+                pc = InstrIndex,
                 stack = NewStack
             }}
     end;
@@ -239,12 +241,13 @@ execute_instr({call_only, _Arity, {f, Label}}, Proc, _Options) ->
     case maps:get(Label, Proc#proc.labels, undefined) of
         undefined ->
             {error, {label_not_found, Label}};
-        {TargetFun, _InstrIndex} ->
+        {TargetFun, InstrIndex} ->
             TargetInstrs = maps:get(TargetFun, Proc#proc.code_map),
+            %% CRITICAL FIX (Round 42, Finding 4): Use InstrIndex from label.
             {continue, Proc#proc{
                 current_fun = TargetFun,
                 current_instrs = TargetInstrs,
-                pc = 0
+                pc = InstrIndex
             }}
     end;
 

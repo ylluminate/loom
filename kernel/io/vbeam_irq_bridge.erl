@@ -159,7 +159,11 @@ tick(ServerRef) ->
 %% FINDING 10 FIX: Use gen_server:call to capture caller PID for authentication
 -spec ack_irq(non_neg_integer()) -> ok.
 ack_irq(IrqNum) when is_integer(IrqNum), IrqNum >= 0 ->
-    gen_server:call(?MODULE, {ack_irq, IrqNum}).
+    %% Best-effort: noop if IRQ bridge isn't running (e.g. in scheduler-only tests)
+    case whereis(?MODULE) of
+        undefined -> ok;
+        _Pid -> gen_server:call(?MODULE, {ack_irq, IrqNum})
+    end.
 
 %% @doc Generate x86_64 machine code for ISR stub that writes to ring buffer.
 %%
@@ -222,14 +226,19 @@ isr_ring_buffer_write(IrqNum) ->
         <<16#4B, 16#89, 16#54, 16#03, 16#08>>,                 % mov [r11+r8+8], rdx (use r11 base)
 
         %% Increment tail
-        %% NOTE: This ISR code trusts BEAM-side tick to drain the ring buffer fast enough.
-        %% On overflow (tail - head >= size), the oldest entry is lost. The Erlang-side
-        %% ring_push/2 already handles overflow by advancing head. The ISR does not check
-        %% for fullness or advance head to avoid complexity in the interrupt handler.
-        %% Risk: If tick does not run frequently enough, IRQs may be dropped.
-        <<16#49, 16#8B, 16#53, 16#08>>,                        % mov rdx, [r11+8]
+        %% FINDING R42-9 FIX: Advance head on overflow to maintain ring invariants
+        %% Check if tail - head >= size (overflow condition)
+        <<16#49, 16#8B, 16#43, 16#00>>,                        % mov rax, [r11+0] (head)
+        <<16#49, 16#8B, 16#53, 16#08>>,                        % mov rdx, [r11+8] (tail)
+        <<16#48, 16#89, 16#D1>>,                               % mov rcx, rdx (copy tail)
+        <<16#48, 16#29, 16#C1>>,                               % sub rcx, rax (tail - head)
+        <<16#49, 16#3B, 16#4B, 16#10>>,                        % cmp rcx, [r11+16] (compare to size)
+        <<16#7C, 16#05>>,                                       % jl +5 (skip head increment if not full)
+        <<16#48, 16#FF, 16#C0>>,                               % inc rax (advance head)
+        <<16#49, 16#89, 16#43, 16#00>>,                        % mov [r11+0], rax (write head)
+        %% Now increment tail
         <<16#48, 16#FF, 16#C2>>,                               % inc rdx
-        <<16#49, 16#89, 16#53, 16#08>>,                        % mov [r11+8], rdx (use r11 base)
+        <<16#49, 16#89, 16#53, 16#08>>,                        % mov [r11+8], rdx (write tail)
 
         %% Send EOI to LAPIC (0xFEE000B0)
         <<16#48, 16#B8, 16#B0, 16#00, 16#E0, 16#FE, 16#00, 16#00, 16#00, 16#00>>,  % mov rax, 0xFEE000B0

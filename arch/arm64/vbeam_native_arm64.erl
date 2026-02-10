@@ -52,6 +52,8 @@
     encode_ldrb/3,
     encode_strb/3,
     encode_ldr_literal/2,
+    encode_stp/4,
+    encode_ldp/4,
     encode_stp_pre/4,
     encode_ldp_post/4,
     encode_adr/2,
@@ -623,6 +625,31 @@ encode_ldr_literal(Rt, Offset) when Offset rem 4 =:= 0 ->
         bor reg_code(Rt),
     emit(Inst).
 
+%% @doc STP Xt, Xt2, [Xn, #offset] — store pair, signed offset (no writeback).
+%% Encoding: [opc:2][101][00][10][L:1][imm7:7][Rt2:5][Rn:5][Rt:5]
+%% 64-bit: opc=10, L=0 (store). Offset mode: bits 24:23 = 10.
+%% Offset is signed, scaled by 8: imm7 = offset/8.
+-spec encode_stp(atom(), atom(), atom(), integer()) -> binary().
+encode_stp(Rt, Rt2, Rn, Offset) when Offset rem 8 =:= 0 ->
+    ScaledOffset = Offset div 8,
+    %% Validate signed 7-bit range: [-64, 63]
+    %% In bytes (scaled by 8): [-512, 504]
+    case (ScaledOffset >= -(1 bsl 6)) andalso (ScaledOffset < (1 bsl 6)) of
+        true -> ok;
+        false -> error({arm64_stp_imm7_overflow, Offset})
+    end,
+    Imm7 = ScaledOffset band 16#7F,
+    Inst = (2#10 bsl 30)                     %% opc=10 (64-bit)
+        bor (2#101 bsl 27)                   %% fixed
+        bor (2#00 bsl 25)                    %% fixed
+        bor (2#10 bsl 23)                    %% signed offset mode (no writeback)
+        bor (2#0 bsl 22)                     %% L=0 (store)
+        bor (Imm7 bsl 15)
+        bor (reg_code(Rt2) bsl 10)
+        bor (reg_code(Rn) bsl 5)
+        bor reg_code(Rt),
+    emit(Inst).
+
 %% @doc STP Xt, Xt2, [Xn, #offset]! — store pair, pre-index.
 %% Encoding: [opc:2][101][00][11][L:1][imm7:7][Rt2:5][Rn:5][Rt:5]
 %% 64-bit: opc=10, L=0 (store). Pre-index variant: bits 24:23 = 11.
@@ -642,6 +669,30 @@ encode_stp_pre(Rt, Rt2, Rn, Offset) when Offset rem 8 =:= 0 ->
         bor (2#00 bsl 25)                    %% fixed
         bor (2#11 bsl 23)                    %% pre-index
         bor (2#0 bsl 22)                     %% L=0 (store)
+        bor (Imm7 bsl 15)
+        bor (reg_code(Rt2) bsl 10)
+        bor (reg_code(Rn) bsl 5)
+        bor reg_code(Rt),
+    emit(Inst).
+
+%% @doc LDP Xt, Xt2, [Xn, #offset] — load pair, signed offset (no writeback).
+%% Encoding: [opc:2][101][00][10][L:1][imm7:7][Rt2:5][Rn:5][Rt:5]
+%% 64-bit: opc=10, L=1 (load). Offset mode: bits 24:23 = 10.
+-spec encode_ldp(atom(), atom(), atom(), integer()) -> binary().
+encode_ldp(Rt, Rt2, Rn, Offset) when Offset rem 8 =:= 0 ->
+    ScaledOffset = Offset div 8,
+    %% Validate signed 7-bit range: [-64, 63]
+    %% In bytes (scaled by 8): [-512, 504]
+    case (ScaledOffset >= -(1 bsl 6)) andalso (ScaledOffset < (1 bsl 6)) of
+        true -> ok;
+        false -> error({arm64_ldp_imm7_overflow, Offset})
+    end,
+    Imm7 = ScaledOffset band 16#7F,
+    Inst = (2#10 bsl 30)                     %% opc=10 (64-bit)
+        bor (2#101 bsl 27)
+        bor (2#00 bsl 25)
+        bor (2#10 bsl 23)                    %% signed offset mode (no writeback)
+        bor (2#1 bsl 22)                     %% L=1 (load)
         bor (Imm7 bsl 15)
         bor (reg_code(Rt2) bsl 10)
         bor (reg_code(Rn) bsl 5)

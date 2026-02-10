@@ -188,7 +188,7 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
         %% Build section address map by section index (integer), not full map
         %% We need to assign addresses to each allocated section
         %% BUG 2 FIX: Use per-section sh_addralign instead of forcing 16-byte alignment
-        {SectionAddrs, _NextAddr} = lists:foldl(
+        {SectionAddrs, NextAddr} = lists:foldl(
             fun(Section, {AddrMap, Addr}) ->
                 SectionIdx = maps:get(section_index, Section),
                 case maps:get(flags, Section, 0) band ?SHF_ALLOC of
@@ -209,10 +209,25 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
             Sections
         ),
 
-        %% Apply relocations to each section
+        %% FINDING R42-10 FIX: Allocate COMMON symbols (uninitialized globals)
+        %% Build common pool after all sections, assign aligned addresses
+        {CommonAddrs, _FinalAddr} = lists:foldl(
+            fun(#{shndx := ?SHN_COMMON, name := Name, size := Size, value := Alignment}, {AddrMap, Addr}) ->
+                %% Alignment is stored in 'value' field for COMMON symbols
+                AlignVal = max(1, min(4096, Alignment)),
+                AlignedAddr = align(Addr, AlignVal),
+                {AddrMap#{Name => AlignedAddr}, AlignedAddr + Size};
+               (_, AccIn) ->
+                AccIn
+            end,
+            {#{}, NextAddr},
+            Symbols
+        ),
+
+        %% Apply relocations to each section (pass CommonAddrs)
         RelocatedSections = lists:map(
             fun(Section) ->
-                apply_section_relocations(Section, Relocs, Symbols, Sections, SectionAddrs)
+                apply_section_relocations(Section, Relocs, Symbols, Sections, SectionAddrs, CommonAddrs)
             end,
             Sections
         ),
@@ -297,13 +312,40 @@ load_impl(FilePath, SymbolTable) ->
                                 {ok, Code} ->
                                     %% BUG 1 FIX: Pass SectionAddrs to extract functions
                                     %% BUG 2 FIX: Wrap find_init_addr in try/catch
-                                    case catch find_init_addr(ResolvedElf, SectionAddrs) of
+                                    %% FINDING R42-10 FIX: Need to reconstruct CommonAddrs here (duplicated logic)
+                                    #{symbols := SymsForCommon} = ResolvedElf,
+                                    {CommonAddrsForHelpers, _} = lists:foldl(
+                                        fun(#{shndx := ?SHN_COMMON, name := N, size := Sz, value := Al}, {AM, A}) ->
+                                            AlV = max(1, min(4096, Al)),
+                                            AldA = align(A, AlV),
+                                            {AM#{N => AldA}, AldA + Sz};
+                                           (_, AccIn) -> AccIn
+                                        end,
+                                        {#{}, element(2, lists:foldl(
+                                            fun(S, {_, A}) ->
+                                                SI = maps:get(section_index, S),
+                                                case maps:get(flags, S, 0) band ?SHF_ALLOC of
+                                                    0 -> {#{}, A};
+                                                    _ ->
+                                                        Sz = maps:get(size, S, 0),
+                                                        AA = maps:get(addralign, S, 1),
+                                                        AV = max(1, min(4096, AA)),
+                                                        AD = align(A, AV),
+                                                        {#{}, AD + Sz}
+                                                end
+                                            end,
+                                            {#{}, BaseAddr},
+                                            Sections
+                                        ))},
+                                        SymsForCommon
+                                    ),
+                                    case catch find_init_addr(ResolvedElf, SectionAddrs, CommonAddrsForHelpers) of
                                         {'EXIT', {no_init_symbol, _}} ->
                                             {error, no_init_symbol};
                                         {'EXIT', Reason} ->
                                             {error, {init_addr_failed, Reason}};
                                         InitAddr when is_integer(InitAddr) ->
-                                            Exports = extract_exports(ResolvedElf, SectionAddrs),
+                                            Exports = extract_exports(ResolvedElf, SectionAddrs, CommonAddrsForHelpers),
                                             Module = #{
                                                 code => Code,
                                                 data => <<>>,
@@ -746,7 +788,7 @@ resolve_symbol(Sym, _SymbolTable) ->
 %% Relocation Application
 %% ============================================================================
 
-apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) ->
+apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs, CommonAddrs) ->
     SectionIdx = maps:get(section_index, Section),
     %% FINDING 8 FIX: Look up relocations by section index instead of name
     case maps:find(SectionIdx, Relocs) of
@@ -756,7 +798,7 @@ apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) -
 
             RelocatedData = lists:foldl(
                 fun(Reloc, Acc) ->
-                    apply_relocation(Reloc, Acc, Symbols, AllSections, SectionAddrs, SectionAddr)
+                    apply_relocation(Reloc, Acc, Symbols, AllSections, SectionAddrs, CommonAddrs, SectionAddr)
                 end,
                 Data,
                 RelocList
@@ -768,7 +810,7 @@ apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) -
     end.
 
 apply_relocation(Reloc = #{offset := Offset, type := Type, symbol := SymIdx, addend := Addend},
-                 Data, Symbols, AllSections, SectionAddrs, CurrentSectionAddr) ->
+                 Data, Symbols, AllSections, SectionAddrs, CommonAddrs, CurrentSectionAddr) ->
     %% BUG 9 FIX: Convert to tuple for O(1) access
     SymbolsTuple = list_to_tuple(Symbols),
 
@@ -781,7 +823,7 @@ apply_relocation(Reloc = #{offset := Offset, type := Type, symbol := SymIdx, add
             error({invalid_symbol_index, SymIdx, max, TupleSize - 1})
     end,
 
-    SymAddr = calculate_symbol_address(Sym, AllSections, SectionAddrs),
+    SymAddr = calculate_symbol_address(Sym, AllSections, SectionAddrs, CommonAddrs),
 
     %% CODEX R38 FINDING #1 FIX: Use format field to determine addend source
     %% RELA format has explicit addend (use as-is, even if 0)
@@ -916,25 +958,27 @@ reloc_width(r_x86_64_32s) -> 32;
 reloc_width(r_x86_64_none) -> 0.
 
 %% Calculate effective symbol address for relocation
-calculate_symbol_address(#{resolved_addr := ResolvedAddr, value := Value}, _AllSections, _SectionAddrs)
+calculate_symbol_address(#{resolved_addr := ResolvedAddr, value := Value}, _AllSections, _SectionAddrs, _CommonAddrs)
   when ResolvedAddr =/= undefined ->
     %% External symbol - use resolved address
     ResolvedAddr + Value;
-calculate_symbol_address(#{shndx := ?SHN_UNDEF, bind := weak}, _AllSections, _SectionAddrs) ->
+calculate_symbol_address(#{shndx := ?SHN_UNDEF, bind := weak}, _AllSections, _SectionAddrs, _CommonAddrs) ->
     %% BUG 8 FIX: Weak undefined symbols can be resolved to 0
     0;
-calculate_symbol_address(#{shndx := ?SHN_UNDEF, name := Name}, _AllSections, _SectionAddrs) ->
+calculate_symbol_address(#{shndx := ?SHN_UNDEF, name := Name}, _AllSections, _SectionAddrs, _CommonAddrs) ->
     %% BUG 8 FIX: Non-weak unresolved symbols should error
     error({unresolved_symbol, Name});
-calculate_symbol_address(#{shndx := ?SHN_ABS, value := Value}, _AllSections, _SectionAddrs) ->
+calculate_symbol_address(#{shndx := ?SHN_ABS, value := Value}, _AllSections, _SectionAddrs, _CommonAddrs) ->
     %% Absolute symbol
     Value;
-calculate_symbol_address(#{shndx := ?SHN_COMMON, name := _Name}, _AllSections, _SectionAddrs) ->
-    %% FINDING 7 FIX: SHN_COMMON symbols (uninitialized globals)
-    %% Treat as BSS-like, resolve to 0 (or skip relocation)
-    %% In a full implementation, these would be allocated in a common pool
-    0;
-calculate_symbol_address(#{shndx := Shndx, value := Value}, _AllSections, SectionAddrs) when Shndx > 0 ->
+calculate_symbol_address(#{shndx := ?SHN_COMMON, name := Name}, _AllSections, _SectionAddrs, CommonAddrs) ->
+    %% FINDING R42-10 FIX: SHN_COMMON symbols (uninitialized globals)
+    %% Resolve using common pool allocation
+    case maps:find(Name, CommonAddrs) of
+        {ok, Addr} -> Addr;
+        error -> error({common_symbol_not_allocated, Name})
+    end;
+calculate_symbol_address(#{shndx := Shndx, value := Value}, _AllSections, SectionAddrs, _CommonAddrs) when Shndx > 0 ->
     %% Section-relative symbol - look up the section address by Shndx (which IS the section_index)
     case maps:find(Shndx, SectionAddrs) of
         {ok, SectionAddr} ->
@@ -942,7 +986,7 @@ calculate_symbol_address(#{shndx := Shndx, value := Value}, _AllSections, Sectio
         error ->
             error({missing_section_address, Shndx})
     end;
-calculate_symbol_address(_Sym, _AllSections, _SectionAddrs) ->
+calculate_symbol_address(_Sym, _AllSections, _SectionAddrs, _CommonAddrs) ->
     0.
 
 %% ============================================================================
@@ -957,7 +1001,8 @@ safe_nth(N, List) ->
 
 %% BUG 1 FIX: Use SectionAddrs to compute symbol addresses correctly
 %% FINDING 4 FIX: Require symbols to be defined (shndx > 0) and preferably func type
-find_init_addr(#{symbols := Symbols, sections := _Sections}, SectionAddrs) ->
+%% FINDING R42-10 FIX: Pass CommonAddrs for COMMON symbol resolution
+find_init_addr(#{symbols := Symbols, sections := _Sections}, SectionAddrs, CommonAddrs) ->
     %% Filter to only defined symbols (shndx > 0)
     DefinedSymbols = [S || S = #{shndx := Shndx} <- Symbols, Shndx > 0],
 
@@ -970,7 +1015,7 @@ find_init_addr(#{symbols := Symbols, sections := _Sections}, SectionAddrs) ->
         DefinedSymbols
     ) of
         {value, Sym} ->
-            calculate_symbol_address(Sym, [], SectionAddrs);
+            calculate_symbol_address(Sym, [], SectionAddrs, CommonAddrs);
         false ->
             %% Look for _start or main explicitly
             case lists:search(
@@ -982,17 +1027,18 @@ find_init_addr(#{symbols := Symbols, sections := _Sections}, SectionAddrs) ->
                 DefinedSymbols
             ) of
                 {value, Sym} ->
-                    calculate_symbol_address(Sym, [], SectionAddrs);
+                    calculate_symbol_address(Sym, [], SectionAddrs, CommonAddrs);
                 false ->
                     error(no_init_symbol)
             end
     end.
 
 %% BUG 1 FIX: Use SectionAddrs to compute symbol addresses correctly
-extract_exports(#{symbols := Symbols}, SectionAddrs) ->
+%% FINDING R42-10 FIX: Pass CommonAddrs for COMMON symbol resolution
+extract_exports(#{symbols := Symbols}, SectionAddrs, CommonAddrs) ->
     lists:foldl(
         fun(#{name := Name, bind := global, shndx := Shndx} = Sym, Acc) when Shndx > 0 ->
-            Addr = calculate_symbol_address(Sym, [], SectionAddrs),
+            Addr = calculate_symbol_address(Sym, [], SectionAddrs, CommonAddrs),
             Acc#{Name => Addr};
            (_, Acc) ->
             Acc

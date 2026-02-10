@@ -5,7 +5,7 @@
 %% Wrapper for make test-kernel compatibility
 test() -> run_all().
 
--define(CONFIG, #{time_slice => 1000, max_processes => 256}).
+-define(CONFIG, #{time_slice => 1000, max_processes => 256, allow_legacy_irq => true}).
 
 %%% ==========================================================================
 %%% Test Runner
