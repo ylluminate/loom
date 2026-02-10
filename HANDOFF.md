@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated (UTC): 2026-02-10T01:40:00Z
+Last updated (UTC): 2026-02-10T02:50:00Z
 
 ## Objective (1 sentence)
 
@@ -9,19 +9,22 @@ Loom OS — a research operating system where BEAM runs on bare metal, with UEFI
 ## Current status
 
 ### What Just Happened
-- **Hackathon prep complete** (2026-02-09): Full pipeline demo working, all three tracks done.
-- **JIT wired to standalone parser** — removed beam_lib OTP dependency, JIT now uses vbeam_beam_standalone.
-- **Integration test 3/3 passing** — standalone parse + bare-metal interpret proven end-to-end.
-- **Demo pipeline escript** — `tools/demo_pipeline.escript` showcases full pipeline in one command.
-- **All scripts are pure BEAM** — zero bash/python in tools/.
+- **Full Codex quality audit + remediation** (2026-02-10): All issues found by Codex reviews resolved.
+- **2 CRITICAL kernel bugs fixed**: GDT exception stub jump math + IRQ bridge rdx clobber.
+- **`make check`: 33/33 passed** (was 21/33 — all 12 warning-failing modules fixed).
+- **Test harness normalized**: All test modules now export `test/0` for Makefile compatibility.
+- **ELF loader crash path fixed**: Added Width=0 clause for R_X86_64_NONE relocations.
+- **Naming consistency**: `vbeam_kapi_symbols` → `vbeam_kpi_symbols` (matches `compat/kpi/` dir).
+- **`-behaviour(gen_server)` added** to `vbeam_io_server.erl`.
 
 ### What Works
-- `make compile` → 36/36 modules OK (was 33, added test + demo support)
+- `make compile` → 33/33 source modules + 14 test modules OK
+- `make check` → **33/33 passed** (strict `-Wall -Werror`)
+- `make test` → **ALL PASS** (9 kernel + 3 VM test suites, 90+ assertions)
 - `make nucleus` → 5120 bytes
 - `./tools/demo_pipeline.escript` → full pipeline demo (parse → interpret → JIT → nucleus)
 - Integration test: standalone parse + bare-metal interpret end-to-end
 - `make help` → shows all targets with descriptions
-- `make test-kernel` / `make test-vm` → run subsystem tests
 
 ### Directory Structure
 ```
@@ -54,4 +57,4 @@ tools/                            Scripts and utilities
 
 ## Blockers
 
-- None — hackathon-ready, all pipelines verified.
+- None — hackathon-ready, all pipelines verified, full quality audit clean.
