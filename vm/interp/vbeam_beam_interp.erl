@@ -130,6 +130,9 @@ build_label_map(Code, PC, Acc) ->
         {return, NextPC} ->
             %% FINDING R39-1 FIX: Handle 2-tuple return
             build_label_map(Code, NextPC, Acc);
+        {func_info, _Module, _Function, _Arity, NextPC} ->
+            %% FINDING R41-1 FIX: Handle 5-tuple func_info instruction
+            build_label_map(Code, NextPC, Acc);
         {_, _, NextPC} ->
             build_label_map(Code, NextPC, Acc);
         done ->
@@ -386,8 +389,8 @@ decode_opcode(64, Rest, PC) ->
             {error, Reason}
     end;
 
-decode_opcode(10, Rest, PC) ->
-    %% allocate
+decode_opcode(12, Rest, PC) ->
+    %% allocate (FINDING R41-3 FIX: Correct opcode number from 10 to 12)
     case decode_int(Rest, PC) of
         {StackNeed, Rest2, PC2} ->
             case decode_int(Rest2, PC2) of
@@ -401,7 +404,7 @@ decode_opcode(10, Rest, PC) ->
     end;
 
 decode_opcode(18, Rest, PC) ->
-    %% deallocate
+    %% deallocate (opcode 18 is correct)
     case decode_int(Rest, PC) of
         {N, _Rest2, NextPC} ->
             {deallocate, N, NextPC};
@@ -409,8 +412,8 @@ decode_opcode(18, Rest, PC) ->
             {error, Reason}
     end;
 
-decode_opcode(59, Rest, PC) ->
-    %% test_heap
+decode_opcode(16, Rest, PC) ->
+    %% test_heap (FINDING R41-3 FIX: Correct opcode number from 59 to 16)
     case decode_int(Rest, PC) of
         {Need, Rest2, PC2} ->
             case decode_int(Rest2, PC2) of
@@ -423,8 +426,8 @@ decode_opcode(59, Rest, PC) ->
             {error, Reason}
     end;
 
-decode_opcode(78, Rest, PC) ->
-    %% call_ext
+decode_opcode(7, Rest, PC) ->
+    %% call_ext (FINDING R41-3 FIX: Correct opcode number from 78 to 7)
     case decode_int(Rest, PC) of
         {Arity, Rest2, PC2} ->
             case decode_int(Rest2, PC2) of

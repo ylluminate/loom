@@ -204,6 +204,25 @@ normalize_instruction({call_ext_only, [Arity, Extfunc]}, _Atoms, Imports) ->
             {call_ext_only, Arity, Extfunc}
     end;
 
+%% FINDING R41-4 FIX: Add call_ext_last normalization (deallocate + tail external call)
+normalize_instruction({call_ext_last, [Arity, Extfunc, Dealloc]}, _Atoms, Imports) ->
+    ImportIdx = case Extfunc of
+        {integer, I} -> I;
+        {atom, I} -> I;
+        _ -> -1
+    end,
+    case ImportIdx >= 0 of
+        true ->
+            case nth_bare(ImportIdx + 1, Imports) of
+                {ModIdx, FunIdx, ImportArity} ->
+                    {call_ext_last, ImportArity, {extfunc_idx, ModIdx, FunIdx, ImportArity}, Dealloc};
+                _ ->
+                    {call_ext_last, Arity, {extfunc_idx, 0, 0, Arity}, Dealloc}
+            end;
+        false ->
+            {call_ext_last, Arity, Extfunc, Dealloc}
+    end;
+
 normalize_instruction({move, Operands}, _Atoms, _Imports) ->
     {move, Operands};
 
@@ -363,16 +382,36 @@ execute_instr({call_ext, Arity, {extfunc_idx, ModIdx, FunIdx, _}}, State) ->
 execute_instr({call_ext_only, Arity, {extfunc_idx, ModIdx, FunIdx, _}}, State) ->
     handle_bif_call(ModIdx, FunIdx, Arity, State, true);
 
+%% FINDING R41-4 FIX: Add call_ext_last execution (deallocate then tail call)
+execute_instr({call_ext_last, Arity, {extfunc_idx, ModIdx, FunIdx, _}, Dealloc}, State) ->
+    case unwrap_int(Dealloc) of
+        {error, Reason} ->
+            {error, Reason};
+        DeallocInt ->
+            Y = maps:get(y, State),
+            case deallocate_stack(DeallocInt, Y) of
+                {ok, NewY} ->
+                    handle_bif_call(ModIdx, FunIdx, Arity, State#{y => NewY}, true);
+                {error, Reason} ->
+                    {error, Reason}
+            end
+    end;
+
 %% Stack management (operands are tagged — unwrap to raw integers)
 %% FINDING 13 FIX: Check unwrap_int return and propagate errors
+%% FINDING R41-5 FIX: Propagate allocate_stack errors
 execute_instr({allocate, [StackNeed, _Live]}, State) ->
     case unwrap_int(StackNeed) of
         {error, Reason} ->
             {error, Reason};
         StackNeedInt ->
             Y = maps:get(y, State),
-            NewY = allocate_stack(StackNeedInt, Y),
-            {continue, advance_pc(State#{y => NewY})}
+            case allocate_stack(StackNeedInt, Y) of
+                {ok, NewY} ->
+                    {continue, advance_pc(State#{y => NewY})};
+                {error, Reason} ->
+                    {error, Reason}
+            end
     end;
 
 execute_instr({allocate_zero, [StackNeed, _Live]}, State) ->
@@ -381,8 +420,12 @@ execute_instr({allocate_zero, [StackNeed, _Live]}, State) ->
             {error, Reason};
         StackNeedInt ->
             Y = maps:get(y, State),
-            NewY = allocate_stack(StackNeedInt, Y),
-            {continue, advance_pc(State#{y => NewY})}
+            case allocate_stack(StackNeedInt, Y) of
+                {ok, NewY} ->
+                    {continue, advance_pc(State#{y => NewY})};
+                {error, Reason} ->
+                    {error, Reason}
+            end
     end;
 
 execute_instr({deallocate, [N]}, State) ->
@@ -861,13 +904,17 @@ set_register(_Other, _Value, State) ->
     State.
 
 %% Stack management
+%% FINDING R41-5 FIX: Return {ok, Stack} or {error, Reason} for oversized allocations
 allocate_stack(N, Y) ->
-    %% Validate N is within bounds
-    case is_integer(N) andalso N >= 0 andalso N =< 1024 of
+    %% Cap stack allocation at 10000 slots (per finding requirement)
+    MaxStackAlloc = 10000,
+    case is_integer(N) andalso N >= 0 of
+        true when N =< MaxStackAlloc ->
+            {ok, duplicate_bare(N, undefined) ++ Y};
         true ->
-            duplicate_bare(N, undefined) ++ Y;
+            {error, {stack_alloc_too_large, N, max, MaxStackAlloc}};
         false ->
-            Y  % Return unchanged on error
+            {error, {invalid_stack_alloc, N}}
     end.
 
 %% FINDING 7 FIX: Return {ok, Stack} or {error, Reason} instead of raising error()

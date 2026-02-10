@@ -123,6 +123,13 @@ do_compile(#{target := Target, format := Format, functions := Functions,
     %% 3. Add data symbols
     {DataBin, LinkState1} = layout_data(DataEntries, LinkState0),
 
+    %% CRITICAL FIX (Finding 5): BSS section for zero-initialized globals.
+    %% Currently the IR doesn't emit BSS entries, so BssSize is always 0.
+    %% When the IR supports {bss, Name, Size} entries, compute BssSize here:
+    %%   BssSize = lists:sum([S || {bss, _, S} <- DataEntries])
+    %% and thread it through to emit_binary for each format emitter.
+    BssSize = 0,
+
     %% 4. Resolve labels and concatenate code
     {CodeBin, LinkState2} = resolve_code(CodeParts, LinkState1),
 
@@ -133,14 +140,17 @@ do_compile(#{target := Target, format := Format, functions := Functions,
     TextBase = text_base(Format),
     %% CRITICAL FIX (Finding 2): Pass Target to data_base for arch-specific page size
     DataBase = data_base(Format, byte_size(CodeBin), Target),
-    case vbeam_native_link:resolve(LinkState2, TextBase, DataBase, DataBase + byte_size(DataBin)) of
+    %% CRITICAL FIX (Finding 5): BSS base follows data section
+    BssBase = DataBase + byte_size(DataBin),
+    case vbeam_native_link:resolve(LinkState2, TextBase, DataBase, BssBase + BssSize) of
         {ok, Patches} ->
             %% CRITICAL FIX (Finding 5): Wrap apply_patches in try/catch to convert
             %% relocation errors (overflow, out-of-bounds) to proper error tuples.
             try
                 LinkedCode = vbeam_native_link:apply_patches(CodeBin, Patches),
                 %% 7. Emit binary format
-                emit_binary(Format, LinkedCode, DataBin, EntryOffset, Target)
+                %% CRITICAL FIX (Finding 5): Pass BssSize to emitters
+                emit_binary(Format, LinkedCode, DataBin, BssSize, EntryOffset, Target)
             catch
                 error:Reason ->
                     {error, {link_failed, Reason}}
@@ -256,13 +266,19 @@ find_entry_offset(_, [], Offset) ->
     Offset.
 
 %% Emit the final binary in the requested format.
-emit_binary(elf64, Code, Data, EntryOffset, Arch) ->
+%% CRITICAL FIX (Finding 5): BSS size parameter added (currently always 0).
+%% When IR supports BSS entries, this will be threaded to format emitters
+%% to allocate zero-initialized .bss sections in ELF/Mach-O/PE.
+emit_binary(elf64, Code, Data, _BssSize, EntryOffset, Arch) ->
+    %% TODO: Thread BssSize to vbeam_native_elf:emit when BSS support is added
     {ok, vbeam_native_elf:emit(Code, Data, EntryOffset, Arch)};
-emit_binary(macho, Code, Data, EntryOffset, Arch) ->
+emit_binary(macho, Code, Data, _BssSize, EntryOffset, Arch) ->
+    %% TODO: Thread BssSize to vbeam_native_macho:emit when BSS support is added
     {ok, vbeam_native_macho:emit(Code, Data, EntryOffset, Arch)};
-emit_binary(pe, Code, Data, EntryOffset, Arch) ->
+emit_binary(pe, Code, Data, _BssSize, EntryOffset, Arch) ->
+    %% TODO: Thread BssSize to vbeam_native_pe:emit when BSS support is added
     {ok, vbeam_native_pe:emit(Code, Data, EntryOffset, Arch)};
-emit_binary(Format, _, _, _, _) ->
+emit_binary(Format, _, _, _, _, _) ->
     {error, {unsupported_format, Format}}.
 
 %% Inject alloc_init code at the start of the entry function.

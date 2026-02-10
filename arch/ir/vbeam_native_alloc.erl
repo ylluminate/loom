@@ -268,7 +268,7 @@ emit_alloc_reg(x86_64, DstReg, SizeReg) ->
         %% CRITICAL FIX (Finding 4): Use unsigned 'jb' (below) instead of 'jl' (less)
         %% Overflow after add: tmp < SizeReg means unsigned carry
         ?X86_ENC:encode_cmp_rr(TmpReg, SizeReg),
-        ?X86_ENC:encode_jb(0),  % unsigned: below (carry set)
+        ?X86_ENC:encode_jcc_rel32(ltu, 0),  % unsigned: below (carry set)
         {reloc, rel32, OverflowLbl, -4},
         encode_and_imm64(TmpReg, -8),
         %% Save current heap pointer in DstReg

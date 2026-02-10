@@ -1611,13 +1611,29 @@ tarjan_visit(Node, Edges, Visited, State = #{index := Idx, stack := Stack}) ->
     Successors = [Dst || {Src, Dst} <- Edges, Src =:= Node],
     {Visited2, State2} = lists:foldl(fun(Succ, {V, S}) ->
         case maps:find(Succ, V) of
-            error -> tarjan_visit(Succ, Edges, V, S);
+            error ->
+                %% Unvisited successor - recurse
+                {V1, S1} = tarjan_visit(Succ, Edges, V, S),
+                %% CRITICAL FIX (Finding 4): After recursion, propagate successor's
+                %% lowlink back to current node if it's lower. The old code read
+                %% index instead of lowlink from the successor, breaking cycle detection.
+                SuccInfo = maps:get(Succ, V1),
+                SuccLL = maps:get(lowlink, SuccInfo),
+                NodeInfo = maps:get(Node, V1),
+                NodeLL = maps:get(lowlink, NodeInfo),
+                NewLL = min(NodeLL, SuccLL),
+                V2 = V1#{Node => NodeInfo#{lowlink => NewLL}},
+                {V2, S1};
             {ok, #{on_stack := true, index := SuccIdx}} ->
-                #{lowlink := NodeLL} = maps:get(Node, V),
+                %% Back edge to node on stack - update lowlink with successor's index
+                NodeInfo = maps:get(Node, V),
+                NodeLL = maps:get(lowlink, NodeInfo),
                 NewLL = min(NodeLL, SuccIdx),
-                V1 = V#{Node => (maps:get(Node, V))#{lowlink => NewLL}},
+                V1 = V#{Node => NodeInfo#{lowlink => NewLL}},
                 {V1, S};
-            {ok, _} -> {V, S}
+            {ok, _} ->
+                %% Cross edge to already-processed SCC - ignore
+                {V, S}
         end
     end, {Visited1, State1}, Successors),
     NodeInfo = maps:get(Node, Visited2),

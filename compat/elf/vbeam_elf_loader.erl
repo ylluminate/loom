@@ -518,19 +518,25 @@ parse_symbols(_Binary, Sections) ->
                             error({invalid_sh_link, StrTabIdx, max, TupleSize - 1})
                     end,
 
-                    %% Parse symbol entries
-                    NumSyms = byte_size(SymTabData) div EntSize,
-                    %% BUG 13 FIX: Cap NumSyms at 100000
-                    case NumSyms of
-                        N when N > 100000 ->
-                            error({too_many_symbols, N, max, 100000});
-                        _ ->
-                            ok
+                    %% FINDING R41-6 FIX: Check for malformed symbol table (non-zero remainder)
+                    Symbols = case byte_size(SymTabData) rem EntSize of
+                        0 ->
+                            %% Parse symbol entries
+                            NumSyms = byte_size(SymTabData) div EntSize,
+                            %% BUG 13 FIX: Cap NumSyms at 100000
+                            case NumSyms of
+                                N when N > 100000 ->
+                                    error({too_many_symbols, N, max, 100000});
+                                _ ->
+                                    ok
+                            end,
+                            [
+                                parse_symbol(SymTabData, I * ?SYM_SIZE, StrTabData)
+                                || I <- lists:seq(0, NumSyms - 1)
+                            ];
+                        Remainder ->
+                            error({malformed_table, symtab, byte_size(SymTabData), EntSize, remainder, Remainder})
                     end,
-                    Symbols = [
-                        parse_symbol(SymTabData, I * ?SYM_SIZE, StrTabData)
-                        || I <- lists:seq(0, NumSyms - 1)
-                    ],
 
                     %% Build string table map
                     StrTab = build_string_table(StrTabData),
@@ -591,22 +597,28 @@ parse_relocations(_Binary, Sections, _StrTab) ->
                 _ -> error({invalid_sh_info, TargetIdx, max, TupleSize - 1})
             end,
 
-            NumRelas = byte_size(Data) div EntSize,
-            %% BUG 14 FIX: Cap NumRelas at 500000
-            case NumRelas of
-                N when N > 500000 ->
-                    error({too_many_relocations, N, max, 500000});
-                _ ->
-                    ok
-            end,
-            Relocs = [
-                parse_rela(Data, I * ?RELA_SIZE)
-                || I <- lists:seq(0, NumRelas - 1)
-            ],
+            %% FINDING R41-6 FIX: Check for malformed relocation table (non-zero remainder)
+            case byte_size(Data) rem EntSize of
+                0 ->
+                    NumRelas = byte_size(Data) div EntSize,
+                    %% BUG 14 FIX: Cap NumRelas at 500000
+                    case NumRelas of
+                        N when N > 500000 ->
+                            error({too_many_relocations, N, max, 500000});
+                        _ ->
+                            ok
+                    end,
+                    Relocs = [
+                        parse_rela(Data, I * ?RELA_SIZE)
+                        || I <- lists:seq(0, NumRelas - 1)
+                    ],
 
-            %% FINDING 8 FIX: Key by section index instead of name
-            ExistingRelocs = maps:get(TargetIdx, Acc, []),
-            Acc#{TargetIdx => ExistingRelocs ++ Relocs}
+                    %% FINDING 8 FIX: Key by section index instead of name
+                    ExistingRelocs = maps:get(TargetIdx, Acc, []),
+                    Acc#{TargetIdx => ExistingRelocs ++ Relocs};
+                Remainder ->
+                    error({malformed_table, rela, byte_size(Data), EntSize, remainder, Remainder})
+            end
         end,
         #{},
         RelaSections
@@ -628,20 +640,26 @@ parse_relocations(_Binary, Sections, _StrTab) ->
                 _ -> error({invalid_sh_info, TargetIdx, max, TupleSize - 1})
             end,
 
-            NumRels = byte_size(Data) div EntSize,
-            case NumRels of
-                N when N > 500000 ->
-                    error({too_many_relocations, N, max, 500000});
-                _ ->
-                    ok
-            end,
-            Relocs = [
-                parse_rel(Data, I * ?REL_SIZE)
-                || I <- lists:seq(0, NumRels - 1)
-            ],
+            %% FINDING R41-6 FIX: Check for malformed relocation table (non-zero remainder)
+            case byte_size(Data) rem EntSize of
+                0 ->
+                    NumRels = byte_size(Data) div EntSize,
+                    case NumRels of
+                        N when N > 500000 ->
+                            error({too_many_relocations, N, max, 500000});
+                        _ ->
+                            ok
+                    end,
+                    Relocs = [
+                        parse_rel(Data, I * ?REL_SIZE)
+                        || I <- lists:seq(0, NumRels - 1)
+                    ],
 
-            ExistingRelocs = maps:get(TargetIdx, Acc, []),
-            Acc#{TargetIdx => ExistingRelocs ++ Relocs}
+                    ExistingRelocs = maps:get(TargetIdx, Acc, []),
+                    Acc#{TargetIdx => ExistingRelocs ++ Relocs};
+                Remainder ->
+                    error({malformed_table, rel, byte_size(Data), EntSize, remainder, Remainder})
+            end
         end,
         RelocMap1,
         RelSections

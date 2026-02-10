@@ -85,6 +85,12 @@ allocate(Body, Target, NumParams, Opts) ->
     %% internally. These instructions expand to long sequences that use x9-x15
     %% (ARM64) as temporaries. Without this exclusion, a vreg assigned to x9
     %% would be silently destroyed by the expanded code.
+    %% KNOWN LIMITATION (Finding 3): Pseudo-ops also clobber CALL ARGUMENT
+    %% registers (rdi/rsi/rdx/rcx on x86_64, x0-x7 on arm64). If parameters
+    %% are live across pseudo-ops, they can be corrupted. The scratch_regs
+    %% list excludes r10 (x86) and x14/x15 (arm64), but does NOT exclude
+    %% argument registers. A full fix would require saving/restoring arg regs
+    %% around pseudo-ops when they're live. This is deferred.
     ScratchRegs = scratch_regs_for_pseudo_ops(Target),
     AllRegs = case needs_scratch_exclusion(Body) of
         true -> [R || R <- AllRegs1, not lists:member(R, ScratchRegs)];
@@ -253,7 +259,16 @@ expire_old(Pos, State = #alloc_state{active = Active, free_regs = Free}) ->
 
 %% Spill: if current interval is longer than the longest active, spill active.
 %% Otherwise spill the current interval.
+%% CRITICAL FIX (Finding 1): When current interval spans a call, only consider
+%% callee-saved registers from the spill candidate set. If the candidate is
+%% caller-saved, spilling it would give current a caller-saved reg that gets
+%% clobbered by the call. In this case, spill current instead.
 spill_at_interval(Interval, State = #alloc_state{active = Active}) ->
+    CallPositions = maps:get(call_positions, State#alloc_state.context, []),
+    Target = maps:get(target, State#alloc_state.context, x86_64),
+    SpansCall = spans_call(Interval, CallPositions),
+    CalleeSaved = callee_saved_regs(Target),
+
     case Active of
         [] ->
             %% No active intervals to spill, spill current
@@ -267,20 +282,35 @@ spill_at_interval(Interval, State = #alloc_state{active = Active}) ->
                     end
                 end, hd(Active), tl(Active)),
             if Longest#interval.stop > Interval#interval.stop ->
-                %% Spill the longest active, give its register to current
+                %% Check if we can safely reassign Longest's register to current
                 Reg = Longest#interval.preg,
-                Slot = State#alloc_state.next_spill,
-                Active2 = lists:delete(Longest, Active),
-                Assigned = Interval#interval{preg = Reg},
-                Active3 = insert_active(Assigned, Active2),
-                Assignments = maps:put(Longest#interval.vreg, {stack, Slot},
-                              maps:put(Interval#interval.vreg, Reg,
-                                       State#alloc_state.assignments)),
-                State#alloc_state{
-                    active = Active3,
-                    next_spill = Slot + 1,
-                    assignments = Assignments
-                };
+                CanReassign = case SpansCall of
+                    true ->
+                        %% Current spans call — Reg MUST be callee-saved
+                        lists:member(Reg, CalleeSaved);
+                    false ->
+                        %% No call constraint — any register is fine
+                        true
+                end,
+                case CanReassign of
+                    true ->
+                        %% Safe to spill Longest and give its register to current
+                        Slot = State#alloc_state.next_spill,
+                        Active2 = lists:delete(Longest, Active),
+                        Assigned = Interval#interval{preg = Reg},
+                        Active3 = insert_active(Assigned, Active2),
+                        Assignments = maps:put(Longest#interval.vreg, {stack, Slot},
+                                      maps:put(Interval#interval.vreg, Reg,
+                                               State#alloc_state.assignments)),
+                        State#alloc_state{
+                            active = Active3,
+                            next_spill = Slot + 1,
+                            assignments = Assignments
+                        };
+                    false ->
+                        %% Cannot safely use Longest's register — spill current instead
+                        do_spill_current(Interval, State)
+                end;
                true ->
                 do_spill_current(Interval, State)
             end
@@ -681,12 +711,27 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
         {map_new, Dst} -> {[], [Dst]};
         {map_get, Dst, Map, Key} -> {[Map, Key], [Dst]};
         {map_put, Dst, Map, Key, Val} -> {[Map, Key, Val], [Dst]};
+        %% CRITICAL FIX (Finding 2): Explicit entries for defining opcodes
+        {field_get, Dst, Struct, _Offset} -> {[Struct], [Dst]};
+        {struct_new, Dst, _Size} -> {[], [Dst]};
+        {fadd, Dst, A, B} -> {[A, B], [Dst]};
+        {fsub, Dst, A, B} -> {[A, B], [Dst]};
+        {fmul, Dst, A, B} -> {[A, B], [Dst]};
+        {fdiv, Dst, A, B} -> {[A, B], [Dst]};
+        {fneg, Dst, Src} -> {[Src], [Dst]};
+        {fcmp, A, B} -> {[A, B], []};
+        {int_to_float, Dst, Src} -> {[Src], [Dst]};
+        {float_to_int, Dst, Src} -> {[Src], [Dst]};
         _ ->
-            %% CRITICAL FIX (R32): For truly unknown opcodes, use conservative
-            %% uses-only fallback. This is safe — it may generate unnecessary
-            %% spill loads but won't corrupt values (extra loads are harmless).
+            %% CRITICAL FIX (Finding 2): For unknown opcodes, conservatively treat
+            %% the FIRST operand as a def (most IR instructions write to their first
+            %% operand), and the rest as uses. This prevents lost writes after spill
+            %% reload for opcodes not explicitly listed above.
             VregsInInst = extract_vregs_from_tuple(Inst),
-            {VregsInInst, []}
+            case VregsInInst of
+                [] -> {[], []};
+                [FirstVreg | RestVregs] -> {RestVregs, [FirstVreg]}
+            end
     end;
 analyze_inst_operands(_) -> {[], []}.
 

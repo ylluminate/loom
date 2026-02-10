@@ -226,13 +226,27 @@ parse_chunk_data(_Other, Data) ->
 %% Parse atom table
 parse_atoms(<<Count:32, Rest/binary>>) ->
     %% FINDING 8 FIX: Cap atom count to prevent memory exhaustion
-    %% Codex R34 Finding #5: Return error tuple instead of crash
+    %% FINDING R41-2 FIX: Normalize signed/unsigned atom count interpretation
+    %% Some compilers set high bit in count field - treat as unsigned but cap reasonably
     MaxAtoms = 100000,
-    case Count of
+    %% Check if count looks unreasonable (>100k), try alternative interpretations
+    NormalizedCount = if
+        Count > MaxAtoms andalso Count > 16#80000000 ->
+            %% High bit set - may be signed, try masking/reinterpret
+            %% If treating as signed gives reasonable value, use that
+            SignedCount = Count - 16#100000000,
+            if
+                SignedCount > 0 andalso SignedCount =< MaxAtoms -> SignedCount;
+                true -> Count  %% Keep original if signed doesn't help
+            end;
+        true ->
+            Count
+    end,
+    case NormalizedCount of
         N when N > MaxAtoms ->
             {error, {atom_count_too_large, N, max, MaxAtoms}};
         _ ->
-            parse_atom_list(Rest, Count, [])
+            parse_atom_list(Rest, NormalizedCount, [])
     end;
 parse_atoms(_) ->
     {error, malformed_atom_chunk}.
