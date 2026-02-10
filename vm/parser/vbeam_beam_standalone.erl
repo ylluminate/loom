@@ -74,7 +74,7 @@ parse_chunk(<<Name:4/binary, Size:32, Data:Size/binary, Rest/binary>>) ->
     end,
     case Rest of
         <<_:Padding/binary, AlignedRest/binary>> ->
-            ChunkName = binary_to_atom(Name, latin1),
+            ChunkName = chunk_id_to_atom(Name),
             ParsedData = parse_chunk_data(ChunkName, Data),
             {ok, ChunkName, ParsedData, AlignedRest};
         _ ->
@@ -82,6 +82,28 @@ parse_chunk(<<Name:4/binary, Size:32, Data:Size/binary, Rest/binary>>) ->
     end;
 parse_chunk(_) ->
     {error, invalid_chunk}.
+
+%% Map chunk IDs to atoms using whitelist (prevents atom table exhaustion)
+%% Standard BEAM chunk IDs from the BEAM file format specification
+chunk_id_to_atom(<<"Atom">>) -> 'Atom';
+chunk_id_to_atom(<<"AtU8">>) -> 'AtU8';
+chunk_id_to_atom(<<"Code">>) -> 'Code';
+chunk_id_to_atom(<<"StrT">>) -> 'StrT';
+chunk_id_to_atom(<<"ImpT">>) -> 'ImpT';
+chunk_id_to_atom(<<"ExpT">>) -> 'ExpT';
+chunk_id_to_atom(<<"FunT">>) -> 'FunT';
+chunk_id_to_atom(<<"LitT">>) -> 'LitT';
+chunk_id_to_atom(<<"LocT">>) -> 'LocT';
+chunk_id_to_atom(<<"Attr">>) -> 'Attr';
+chunk_id_to_atom(<<"CInf">>) -> 'CInf';
+chunk_id_to_atom(<<"Dbgi">>) -> 'Dbgi';
+chunk_id_to_atom(<<"Docs">>) -> 'Docs';
+chunk_id_to_atom(<<"ExDp">>) -> 'ExDp';
+chunk_id_to_atom(<<"Line">>) -> 'Line';
+chunk_id_to_atom(<<"Meta">>) -> 'Meta';
+chunk_id_to_atom(<<"Type">>) -> 'Type';
+chunk_id_to_atom(<<"Abst">>) -> 'Abst';  % Abstract code chunk
+chunk_id_to_atom(Other) -> {unknown_chunk, Other}.  % Keep as binary for unknown chunks
 
 %% ============================================================================
 %% Chunk Data Parsers
@@ -171,19 +193,19 @@ parse_chunk_data('LocT', Data) ->
     end;
 
 parse_chunk_data('Attr', Data) ->
-    case catch binary_to_term(Data) of
+    case catch binary_to_term(Data, [safe]) of
         {'EXIT', _} -> Data;
         Term -> Term
     end;
 
 parse_chunk_data('CInf', Data) ->
-    case catch binary_to_term(Data) of
+    case catch binary_to_term(Data, [safe]) of
         {'EXIT', _} -> Data;
         Term -> Term
     end;
 
 parse_chunk_data('Abst', Data) ->
-    case catch binary_to_term(Data) of
+    case catch binary_to_term(Data, [safe]) of
         {'EXIT', _} -> Data;
         Term -> Term
     end;
@@ -263,7 +285,7 @@ parse_literals(<<Count:32, Rest/binary>>) ->
 parse_literal_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_literal_list(<<Size:32, Literal:Size/binary, Rest/binary>>, Count, Acc) ->
-    Term = binary_to_term(Literal),
+    Term = binary_to_term(Literal, [safe]),
     parse_literal_list(Rest, Count - 1, [Term | Acc]);
 parse_literal_list(_, _, Acc) ->
     lists:reverse(Acc).
@@ -418,11 +440,13 @@ decode_compact_value(Byte, Rest) ->
         _ ->
             case (Byte band 16#10) of
                 0 ->
-                    %% Medium: 11-bit value = 3 bits from byte + 8 from next
+                    %% Medium: 11-bit value = 3 bits from byte (bits 7:5) + 8 from next
+                    %% Encoding: bits 7:5 hold high 3 bits, next byte holds low 8 bits
+                    %% Formula: ((Byte >> 5) & 7) | (NextByte << 3)
                     case Rest of
                         <<Next:8, Rest2/binary>> ->
-                            Val0 = Byte band 2#11100000,
-                            {(Val0 bsl 3) bor Next, Rest2};
+                            HighBits = (Byte bsr 5) band 7,  %% Extract bits 7:5
+                            {HighBits bor (Next bsl 3), Rest2};
                         _ ->
                             {0, Rest}
                     end;

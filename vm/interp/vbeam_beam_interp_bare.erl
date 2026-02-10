@@ -263,8 +263,8 @@ handle_end_of_function(#{stack := [{RetFun, RetPC} | RestStack]} = State) ->
                 current_fun => RetFun,
                 current_instrs => RetInstrs,
                 pc => RetPC,
-                stack => RestStack,
-                y => []
+                stack => RestStack
+                %% NOTE: y registers preserved - deallocate will remove frame
             }};
         {error, _} ->
             {error, {return_function_not_found, RetFun}}
@@ -523,7 +523,9 @@ handle_bif_call(ModIdx, FunIdx, Arity, State, IsTailCall) ->
         {ok, Result} ->
             case IsTailCall of
                 true ->
-                    {return, Result};
+                    %% Put result in x0 and let return flow through normal path
+                    NewState = set_register({x, 0}, Result, State),
+                    execute_instr(return, NewState);
                 false ->
                     NewState = set_register({x, 0}, Result, State),
                     {continue, advance_pc(NewState)}

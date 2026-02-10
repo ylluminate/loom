@@ -305,13 +305,19 @@ advance_cursor($\t, X, Y, Margin, Width, _Height) ->
         false -> TabStop
     end,
     {NewX, Y};
-advance_cursor(_Char, X, Y, Margin, Width, _Height) ->
+advance_cursor(_Char, X, Y, Margin, Width, Height) ->
     %% Regular character: advance X by character width
     NewX = X + ?CHAR_WIDTH,
     case NewX >= Width of
         true ->
             %% Wrap to next line
-            {Margin, Y + ?CHAR_HEIGHT};
+            NewY = Y + ?CHAR_HEIGHT,
+            %% Check for scroll (simplified: wrap for now)
+            FinalY = case NewY >= Height of
+                true -> Height - ?CHAR_HEIGHT;
+                false -> NewY
+            end,
+            {Margin, FinalY};
         false ->
             {NewX, Y}
     end.

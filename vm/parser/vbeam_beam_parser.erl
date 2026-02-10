@@ -43,7 +43,7 @@ parse_chunk(<<Name:4/binary, Size:32, Data:Size/binary, Rest/binary>>) ->
     end,
     case Rest of
         <<_:Padding/binary, AlignedRest/binary>> ->
-            ChunkName = binary_to_atom(Name, latin1),
+            ChunkName = chunk_id_to_atom(Name),
             ParsedData = parse_chunk_data(ChunkName, Data),
             {ok, ChunkName, ParsedData, AlignedRest};
         _ ->
@@ -51,6 +51,28 @@ parse_chunk(<<Name:4/binary, Size:32, Data:Size/binary, Rest/binary>>) ->
     end;
 parse_chunk(_) ->
     {error, invalid_chunk}.
+
+%% Map chunk IDs to atoms using whitelist (prevents atom table exhaustion)
+%% Standard BEAM chunk IDs from the BEAM file format specification
+chunk_id_to_atom(<<"Atom">>) -> 'Atom';
+chunk_id_to_atom(<<"AtU8">>) -> 'AtU8';
+chunk_id_to_atom(<<"Code">>) -> 'Code';
+chunk_id_to_atom(<<"StrT">>) -> 'StrT';
+chunk_id_to_atom(<<"ImpT">>) -> 'ImpT';
+chunk_id_to_atom(<<"ExpT">>) -> 'ExpT';
+chunk_id_to_atom(<<"FunT">>) -> 'FunT';
+chunk_id_to_atom(<<"LitT">>) -> 'LitT';
+chunk_id_to_atom(<<"LocT">>) -> 'LocT';
+chunk_id_to_atom(<<"Attr">>) -> 'Attr';
+chunk_id_to_atom(<<"CInf">>) -> 'CInf';
+chunk_id_to_atom(<<"Dbgi">>) -> 'Dbgi';
+chunk_id_to_atom(<<"Docs">>) -> 'Docs';
+chunk_id_to_atom(<<"ExDp">>) -> 'ExDp';
+chunk_id_to_atom(<<"Line">>) -> 'Line';
+chunk_id_to_atom(<<"Meta">>) -> 'Meta';
+chunk_id_to_atom(<<"Type">>) -> 'Type';
+chunk_id_to_atom(<<"Abst">>) -> 'Abst';  % Abstract code chunk
+chunk_id_to_atom(Other) -> {unknown_chunk, Other}.  % Keep as binary for unknown chunks
 
 %% Parse chunk data based on chunk type
 parse_chunk_data('Code', Data) ->
@@ -139,21 +161,21 @@ parse_chunk_data('LocT', Data) ->
 
 parse_chunk_data('Attr', Data) ->
     %% Attributes - Erlang term (external term format)
-    case catch binary_to_term(Data) of
+    case catch binary_to_term(Data, [safe]) of
         Term when not is_reference(Term) -> Term;
         _ -> Data
     end;
 
 parse_chunk_data('CInf', Data) ->
     %% Compilation info - Erlang term
-    case catch binary_to_term(Data) of
+    case catch binary_to_term(Data, [safe]) of
         Term when not is_reference(Term) -> Term;
         _ -> Data
     end;
 
 parse_chunk_data('Abst', Data) ->
     %% Abstract code - Erlang term
-    case catch binary_to_term(Data) of
+    case catch binary_to_term(Data, [safe]) of
         Term when not is_reference(Term) -> Term;
         _ -> Data
     end;

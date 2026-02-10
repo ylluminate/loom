@@ -174,8 +174,8 @@ execute_instr(return, Proc, _Options) ->
                 current_fun = RetFun,
                 current_instrs = RetInstrs,
                 pc = RetPC,
-                stack = RestStack,
-                y = []  % Clear stack frame on return
+                stack = RestStack
+                %% NOTE: y registers preserved - deallocate will remove frame
             }}
     end;
 
@@ -233,8 +233,9 @@ execute_instr({call_ext_only, Arity, {extfunc, Mod, Fun, Arity}}, Proc, Options)
     Args = [get_register({x, I}, Proc) || I <- lists:seq(0, Arity - 1)],
     case execute_bif(Mod, Fun, Args, Options) of
         {ok, Result} ->
-            %% Tail call - return the result directly
-            {return, Result};
+            %% Put result in x0 and let return instruction handle stack unwinding
+            Proc2 = set_register({x, 0}, Result, Proc),
+            execute_instr(return, Proc2, Options);
         {error, Reason} ->
             {error, {bif_error, Mod, Fun, Arity, Reason}}
     end;

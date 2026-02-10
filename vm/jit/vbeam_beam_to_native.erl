@@ -171,69 +171,120 @@ translate_function_internal(Instructions) ->
 %% y(N) -> [RSP + N*8] (stack slot)
 
 %% Translate a single BEAM opcode to x86_64
-translate_opcode({label, _N}, Acc) ->
+%% First normalize instruction shape from decoded format {op, [Operands...]} to expected format
+translate_opcode(Instruction, Acc) ->
+    translate_opcode_normalized(normalize_instruction(Instruction), Acc).
+
+%% Normalize decoded instruction format to expected format
+normalize_instruction({label, [{integer, N}]}) ->
+    {label, N};
+normalize_instruction({line, _} = I) ->
+    I;
+normalize_instruction({func_info, [Mod, Fun, {integer, Arity}]}) ->
+    {func_info, Mod, Fun, Arity};
+normalize_instruction({allocate, [{integer, N}, {integer, M}]}) ->
+    {allocate, N, M};
+normalize_instruction({deallocate, [{integer, N}]}) ->
+    {deallocate, N};
+normalize_instruction({move, [Src, Dst]}) ->
+    {move, Src, Dst};
+normalize_instruction({call_ext, [{integer, Arity}, ExtFunc]}) ->
+    {call_ext, Arity, ExtFunc};
+normalize_instruction({call_ext_last, [{integer, Arity}, ExtFunc, {integer, Dealloc}]}) ->
+    {call_ext_last, Arity, ExtFunc, Dealloc};
+normalize_instruction({return, []}) ->
+    return;
+normalize_instruction({test_heap, [{integer, Need}, {integer, Live}]}) ->
+    {test_heap, Need, Live};
+normalize_instruction({put_string, [{integer, Len}, String, Dst]}) ->
+    {put_string, Len, String, Dst};
+normalize_instruction({bs_put_string, [{integer, Len}, String]}) ->
+    {bs_put_string, Len, String};
+normalize_instruction(Other) ->
+    %% Already normalized or unknown format - pass through
+    Other.
+
+translate_opcode_normalized({label, _N}, Acc) ->
     %% Labels are positional - we'd need multi-pass for full support
     %% For now, just mark position (no code emitted)
     Acc;
 
-translate_opcode({line, _}, Acc) ->
+translate_opcode_normalized({line, _}, Acc) ->
     %% Debug info - skip
     Acc;
 
-translate_opcode({func_info, _Mod, _Fun, _Arity}, Acc) ->
+translate_opcode_normalized({func_info, _Mod, _Fun, _Arity}, Acc) ->
     %% Function info for error handling - skip for now
     Acc;
 
-translate_opcode({allocate, StackNeeded, _Live}, Acc) ->
+translate_opcode_normalized({allocate, StackNeeded, _Live}, Acc) ->
     %% Allocate stack frame: sub rsp, N*8
     StackBytes = StackNeeded * 8,
-    Code = <<16#48, 16#83, 16#EC, StackBytes:8>>,  % sub rsp, imm8
+    %% FIX 2: Handle large frames (>31 words = >248 bytes)
+    Code = if
+        StackBytes =< 127 ->
+            %% 8-bit immediate encoding
+            <<16#48, 16#83, 16#EC, StackBytes:8>>;  % sub rsp, imm8
+        true ->
+            %% 32-bit immediate encoding for large frames
+            <<16#48, 16#81, 16#EC, StackBytes:32/little>>  % sub rsp, imm32
+    end,
     <<Acc/binary, Code/binary>>;
 
-translate_opcode({deallocate, N}, Acc) ->
+translate_opcode_normalized({deallocate, N}, Acc) ->
     %% Deallocate stack frame: add rsp, N*8
     StackBytes = N * 8,
-    Code = <<16#48, 16#83, 16#C4, StackBytes:8>>,  % add rsp, imm8
+    %% FIX 2: Handle large frames (>31 words = >248 bytes)
+    Code = if
+        StackBytes =< 127 ->
+            %% 8-bit immediate encoding
+            <<16#48, 16#83, 16#C4, StackBytes:8>>;  % add rsp, imm8
+        true ->
+            %% 32-bit immediate encoding for large frames
+            <<16#48, 16#81, 16#C4, StackBytes:32/little>>  % add rsp, imm32
+    end,
     <<Acc/binary, Code/binary>>;
 
-translate_opcode({move, Src, Dst}, Acc) ->
+translate_opcode_normalized({move, Src, Dst}, Acc) ->
     %% Move between registers/stack slots
     Code = translate_move(Src, Dst),
     <<Acc/binary, Code/binary>>;
 
-translate_opcode({call_ext, _Arity, {extfunc, Mod, Fun, _A}}, Acc) ->
+translate_opcode_normalized({call_ext, _Arity, {extfunc, Mod, Fun, _A}}, Acc) ->
     %% External function call - handle io:format, erlang:display as serial output
     Code = translate_external_call(Mod, Fun),
     <<Acc/binary, Code/binary>>;
 
-translate_opcode({call_ext_last, _Arity, {extfunc, Mod, Fun, _A}, Dealloc}, Acc) ->
+translate_opcode_normalized({call_ext_last, _Arity, {extfunc, Mod, Fun, _A}, Dealloc}, Acc) ->
     %% Tail call - deallocate then call
-    Code1 = translate_opcode({deallocate, Dealloc}, <<>>),
+    Code1 = translate_opcode_normalized({deallocate, Dealloc}, <<>>),
     Code2 = translate_external_call(Mod, Fun),
     <<Acc/binary, Code1/binary, Code2/binary>>;
 
-translate_opcode(return, Acc) ->
+translate_opcode_normalized(return, Acc) ->
     %% Return from function
     Code = <<16#C3>>,  % ret
     <<Acc/binary, Code/binary>>;
 
-translate_opcode({test_heap, _Need, _Live}, Acc) ->
+translate_opcode_normalized({test_heap, _Need, _Live}, Acc) ->
     %% Heap allocation test - skip for bare metal (no GC)
     Acc;
 
-translate_opcode({put_string, Len, String, Dst}, Acc) ->
+translate_opcode_normalized({put_string, Len, String, Dst}, Acc) ->
     %% Load string pointer into register
     %% For bare metal, we embed string and load address
     %% Simplified: load immediate (would need proper RIP-relative addressing)
     Code = translate_put_string(Len, String, Dst),
     <<Acc/binary, Code/binary>>;
 
-translate_opcode({bs_put_string, _Len, _String}, Acc) ->
+translate_opcode_normalized({bs_put_string, _Len, _String}, Acc) ->
     %% Binary string operation - skip for now
     Acc;
 
-translate_opcode(_UnknownOp, Acc) ->
-    %% Unknown opcode - emit nop for now (should warn/error in production)
+translate_opcode_normalized(UnknownOp, Acc) ->
+    %% FIX 1: Warn about unknown opcodes for debugging
+    io:format("WARNING: Unknown opcode shape (falling through to NOP): ~p~n", [UnknownOp]),
+    %% Unknown opcode - emit nop
     <<Acc/binary, 16#90>>.  % nop
 
 %% ============================================================================
@@ -308,15 +359,15 @@ translate_external_call(_Mod, _Fun) ->
 %% Generate inline serial output code
 %% Assumes RSI points to string (loaded by caller from put_string)
 translate_serial_output() ->
-    %% Call serial_puts helper
-    %% We need to calculate relative offset to serial_puts
-    %% This is tricky without multi-pass - for now, emit inline loop
+    %% Inline string output loop - this is expanded INLINE in the function body,
+    %% so we must NOT end with 'ret' (that would return from the caller prematurely)
+    %% FIX 3: Removed 'ret' instruction - this is inline code, not a helper function
     iolist_to_binary([
         %% Inline string output loop
         %% RSI = string pointer (assumed already loaded)
         <<16#AC>>,                                % lodsb
         <<16#84, 16#C0>>,                         % test al, al
-        <<16#74, 16#0F>>,                         % jz done (+15 bytes)
+        <<16#74, 16#0E>>,                         % jz done (+14 bytes, adjusted from +15)
         <<16#88, 16#C3>>,                         % mov bl, al
         %% Wait for TX ready
         <<16#BA, 16#FD, 16#03, 16#00, 16#00>>,   % mov edx, 0x3FD
@@ -326,9 +377,8 @@ translate_serial_output() ->
         <<16#88, 16#D8>>,                         % mov al, bl
         <<16#BA, 16#F8, 16#03, 16#00, 16#00>>,   % mov edx, 0x3F8
         <<16#EE>>,                                % out dx, al
-        <<16#EB, 16#E4>>,                         % jmp loop (-28)
-        %% done:
-        <<16#C3>>                                 % ret (placeholder)
+        <<16#EB, 16#E4>>                          % jmp loop (-28)
+        %% done: (fall through to next instruction in caller)
     ]).
 
 %% ============================================================================

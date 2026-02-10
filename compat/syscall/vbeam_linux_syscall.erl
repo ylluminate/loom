@@ -26,6 +26,17 @@ init() ->
 %% @doc Dispatch a syscall to the appropriate handler
 %% Returns {ok, Result} | {error, Errno}
 dispatch(SyscallNr, Args) when is_integer(SyscallNr), is_list(Args) ->
+    try
+        dispatch_impl(SyscallNr, Args)
+    catch
+        error:function_clause ->
+            {error, ?EINVAL};
+        error:badarg ->
+            {error, ?EINVAL}
+    end.
+
+%% @private Internal dispatch implementation
+dispatch_impl(SyscallNr, Args) ->
     case SyscallNr of
         %% ============================================================
         %% IMPLEMENTED SYSCALLS - Critical for BusyBox

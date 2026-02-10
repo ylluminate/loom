@@ -268,40 +268,47 @@ init(Config) ->
 
 handle_call({spawn_process, Module, Function}, _From, State) ->
     #state{processes = Processes, next_pid = NextPid, page_alloc = PageAlloc,
-           heap_registry = HeapReg, ready_normal = ReadyNormal} = State,
+           heap_registry = HeapReg, ready_normal = ReadyNormal, config = Config} = State,
 
-    %% Allocate heap for new process
-    case vbeam_heap:new_heap(PageAlloc, medium) of
-        {ok, Heap, NewPageAlloc} ->
-            NewProcess = #{
-                pid => NextPid,
-                module => Module,
-                function => Function,
-                status => ready,
-                heap => Heap,
-                reductions => 0,
-                priority => normal,
-                mailbox => queue:new(),
-                created_at => erlang:monotonic_time(nanosecond),
-                last_scheduled => 0
-            },
+    %% Check max_processes limit
+    MaxProcesses = maps:get(max_processes, Config, infinity),
+    case MaxProcesses =/= infinity andalso map_size(Processes) >= MaxProcesses of
+        true ->
+            {reply, {error, max_processes_reached}, State};
+        false ->
+            %% Allocate heap for new process
+            case vbeam_heap:new_heap(PageAlloc, medium) of
+                {ok, Heap, NewPageAlloc} ->
+                    NewProcess = #{
+                        pid => NextPid,
+                        module => Module,
+                        function => Function,
+                        status => ready,
+                        heap => Heap,
+                        reductions => 0,
+                        priority => normal,
+                        mailbox => queue:new(),
+                        created_at => erlang:monotonic_time(nanosecond),
+                        last_scheduled => 0
+                    },
 
-            NewProcesses = Processes#{NextPid => NewProcess},
-            NewHeapReg = vbeam_heap:registry_add(HeapReg, NextPid, Heap),
-            NewReadyNormal = queue:in(NextPid, ReadyNormal),
+                    NewProcesses = Processes#{NextPid => NewProcess},
+                    NewHeapReg = vbeam_heap:registry_add(HeapReg, NextPid, Heap),
+                    NewReadyNormal = queue:in(NextPid, ReadyNormal),
 
-            NewState = State#state{
-                processes = NewProcesses,
-                next_pid = NextPid + 1,
-                page_alloc = NewPageAlloc,
-                heap_registry = NewHeapReg,
-                ready_normal = NewReadyNormal
-            },
+                    NewState = State#state{
+                        processes = NewProcesses,
+                        next_pid = NextPid + 1,
+                        page_alloc = NewPageAlloc,
+                        heap_registry = NewHeapReg,
+                        ready_normal = NewReadyNormal
+                    },
 
-            {reply, {ok, NextPid}, NewState};
+                    {reply, {ok, NextPid}, NewState};
 
-        {Error, FailPageAlloc} ->
-            {reply, {error, Error}, State#state{page_alloc = FailPageAlloc}}
+                {Error, FailPageAlloc} ->
+                    {reply, {error, Error}, State#state{page_alloc = FailPageAlloc}}
+            end
     end;
 
 handle_call({kill_process, Pid}, _From, State) ->

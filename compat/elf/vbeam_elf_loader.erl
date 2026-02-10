@@ -204,12 +204,32 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
             Sections
         ),
 
-        %% Concatenate all allocated sections
-        Code = iolist_to_binary([
-            maps:get(data, S, <<>>)
-            || S <- RelocatedSections,
-               (maps:get(flags, S, 0) band ?SHF_ALLOC) =/= 0
-        ]),
+        %% Concatenate all allocated sections WITH ALIGNMENT PADDING
+        {Code, _FinalOffset} = lists:foldl(
+            fun(S, {Acc, CurrentOffset}) ->
+                case maps:get(flags, S, 0) band ?SHF_ALLOC of
+                    0 ->
+                        %% Not allocated, skip
+                        {Acc, CurrentOffset};
+                    _ ->
+                        %% Get section data and target address
+                        SectionData = maps:get(data, S, <<>>),
+                        SectionSize = byte_size(SectionData),
+                        TargetAddr = maps:get(S, SectionAddrs, 0),
+
+                        %% Calculate padding needed to match aligned virtual address
+                        Padding = max(0, (TargetAddr - BaseAddr) - CurrentOffset),
+                        PaddingBinary = <<0:(Padding * 8)>>,
+
+                        %% Append padding + section data
+                        NewAcc = <<Acc/binary, PaddingBinary/binary, SectionData/binary>>,
+                        NewOffset = CurrentOffset + Padding + SectionSize,
+                        {NewAcc, NewOffset}
+                end
+            end,
+            {<<>>, 0},
+            RelocatedSections
+        ),
 
         {ok, Code}
     catch

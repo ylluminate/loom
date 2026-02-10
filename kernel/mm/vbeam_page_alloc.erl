@@ -35,7 +35,8 @@
     page_size => pos_integer(),
     total_pages => non_neg_integer(),
     free_count => non_neg_integer(),
-    next_hint => non_neg_integer()
+    next_hint => non_neg_integer(),
+    reserved_end => non_neg_integer()  % Last page of reserved region
 }.
 
 -type phys_addr() :: non_neg_integer().
@@ -58,7 +59,8 @@ init(TotalMemoryBytes) ->
         page_size => ?PAGE_SIZE,
         total_pages => TotalPages,
         free_count => TotalPages,
-        next_hint => 0
+        next_hint => 0,
+        reserved_end => ReservedPages - 1
     },
 
     %% Reserve the first 2MB
@@ -81,20 +83,27 @@ alloc_pages(State, Count) ->
 -spec free_page(state(), phys_addr()) -> state().
 free_page(State, PhysAddr) ->
     PageNum = PhysAddr div ?PAGE_SIZE,
-    #{bitmap := Bitmap, free_count := FreeCount} = State,
+    #{bitmap := Bitmap, free_count := FreeCount, reserved_end := ReservedEnd} = State,
 
-    %% Check if page is actually allocated before freeing
-    case get_bit(Bitmap, PageNum) of
-        1 ->
-            %% Page is allocated - free it
-            NewBitmap = clear_bit(Bitmap, PageNum),
-            State#{
-                bitmap := NewBitmap,
-                free_count := FreeCount + 1
-            };
-        0 ->
-            %% Page is already free - double-free, return unchanged
-            State
+    %% Check if page is in reserved region
+    case PageNum =< ReservedEnd of
+        true ->
+            %% Page is reserved, don't free it
+            State;
+        false ->
+            %% Check if page is actually allocated before freeing
+            case get_bit(Bitmap, PageNum) of
+                1 ->
+                    %% Page is allocated - free it
+                    NewBitmap = clear_bit(Bitmap, PageNum),
+                    State#{
+                        bitmap := NewBitmap,
+                        free_count := FreeCount + 1
+                    };
+                0 ->
+                    %% Page is already free - double-free, return unchanged
+                    State
+            end
     end.
 
 %% @doc Free multiple pages
@@ -240,29 +249,56 @@ alloc_pages_loop(State, Count, Acc) ->
 %%% ----------------------------------------------------------------------------
 
 %% @doc Get bit at position N in bitmap (0 or 1)
-get_bit(Bitmap, N) ->
-    ByteIndex = N div 8,
-    BitIndex = N rem 8,
-
-    <<_:ByteIndex/binary, Byte:8, _/binary>> = Bitmap,
-    (Byte bsr (7 - BitIndex)) band 1.
+get_bit(Bitmap, N) when N >= 0 ->
+    BitmapSize = byte_size(Bitmap) * 8,
+    case N >= BitmapSize of
+        true ->
+            %% Out of range, treat as free (0)
+            0;
+        false ->
+            ByteIndex = N div 8,
+            BitIndex = N rem 8,
+            <<_:ByteIndex/binary, Byte:8, _/binary>> = Bitmap,
+            (Byte bsr (7 - BitIndex)) band 1
+    end;
+get_bit(_Bitmap, _N) ->
+    %% Negative index, treat as free
+    0.
 
 %% @doc Set bit at position N to 1
-set_bit(Bitmap, N) ->
-    ByteIndex = N div 8,
-    BitIndex = N rem 8,
-
-    <<Before:ByteIndex/binary, Byte:8, After/binary>> = Bitmap,
-    Mask = 1 bsl (7 - BitIndex),
-    NewByte = Byte bor Mask,
-    <<Before/binary, NewByte:8, After/binary>>.
+set_bit(Bitmap, N) when N >= 0 ->
+    BitmapSize = byte_size(Bitmap) * 8,
+    case N >= BitmapSize of
+        true ->
+            %% Out of range, return unchanged
+            Bitmap;
+        false ->
+            ByteIndex = N div 8,
+            BitIndex = N rem 8,
+            <<Before:ByteIndex/binary, Byte:8, After/binary>> = Bitmap,
+            Mask = 1 bsl (7 - BitIndex),
+            NewByte = Byte bor Mask,
+            <<Before/binary, NewByte:8, After/binary>>
+    end;
+set_bit(Bitmap, _N) ->
+    %% Negative index, return unchanged
+    Bitmap.
 
 %% @doc Clear bit at position N to 0
-clear_bit(Bitmap, N) ->
-    ByteIndex = N div 8,
-    BitIndex = N rem 8,
-
-    <<Before:ByteIndex/binary, Byte:8, After/binary>> = Bitmap,
-    Mask = bnot (1 bsl (7 - BitIndex)),
-    NewByte = Byte band Mask,
-    <<Before/binary, NewByte:8, After/binary>>.
+clear_bit(Bitmap, N) when N >= 0 ->
+    BitmapSize = byte_size(Bitmap) * 8,
+    case N >= BitmapSize of
+        true ->
+            %% Out of range, return unchanged
+            Bitmap;
+        false ->
+            ByteIndex = N div 8,
+            BitIndex = N rem 8,
+            <<Before:ByteIndex/binary, Byte:8, After/binary>> = Bitmap,
+            Mask = bnot (1 bsl (7 - BitIndex)),
+            NewByte = Byte band Mask,
+            <<Before/binary, NewByte:8, After/binary>>
+    end;
+clear_bit(Bitmap, _N) ->
+    %% Negative index, return unchanged
+    Bitmap.

@@ -230,10 +230,31 @@ init([]) ->
     {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}}}.
 
 handle_call({register_handler, IrqNum, Pid}, _From, #state{handlers = Handlers, monitors = Monitors} = State) ->
-    %% Monitor the handler PID to detect when it dies
+    %% Check if an existing handler is registered for this IRQ
+    {CleanedMonitors, CleanedHandlers} = case maps:get(IrqNum, Handlers, undefined) of
+        undefined ->
+            {Monitors, Handlers};
+        _OldPid ->
+            %% Find and demonitor the old handler's monitor ref
+            OldMonitorRef = maps:fold(fun(Ref, Irq, Acc) ->
+                case Irq =:= IrqNum of
+                    true -> Ref;
+                    false -> Acc
+                end
+            end, undefined, Monitors),
+            case OldMonitorRef of
+                undefined ->
+                    {Monitors, Handlers};
+                Ref ->
+                    demonitor(Ref, [flush]),
+                    {maps:remove(Ref, Monitors), maps:remove(IrqNum, Handlers)}
+            end
+    end,
+
+    %% Monitor the new handler PID
     MonitorRef = monitor(process, Pid),
-    NewHandlers = Handlers#{IrqNum => Pid},
-    NewMonitors = Monitors#{MonitorRef => IrqNum},
+    NewHandlers = CleanedHandlers#{IrqNum => Pid},
+    NewMonitors = CleanedMonitors#{MonitorRef => IrqNum},
     {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}};
 
 handle_call({unregister_handler, IrqNum}, _From, #state{handlers = Handlers, monitors = Monitors} = State) ->
