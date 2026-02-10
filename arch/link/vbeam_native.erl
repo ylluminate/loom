@@ -191,11 +191,26 @@ assemble_parts(Parts, LinkState, StartOffset, FnName) ->
         end, {<<>>, LinkState, StartOffset}, Parts).
 
 %% Find entry point offset.
-find_entry([{<<"main">>, _} | _]) -> 0;
-find_entry([{_, Parts} | Rest]) ->
-    Size = lists:sum([byte_size(B) || B <- Parts, is_binary(B)]),
-    Size + find_entry(Rest);
-find_entry([]) -> 0.  % No main found - use offset 0 (first function)
+%% CRITICAL FIX (Finding 5): The recursive accumulation was returning end-of-text
+%% offset when no "main" was found, instead of 0 (first function offset).
+find_entry(Parts) ->
+    case lists:keyfind(<<"main">>, 1, Parts) of
+        {<<"main">>, _} ->
+            %% Found main - calculate its offset
+            find_entry_offset(<<"main">>, Parts, 0);
+        false ->
+            %% No main found - use offset 0 (first function)
+            0
+    end.
+
+%% Calculate offset to a specific function
+find_entry_offset(Target, [{Target, _} | _], Offset) ->
+    Offset;
+find_entry_offset(Target, [{_, FnParts} | Rest], Offset) ->
+    Size = lists:sum([byte_size(B) || B <- FnParts, is_binary(B)]),
+    find_entry_offset(Target, Rest, Offset + Size);
+find_entry_offset(_, [], Offset) ->
+    Offset.
 
 %% Emit the final binary in the requested format.
 emit_binary(elf64, Code, Data, EntryOffset, Arch) ->

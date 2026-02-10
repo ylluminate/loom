@@ -83,13 +83,14 @@ emit_prologue(FrameSize, UsedCalleeSaved) ->
      end).
 
 %% Emit function epilogue: restore callee-saved; mov rsp, rbp; pop rbp; ret
-%% Note: This is called from lower_instruction(ret, ...) which doesn't have access to UsedCalleeSaved,
-%% so we can't restore here. Instead, we need to pass UsedCalleeSaved through the lowering context.
-%% For now, keep the old signature and handle restoration in the ret instruction.
+%% CRITICAL FIX (Finding 1): Always use "mov rsp, rbp; pop rbp; ret" when FrameSize > 0
+%% to undo the frame allocation in the prologue. Without this, rsp still points
+%% into the frame/spill space, causing pop rbp to read garbage and ret to jump to garbage.
 emit_epilogue(0) ->
     [?ENC:encode_pop(rbp),
      ?ENC:encode_ret()];
 emit_epilogue(_FrameSize) ->
+    %% Restore rsp from rbp to undo the frame allocation
     [?ENC:encode_mov_rr(rsp, rbp),
      ?ENC:encode_pop(rbp),
      ?ENC:encode_ret()].
@@ -247,36 +248,54 @@ lower_instruction({mul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
 
 %% SDIV (uses rdx:rax / src -> rax=quot, rdx=rem)
 lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
-    %% FIXED: Divisor B must not be in rax/rdx (they're clobbered by div).
-    %% If B is rax or rdx, move to safe temp (r11) first.
+    %% CRITICAL FIX (Finding 4): When A == r11 and B needs saving to r11,
+    %% move A to rax FIRST to prevent clobbering.
     SafeB = if B =:= rax orelse B =:= rdx -> r11; true -> B end,
-    SaveB = if B =:= rax orelse B =:= rdx -> [?ENC:encode_mov_rr(r11, B)]; true -> [] end,
+    NeedSaveB = (B =:= rax orelse B =:= rdx),
+    %% If A is r11 and we need to save B to r11, move A first
+    MovA = if A =:= r11 andalso NeedSaveB -> [?ENC:encode_mov_rr(rax, A)];
+              A =/= rax -> [?ENC:encode_mov_rr(rax, A)];
+              true -> [] end,
+    SaveB = if NeedSaveB -> [?ENC:encode_mov_rr(r11, B)]; true -> [] end,
     %% FIXED: Add runtime zero-divisor check before idiv
     ZeroCheck = [
         ?ENC:encode_test_rr(SafeB, SafeB),  %% test divisor, divisor
         ?ENC:encode_jcc_rel32(ne, 2),       %% jne +2 (skip ud2)
         ?ENC:encode_ud2()                   %% trap if zero
     ],
-    %% Move dividend to rax, sign-extend to rdx:rax, divide, result in rax
-    MovA = if A =/= rax -> [?ENC:encode_mov_rr(rax, A)]; true -> [] end,
-    DivParts = SaveB ++ ZeroCheck ++ MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)],
+    %% Order: MovA (if A==r11), SaveB, ZeroCheck, MovA (otherwise), cqo, idiv
+    DivParts = if A =:= r11 andalso NeedSaveB ->
+                   MovA ++ SaveB ++ ZeroCheck ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)];
+                  true ->
+                   SaveB ++ ZeroCheck ++ MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)]
+               end,
     MovDst = if Dst =/= rax -> DivParts ++ [?ENC:encode_mov_rr(Dst, rax)];
                 true -> DivParts end,
     MovDst;
 
 %% SREM (remainder is in rdx after idiv)
 lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
-    %% FIXED: Divisor B must not be in rax/rdx (they're clobbered by div).
+    %% CRITICAL FIX (Finding 4): When A == r11 and B needs saving to r11,
+    %% move A to rax FIRST to prevent clobbering.
     SafeB = if B =:= rax orelse B =:= rdx -> r11; true -> B end,
-    SaveB = if B =:= rax orelse B =:= rdx -> [?ENC:encode_mov_rr(r11, B)]; true -> [] end,
+    NeedSaveB = (B =:= rax orelse B =:= rdx),
+    %% If A is r11 and we need to save B to r11, move A first
+    MovA = if A =:= r11 andalso NeedSaveB -> [?ENC:encode_mov_rr(rax, A)];
+              A =/= rax -> [?ENC:encode_mov_rr(rax, A)];
+              true -> [] end,
+    SaveB = if NeedSaveB -> [?ENC:encode_mov_rr(r11, B)]; true -> [] end,
     %% FIXED: Add runtime zero-divisor check before idiv
     ZeroCheck = [
         ?ENC:encode_test_rr(SafeB, SafeB),  %% test divisor, divisor
         ?ENC:encode_jcc_rel32(ne, 2),       %% jne +2 (skip ud2)
         ?ENC:encode_ud2()                   %% trap if zero
     ],
-    MovA = if A =/= rax -> [?ENC:encode_mov_rr(rax, A)]; true -> [] end,
-    DivParts = SaveB ++ ZeroCheck ++ MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)],
+    %% Order: MovA (if A==r11), SaveB, ZeroCheck, MovA (otherwise), cqo, idiv
+    DivParts = if A =:= r11 andalso NeedSaveB ->
+                   MovA ++ SaveB ++ ZeroCheck ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)];
+                  true ->
+                   SaveB ++ ZeroCheck ++ MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)]
+               end,
     MovDst = if Dst =/= rdx -> DivParts ++ [?ENC:encode_mov_rr(Dst, rdx)];
                 true -> DivParts end,
     MovDst;
@@ -306,9 +325,11 @@ lower_instruction({shl, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
          ?ENC:encode_shl_cl(r11),
          ?ENC:encode_mov_rr(Dst, r11)];
        Dst =:= rcx, B =:= rcx ->
-        %% B is already in rcx, shift it directly
-        Parts0 = if A =/= rcx -> [?ENC:encode_mov_rr(rcx, A)]; true -> [] end,
-        Parts0 ++ [?ENC:encode_shl_cl(rcx)];
+        %% CRITICAL FIX (Finding 3): When Dst=rcx and B=rcx (shift count is in rcx),
+        %% moving A to rcx would overwrite the shift count in cl. Use scratch register.
+        [?ENC:encode_mov_rr(r11, A),
+         ?ENC:encode_shl_cl(r11),
+         ?ENC:encode_mov_rr(rcx, r11)];
        true ->
         %% Normal case: Dst is not rcx
         Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
@@ -325,8 +346,10 @@ lower_instruction({shr, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
          ?ENC:encode_shr_cl(r11),
          ?ENC:encode_mov_rr(Dst, r11)];
        Dst =:= rcx, B =:= rcx ->
-        Parts0 = if A =/= rcx -> [?ENC:encode_mov_rr(rcx, A)]; true -> [] end,
-        Parts0 ++ [?ENC:encode_shr_cl(rcx)];
+        %% CRITICAL FIX (Finding 3): Use scratch register to preserve cl
+        [?ENC:encode_mov_rr(r11, A),
+         ?ENC:encode_shr_cl(r11),
+         ?ENC:encode_mov_rr(rcx, r11)];
        true ->
         Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
         MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
@@ -342,8 +365,10 @@ lower_instruction({sar, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
          ?ENC:encode_sar_cl(r11),
          ?ENC:encode_mov_rr(Dst, r11)];
        Dst =:= rcx, B =:= rcx ->
-        Parts0 = if A =/= rcx -> [?ENC:encode_mov_rr(rcx, A)]; true -> [] end,
-        Parts0 ++ [?ENC:encode_sar_cl(rcx)];
+        %% CRITICAL FIX (Finding 3): Use scratch register to preserve cl
+        [?ENC:encode_mov_rr(r11, A),
+         ?ENC:encode_sar_cl(r11),
+         ?ENC:encode_mov_rr(rcx, r11)];
        true ->
         Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
         MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,

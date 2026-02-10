@@ -126,22 +126,38 @@ boot_data(Config) ->
     %% Get ISR stubs base from config or compute default
     ISRStubsBase = maps:get(isr_stubs_base, Config, PageTablesBase + 16#100000),
 
-    %% FINDING 9 FIX: Replace hard assertions with case expressions
+    %% FINDING 9 FIX: Validate both ordering AND non-overlap with actual sizes
     case GDTBase >= 0 andalso GDTBase =< 16#4000000 of
         true -> ok;
         false -> error({invalid_boot_config, {gdt_base_out_of_range, GDTBase}})
     end,
-    case IDTBase >= GDTBase andalso IDTBase =< 16#4000000 of
+
+    %% Calculate actual data sizes to validate no overlap
+    GDTData = vbeam_gdt_idt:gdt_data(),
+    GDTActualSize = byte_size(GDTData),
+    GDTEnd = GDTBase + GDTActualSize,
+
+    case IDTBase >= GDTEnd andalso IDTBase =< 16#4000000 of
         true -> ok;
-        false -> error({invalid_boot_config, {idt_base_invalid, IDTBase, must_be_after, GDTBase}})
+        false -> error({regions_overlap, gdt, {GDTBase, GDTEnd}, idt, IDTBase})
     end,
-    case PageTablesBase >= IDTBase andalso PageTablesBase =< 16#4000000 of
+
+    IDTData = vbeam_gdt_idt:idt_data(ISRStubsBase),
+    IDTActualSize = byte_size(IDTData) + 10,  % IDT + IDTR
+    IDTEnd = IDTBase + IDTActualSize,
+
+    case PageTablesBase >= IDTEnd andalso PageTablesBase =< 16#4000000 of
         true -> ok;
-        false -> error({invalid_boot_config, {page_tables_base_invalid, PageTablesBase, must_be_after, IDTBase}})
+        false -> error({regions_overlap, idt, {IDTBase, IDTEnd}, page_tables, PageTablesBase})
     end,
-    case ISRStubsBase >= PageTablesBase andalso ISRStubsBase =< 16#4000000 of
+
+    PageTablesData = vbeam_paging:page_tables(PageTablesBase, 4),
+    PageTablesActualSize = byte_size(PageTablesData),
+    PageTablesEnd = PageTablesBase + PageTablesActualSize,
+
+    case ISRStubsBase >= PageTablesEnd andalso ISRStubsBase =< 16#4000000 of
         true -> ok;
-        false -> error({invalid_boot_config, {isr_stubs_base_invalid, ISRStubsBase, must_be_after, PageTablesBase}})
+        false -> error({regions_overlap, page_tables, {PageTablesBase, PageTablesEnd}, isr_stubs, ISRStubsBase})
     end,
 
     %% GDT data (includes 5 entries + GDTR at end)

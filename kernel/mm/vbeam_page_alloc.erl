@@ -36,7 +36,7 @@
     total_pages => non_neg_integer(),
     free_count => non_neg_integer(),
     next_hint => non_neg_integer(),
-    reserved_end => non_neg_integer()  % Last page of reserved region
+    reserved_pages => #{non_neg_integer() => non_neg_integer()}  % StartPage => EndPage map
 }.
 
 -type phys_addr() :: non_neg_integer().
@@ -60,7 +60,7 @@ init(TotalMemoryBytes) ->
         total_pages => TotalPages,
         free_count => TotalPages,
         next_hint => 0,
-        reserved_end => ReservedPages - 1
+        reserved_pages => #{}
     },
 
     %% Reserve the first 2MB
@@ -98,10 +98,18 @@ free_page(State, PhysAddr) ->
     end.
 
 free_page_checked(State, PageNum) ->
-    #{bitmap := Bitmap, free_count := FreeCount, reserved_end := ReservedEnd} = State,
+    #{bitmap := Bitmap, free_count := FreeCount, reserved_pages := ReservedPages} = State,
 
-    %% Check if page is in reserved region
-    case PageNum =< ReservedEnd of
+    %% Check if page is in any reserved region
+    IsReserved = maps:fold(
+        fun(StartPage, EndPage, Acc) ->
+            Acc orelse (PageNum >= StartPage andalso PageNum =< EndPage)
+        end,
+        false,
+        ReservedPages
+    ),
+
+    case IsReserved of
         true ->
             %% Page is reserved, don't free it
             State;
@@ -189,7 +197,7 @@ alloc_contiguous(State, Count) ->
 %% @doc Mark a range of pages as reserved
 mark_reserved_pages(State, StartPage, EndPage) ->
     #{bitmap := Bitmap, free_count := FreeCount, total_pages := Total,
-      reserved_end := OldReservedEnd} = State,
+      reserved_pages := ReservedPages} = State,
 
     %% Clamp EndPage to valid range
     ClampedEnd = min(EndPage, Total - 1),
@@ -204,13 +212,13 @@ mark_reserved_pages(State, StartPage, EndPage) ->
             NumPages = ClampedEnd - StartPage + 1,
             NewBitmap = mark_pages_allocated(Bitmap, StartPage, NumPages),
 
-            %% Update reserved_end to protect all reserved pages
-            NewReservedEnd = max(OldReservedEnd, ClampedEnd),
+            %% Add this range to reserved_pages map
+            NewReservedPages = ReservedPages#{StartPage => ClampedEnd},
 
             State#{
                 bitmap := NewBitmap,
                 free_count := FreeCount - FreeInRange,
-                reserved_end := NewReservedEnd
+                reserved_pages := NewReservedPages
             }
     end.
 

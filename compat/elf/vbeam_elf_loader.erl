@@ -71,7 +71,7 @@
     header => elf_header(),
     sections => [section()],
     symbols => [symbol()],
-    relocations => #{binary() => [relocation()]}, % section name -> relocations
+    relocations => #{non_neg_integer() => [relocation()]}, % section index -> relocations
     strings => #{non_neg_integer() => binary()}    % offset -> string
 }.
 
@@ -563,12 +563,9 @@ parse_relocations(_Binary, Sections, _StrTab) ->
 
             %% Validate TargetIdx (sh_info) before tuple indexing
             TupleSize = tuple_size(SectionsTuple),
-            TargetName = case TargetIdx of
-                Idx when Idx >= 0, Idx < TupleSize ->
-                    TargetSec = element(TargetIdx + 1, SectionsTuple),
-                    maps:get(name, TargetSec);
-                _ ->
-                    error({invalid_sh_info, TargetIdx, max, TupleSize - 1})
+            case TargetIdx of
+                Idx when Idx >= 0, Idx < TupleSize -> ok;
+                _ -> error({invalid_sh_info, TargetIdx, max, TupleSize - 1})
             end,
 
             NumRelas = byte_size(Data) div EntSize,
@@ -584,8 +581,9 @@ parse_relocations(_Binary, Sections, _StrTab) ->
                 || I <- lists:seq(0, NumRelas - 1)
             ],
 
-            ExistingRelocs = maps:get(TargetName, Acc, []),
-            Acc#{TargetName => ExistingRelocs ++ Relocs}
+            %% FINDING 8 FIX: Key by section index instead of name
+            ExistingRelocs = maps:get(TargetIdx, Acc, []),
+            Acc#{TargetIdx => ExistingRelocs ++ Relocs}
         end,
         #{},
         RelaSections
@@ -643,9 +641,9 @@ resolve_symbol(Sym, _SymbolTable) ->
 %% ============================================================================
 
 apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) ->
-    Name = maps:get(name, Section),
     SectionIdx = maps:get(section_index, Section),
-    case maps:find(Name, Relocs) of
+    %% FINDING 8 FIX: Look up relocations by section index instead of name
+    case maps:find(SectionIdx, Relocs) of
         {ok, RelocList} ->
             Data = maps:get(data, Section),
             SectionAddr = maps:get(SectionIdx, SectionAddrs, 0),

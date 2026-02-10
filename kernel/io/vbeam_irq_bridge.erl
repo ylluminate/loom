@@ -156,9 +156,10 @@ tick(ServerRef) ->
 
 %% @doc Acknowledge IRQ receipt, decrementing pending count.
 %% Handlers should call this after processing each IRQ to allow more deliveries.
+%% FINDING 10 FIX: Use gen_server:call to capture caller PID for authentication
 -spec ack_irq(non_neg_integer()) -> ok.
 ack_irq(IrqNum) when is_integer(IrqNum), IrqNum >= 0 ->
-    gen_server:cast(?MODULE, {ack_irq, IrqNum}).
+    gen_server:call(?MODULE, {ack_irq, IrqNum}).
 
 %% @doc Generate x86_64 machine code for ISR stub that writes to ring buffer.
 %%
@@ -269,7 +270,7 @@ handle_call({register_handler, IrqNum, Pid}, From, #state{handlers = Handlers, m
     end;
 
 
-handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Handlers, monitors = Monitors} = State) ->
+handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Handlers, monitors = Monitors, pending_counts = PendingCounts} = State) ->
     %% Check caller ownership — only the process that registered the handler can unregister
     case maps:get(IrqNum, Handlers, undefined) of
         undefined ->
@@ -297,7 +298,9 @@ handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Hand
             end
     end,
     NewHandlers = maps:remove(IrqNum, Handlers),
-    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}}
+    %% FINDING 7 FIX: Clear pending count for this IRQ
+    NewPendingCounts = maps:remove(IrqNum, PendingCounts),
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts}}
     end;
 
 handle_call(get_handlers, _From, #state{handlers = Handlers} = State) ->
@@ -340,6 +343,21 @@ handle_call(tick, _From, #state{ring_buffer = RingBuf, handlers = Handlers, pend
 
     {reply, {ok, DeliveredCount}, State#state{ring_buffer = NewRingBuf, pending_counts = NewPendingCounts}};
 
+%% FINDING 10 FIX: Authenticate ack_irq caller
+handle_call({ack_irq, IrqNum}, {CallerPid, _}, #state{handlers = Handlers, pending_counts = PendingCounts} = State) ->
+    case maps:get(IrqNum, Handlers, undefined) of
+        CallerPid ->
+            %% Caller is the registered handler - allow ACK
+            NewPendingCounts = case maps:get(IrqNum, PendingCounts, 0) of
+                0 -> PendingCounts;
+                N -> PendingCounts#{IrqNum => N - 1}
+            end,
+            {reply, ok, State#state{pending_counts = NewPendingCounts}};
+        _ ->
+            %% Caller is not the registered handler - deny
+            {reply, {error, not_authorized}, State}
+    end;
+
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -347,19 +365,13 @@ handle_cast({simulate_irq, IrqNum, Timestamp}, #state{ring_buffer = RingBuf} = S
     NewRingBuf = ring_push({IrqNum, Timestamp}, RingBuf),
     {noreply, State#state{ring_buffer = NewRingBuf}};
 
-%% FINDING 8 FIX: Handle IRQ acknowledgment
-handle_cast({ack_irq, IrqNum}, #state{pending_counts = PendingCounts} = State) ->
-    NewPendingCounts = case maps:get(IrqNum, PendingCounts, 0) of
-        0 -> PendingCounts;
-        N -> PendingCounts#{IrqNum => N - 1}
-    end,
-    {noreply, State#state{pending_counts = NewPendingCounts}};
+%% FINDING 10 FIX: ack_irq moved to handle_call for authentication
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% Handle monitor DOWN messages when a handler dies
-handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, #state{handlers = Handlers, monitors = Monitors} = State) ->
+handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, #state{handlers = Handlers, monitors = Monitors, pending_counts = PendingCounts} = State) ->
     case maps:get(MonitorRef, Monitors, undefined) of
         undefined ->
             %% Unknown monitor, ignore
@@ -368,7 +380,9 @@ handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, #state{handlers = Hand
             %% Remove dead handler
             NewHandlers = maps:remove(IrqNum, Handlers),
             NewMonitors = maps:remove(MonitorRef, Monitors),
-            {noreply, State#state{handlers = NewHandlers, monitors = NewMonitors}}
+            %% FINDING 7 FIX: Clear pending count for this IRQ
+            NewPendingCounts = maps:remove(IrqNum, PendingCounts),
+            {noreply, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts}}
     end;
 
 handle_info(_Info, State) ->
