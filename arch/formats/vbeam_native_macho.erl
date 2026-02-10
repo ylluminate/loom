@@ -112,6 +112,7 @@ emit(Code, Data, EntryOffset, Arch) ->
     SymtabOff = SymtabStrOff,  %% no symbols, just string table
 
     %% Entry offset from start of __TEXT segment
+    true = EntryOffset < byte_size(Code),  %% Validate entry offset
     EntryOff = TextSectionOff + EntryOffset,
 
     %% Build Mach-O header

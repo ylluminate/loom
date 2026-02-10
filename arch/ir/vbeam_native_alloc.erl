@@ -78,17 +78,26 @@ emit_alloc_init(arm64, Format) ->
         %% Failure path: mmap returned error
         {label, FailLbl},
         ?ARM64_ENC:encode_mov_imm64(x0, 1),            %% exit code 1
-        ?ARM64_ENC:encode_mov_imm64(SysNumReg, 93),    %% sys_exit
+        %% sys_exit: macOS=1, Linux=93
+        case Format of
+            macho -> ?ARM64_ENC:encode_mov_imm64(x16, 1);
+            _     -> ?ARM64_ENC:encode_mov_imm64(x8, 93)
+        end,
         ?ARM64_ENC:encode_svc(SvcImm),                 %% exit(1)
-        %% Success path
+        %% Success path: store heap base in x28 and heap end in x27
         {label, OkLbl},
-        ?ARM64_ENC:encode_mov_rr(x28, x0)
+        ?ARM64_ENC:encode_mov_rr(x28, x0),             %% x28 = heap_base
+        ?ARM64_ENC:encode_mov_rr(x27, x0),
+        ?ARM64_ENC:encode_add_imm(x27, x27, ?HEAP_SIZE) %% x27 = heap_end
     ]);
 emit_alloc_init(x86_64, _Format) ->
     %% x86_64 Linux mmap syscall:
     %%   rax = 9 (sys_mmap)
     %%   rdi = addr (0), rsi = length, rdx = prot,
     %%   r10 = flags, r8 = fd, r9 = offset
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__alloc_init_x64_ok_", Uid/binary>>,
+    FailLbl = <<"__alloc_init_x64_fail_", Uid/binary>>,
     lists:flatten([
         ?X86_ENC:encode_mov_imm64(rdi, 0),
         ?X86_ENC:encode_mov_imm64(rsi, ?HEAP_SIZE),
@@ -98,7 +107,20 @@ emit_alloc_init(x86_64, _Format) ->
         ?X86_ENC:encode_mov_imm64(r9, 0),
         ?X86_ENC:encode_mov_imm64(rax, 9),
         ?X86_ENC:encode_syscall(),
-        ?X86_ENC:encode_mov_rr(r15, rax)
+        %% Validate mmap result: negative rax means error
+        ?X86_ENC:encode_test_rr(rax, rax),
+        ?X86_ENC:encode_jns(0),
+        {reloc, x86_rel32, OkLbl, -4},
+        %% Failure path
+        {label, FailLbl},
+        ?X86_ENC:encode_mov_imm64(rdi, 1),     %% exit code 1
+        ?X86_ENC:encode_mov_imm64(rax, 60),    %% sys_exit
+        ?X86_ENC:encode_syscall(),
+        %% Success path: store heap base in r15 and heap end in r14
+        {label, OkLbl},
+        ?X86_ENC:encode_mov_rr(r15, rax),      %% r15 = heap_base
+        ?X86_ENC:encode_mov_rr(r14, rax),
+        ?X86_ENC:encode_add_imm(r14, ?HEAP_SIZE) %% r14 = heap_end
     ]).
 
 %% @doc Emit code to allocate N bytes (compile-time constant) from the
@@ -109,25 +131,50 @@ emit_alloc_init(x86_64, _Format) ->
 emit_alloc(arm64, DstReg, N) ->
     AlignedN = align8(N),
     HeapReg = heap_reg(arm64),
-    %% Heap end would be stored in x27 (initialized to x28 + HEAP_SIZE at start)
-    %% For now, we'll just emit the allocation without bounds check
-    %% TODO: Initialize x27 = x28 + HEAP_SIZE at program start and add bounds check
-    lists:flatten([
-        ?ARM64_ENC:encode_mov_rr(DstReg, HeapReg),     %% return current ptr
-        %% Advance heap pointer
-        if AlignedN >= 0, AlignedN < 4096 ->
-            ?ARM64_ENC:encode_add_imm(HeapReg, HeapReg, AlignedN);
+    HeapEndReg = x27,  %% Initialized to heap_base + HEAP_SIZE in emit_alloc_init
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__alloc_ok_", Uid/binary>>,
+    OomLbl = <<"__alloc_oom_", Uid/binary>>,
+    %% Calculate new heap pointer in x16
+    AdvanceCode = if AlignedN >= 0, AlignedN < 4096 ->
+            ?ARM64_ENC:encode_add_imm(x16, HeapReg, AlignedN);
            true ->
             [?ARM64_ENC:encode_mov_imm64(x16, AlignedN),
-             ?ARM64_ENC:encode_add_rrr(HeapReg, HeapReg, x16)]
-        end
+             ?ARM64_ENC:encode_add_rrr(x16, HeapReg, x16)]
+        end,
+    lists:flatten([
+        AdvanceCode,
+        %% Bounds check: new_ptr > heap_end?
+        ?ARM64_ENC:encode_cmp_rr(x16, HeapEndReg),
+        ?ARM64_ENC:encode_b_cond(le, 0),
+        {reloc, arm64_cond_branch19, OkLbl, -4},
+        %% OOM path: trap
+        {label, OomLbl},
+        ?ARM64_ENC:encode_brk(16#DEAD),
+        %% Success path
+        {label, OkLbl},
+        ?ARM64_ENC:encode_mov_rr(DstReg, HeapReg),     %% return current ptr
+        ?ARM64_ENC:encode_mov_rr(HeapReg, x16)         %% advance heap pointer
     ]);
 emit_alloc(x86_64, DstReg, N) ->
     AlignedN = align8(N),
     HeapReg = heap_reg(x86_64),
+    HeapEndReg = r14,  %% Initialized to heap_base + HEAP_SIZE in emit_alloc_init
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__alloc_x64_ok_", Uid/binary>>,
+    OomLbl = <<"__alloc_x64_oom_", Uid/binary>>,
     lists:flatten([
-        ?X86_ENC:encode_mov_rr(DstReg, HeapReg),
-        ?X86_ENC:encode_add_imm(HeapReg, AlignedN)
+        ?X86_ENC:encode_mov_rr(DstReg, HeapReg),       %% return current ptr
+        ?X86_ENC:encode_add_imm(HeapReg, AlignedN),    %% advance heap pointer
+        %% Bounds check: heap_ptr > heap_end?
+        ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
+        ?X86_ENC:encode_jle(0),
+        {reloc, x86_rel32, OkLbl, -4},
+        %% OOM path: trap via int3
+        {label, OomLbl},
+        ?X86_ENC:encode_int3(),
+        %% Success path
+        {label, OkLbl}
     ]).
 
 %% @doc Emit code to allocate a dynamic number of bytes (in SizeReg)
@@ -136,30 +183,55 @@ emit_alloc(x86_64, DstReg, N) ->
 -spec emit_alloc_reg(atom(), atom(), atom()) -> [term()].
 emit_alloc_reg(arm64, DstReg, SizeReg) ->
     HeapReg = heap_reg(arm64),
+    HeapEndReg = x27,
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__alloc_reg_ok_", Uid/binary>>,
+    OomLbl = <<"__alloc_reg_oom_", Uid/binary>>,
     lists:flatten([
         %% Align SizeReg to 8: size = (size + 7) & ~7
         ?ARM64_ENC:encode_add_imm(x16, SizeReg, 7),
         ?ARM64_ENC:encode_mov_imm64(x17, -8),         %% ~7 = 0xFFF...F8
         ?ARM64_ENC:encode_and_rrr(x16, x16, x17),     %% x16 = aligned size
-        %% Bump allocate
+        %% Calculate new heap pointer
+        ?ARM64_ENC:encode_add_rrr(x17, HeapReg, x16), %% x17 = new_heap_ptr
+        %% Bounds check
+        ?ARM64_ENC:encode_cmp_rr(x17, HeapEndReg),
+        ?ARM64_ENC:encode_b_cond(le, 0),
+        {reloc, arm64_cond_branch19, OkLbl, -4},
+        %% OOM path
+        {label, OomLbl},
+        ?ARM64_ENC:encode_brk(16#DEAD),
+        %% Success path
+        {label, OkLbl},
         ?ARM64_ENC:encode_mov_rr(DstReg, HeapReg),     %% return current ptr
-        ?ARM64_ENC:encode_add_rrr(HeapReg, HeapReg, x16) %% advance
+        ?ARM64_ENC:encode_mov_rr(HeapReg, x17)         %% advance
     ]);
 emit_alloc_reg(x86_64, DstReg, SizeReg) ->
     HeapReg = heap_reg(x86_64),
+    HeapEndReg = r14,
     %% We need a temp; use rax if DstReg isn't rax, else use rcx
     TmpReg = case DstReg of rax -> rcx; _ -> rax end,
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__alloc_reg_x64_ok_", Uid/binary>>,
+    OomLbl = <<"__alloc_reg_x64_oom_", Uid/binary>>,
     lists:flatten([
         %% Align: tmp = (size + 7) & ~7
         ?X86_ENC:encode_mov_rr(TmpReg, SizeReg),
         ?X86_ENC:encode_add_imm(TmpReg, 7),
-        ?X86_ENC:encode_and_rr(TmpReg, TmpReg),        %% self-AND is no-op; need imm
-        %% Actually: just use add+and with immediate mask
-        %% x86 AND r64, imm32 is REX.W 81 /4
         encode_and_imm64(TmpReg, -8),
-        %% Bump allocate
+        %% Save current heap pointer in DstReg
         ?X86_ENC:encode_mov_rr(DstReg, HeapReg),
-        ?X86_ENC:encode_add_rr(HeapReg, TmpReg)
+        %% Advance heap pointer
+        ?X86_ENC:encode_add_rr(HeapReg, TmpReg),
+        %% Bounds check
+        ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
+        ?X86_ENC:encode_jle(0),
+        {reloc, x86_rel32, OkLbl, -4},
+        %% OOM path
+        {label, OomLbl},
+        ?X86_ENC:encode_int3(),
+        %% Success path
+        {label, OkLbl}
     ]).
 
 %% Internal: encode AND r64, imm32 (sign-extended)

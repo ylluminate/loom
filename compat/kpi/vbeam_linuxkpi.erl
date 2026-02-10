@@ -47,7 +47,8 @@
 init() ->
     case ets:whereis(?TIMER_TABLE) of
         undefined ->
-            ets:new(?TIMER_TABLE, [named_table, public, set]);
+            %% BUG 9 FIX: Use protected instead of public
+            ets:new(?TIMER_TABLE, [named_table, protected, set]);
         _ ->
             ok
     end,
@@ -441,19 +442,29 @@ init_timer_storage() ->
 
 store_timer_ref(Timer, TRef) ->
     init_timer_storage(),
-    ets:insert(?TIMER_TABLE, {Timer, TRef}),
-    ok.
+    %% BUG 10 FIX: Check cardinality before inserting
+    case ets:info(?TIMER_TABLE, size) of
+        Size when Size < 10000 ->
+            %% BUG 11 FIX: Key by {self(), Timer} to avoid namespace collision
+            ets:insert(?TIMER_TABLE, {{self(), Timer}, TRef}),
+            ok;
+        _ ->
+            %% Reject if exceeded
+            {error, timer_table_full}
+    end.
 
 get_timer_ref(Timer) ->
     init_timer_storage(),
-    case ets:lookup(?TIMER_TABLE, Timer) of
-        [{Timer, TRef}] -> TRef;
+    %% BUG 11 FIX: Lookup by {self(), Timer}
+    case ets:lookup(?TIMER_TABLE, {self(), Timer}) of
+        [{{_Pid, Timer}, TRef}] -> TRef;
         [] -> undefined
     end.
 
 remove_timer_ref(Timer) ->
     init_timer_storage(),
-    ets:delete(?TIMER_TABLE, Timer),
+    %% BUG 11 FIX: Delete by {self(), Timer}
+    ets:delete(?TIMER_TABLE, {self(), Timer}),
     ok.
 
 log_kapi_call(Function, Args) ->

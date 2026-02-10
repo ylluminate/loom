@@ -1323,8 +1323,7 @@ lower_instruction({raw, Bytes}, _FnName, _FS, _Fmt, _UC) when is_binary(Bytes) -
 
 %% Catch-all
 lower_instruction(Inst, _FnName, _FS, _Fmt, _UC) ->
-    io:format(standard_error, "warning: unhandled arm64 instruction: ~p~n", [Inst]),
-    [].
+    error({unhandled_arm64_instruction, Inst}).
 
 %%====================================================================
 %% Internal helpers
@@ -1390,7 +1389,9 @@ build_arg_moves_arm64([{stack, Slot} | Rest], [ArgReg | ArgRegs]) ->
     [{ArgReg, {stack, Slot}} | build_arg_moves_arm64(Rest, ArgRegs)];
 build_arg_moves_arm64([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
     [{ArgReg, {imm, 0}} | build_arg_moves_arm64(Rest, ArgRegs)];
-build_arg_moves_arm64(_, []) -> [].
+build_arg_moves_arm64([Arg | _] = Args, []) ->
+    %% More args than registers - error instead of silently dropping
+    error({too_many_arguments, length(Args), max_allowed, 8, first_dropped, Arg}).
 
 break_cycles_and_emit_arm64(Moves, NumCalleeSaved) ->
     %% Full cycle decomposition: find strongly connected components
@@ -1471,15 +1472,23 @@ break_single_cycle([First | _] = Cycle, AllMoves, NumCalleeSaved) ->
                                  lists:member(Dst, Cycle)],
 
     %% Find the move that closes the cycle (dest = First)
-    {_ClosingMove, OtherMoves} = lists:partition(
+    {ClosingMoves, OtherMoves} = lists:partition(
         fun({Dst, _}) -> Dst =:= First end, CycleMoves),
 
     %% Emit other moves
     OtherCode = [emit_move_arm64(Dst, Src, NumCalleeSaved)
                  || {Dst, Src} <- OtherMoves],
 
-    %% Close cycle by moving x16 to first destination
-    CloseCode = [?ENC:encode_mov_rr(First, x16)],
+    %% Close cycle: restore x16 to the source of the closing move
+    %% (or directly to First if there's no closing move)
+    CloseCode = case ClosingMoves of
+        [{First, {preg, ClosingSrc}}] ->
+            %% Proper rotation: move x16 to the source position of closing move
+            [?ENC:encode_mov_rr(ClosingSrc, x16)];
+        _ ->
+            %% Fallback: just restore to First (should not happen in valid cycles)
+            [?ENC:encode_mov_rr(First, x16)]
+    end,
 
     SaveCode ++ OtherCode ++ CloseCode.
 

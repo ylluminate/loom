@@ -259,6 +259,12 @@ patch_binary(Bin, Offset, 8, Value) ->
 
 %% ARM64 ADRP instruction patching: modify immhi:immlo fields.
 patch_adrp(Bin, Offset, PageDelta) ->
+    BinSize = byte_size(Bin),
+    %% Bounds check
+    case Offset + 4 =< BinSize of
+        false -> error({relocation_out_of_bounds, Offset});
+        true -> ok
+    end,
     %% Validate 21-bit signed range: PageDelta must fit in [-2^20, 2^20-1]
     case (PageDelta >= -(1 bsl 20)) andalso (PageDelta < (1 bsl 20)) of
         true ->
@@ -274,6 +280,11 @@ patch_adrp(Bin, Offset, PageDelta) ->
 
 %% ARM64 ADD immediate patching: modify imm12 field.
 patch_add_imm12(Bin, Offset, PageOff) ->
+    BinSize = byte_size(Bin),
+    case Offset + 4 =< BinSize of
+        false -> error({relocation_out_of_bounds, Offset});
+        true -> ok
+    end,
     <<Before:Offset/binary, OldInsn:32/little, After/binary>> = Bin,
     Masked = OldInsn band (bnot (16#FFF bsl 10)),
     NewInsn = Masked bor ((PageOff band 16#FFF) bsl 10),
@@ -284,6 +295,12 @@ patch_add_imm12(Bin, Offset, PageOff) ->
 %% BL encoding: [100101][imm26:26]
 %% imm26 is signed, represents offset/4 (offset in instructions).
 patch_arm64_branch26(Bin, Offset, ByteOffset) ->
+    BinSize = byte_size(Bin),
+    %% Bounds check
+    case Offset + 4 =< BinSize of
+        false -> error({relocation_out_of_bounds, Offset});
+        true -> ok
+    end,
     %% Validate alignment
     case ByteOffset rem 4 of
         0 -> ok;

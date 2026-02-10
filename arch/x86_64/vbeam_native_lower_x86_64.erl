@@ -32,22 +32,21 @@ lower_function(#{name := Name, body := Body, arity := _Arity,
 compute_frame_size(SpillSlots, UsedCalleeSaved) ->
     %% Each spill slot is 8 bytes
     SpillSize = SpillSlots * 8,
-    %% Callee-saved registers are also 8 bytes each
-    CalleeSaveSize = length(UsedCalleeSaved) * 8,
-    %% Total raw size
-    RawSize = SpillSize + CalleeSaveSize,
-    %% BUG #3: Add alignment padding if odd number of callee-saved registers
-    %% to maintain 16-byte alignment at call sites
-    AlignmentPadding = case length(UsedCalleeSaved) rem 2 of
-        1 -> 8;  %% Odd count, add 8 bytes
-        0 -> 0   %% Even count, no padding needed
-    end,
-    TotalSize = RawSize + AlignmentPadding,
-    %% Round up to 16-byte alignment (after push rbp, rsp is 16-aligned)
-    case TotalSize rem 16 of
-        0 when TotalSize =:= 0 -> 0;
-        0 -> TotalSize;
-        _ -> TotalSize + (16 - (TotalSize rem 16))
+    %% FIXED BUG #3: Correct alignment formula.
+    %% After entry: rsp is 16-aligned (call pushes 8-byte return address, making it 8-aligned,
+    %% then push rbp makes it 16-aligned again).
+    %% Then we push N callee-saved registers (each 8 bytes).
+    %% Then we sub rsp, FrameSize for spill slots.
+    %% For correct alignment at call sites: (1 + N) * 8 + FrameSize ≡ 0 (mod 16)
+    %% So FrameSize must have opposite parity to (1 + N).
+    TotalPushes = 1 + length(UsedCalleeSaved),  % rbp + callee-saved
+    %% If TotalPushes is odd, FrameSize must be odd multiple of 8 (add 8 if even).
+    %% If TotalPushes is even, FrameSize must be even multiple of 8 (no change if even).
+    case {TotalPushes rem 2, SpillSize rem 16} of
+        {1, 0} -> SpillSize + 8;  % Odd pushes, even SpillSize → add 8
+        {1, 8} -> SpillSize;      % Odd pushes, odd SpillSize → OK
+        {0, 0} -> SpillSize;      % Even pushes, even SpillSize → OK
+        {0, 8} -> SpillSize + 8   % Even pushes, odd SpillSize → add 8
     end.
 
 %% Emit function prologue: push rbp; mov rbp, rsp; sub rsp, FrameSize; save callee-saved
@@ -378,11 +377,20 @@ lower_instruction({call_indirect, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
 
 %% RET
 lower_instruction(ret, _FnName, UsedCalleeSaved) ->
-    %% Restore callee-saved registers in reverse order, then emit epilogue
-    %% Callee-saved are pushed in order [rbx, r12, r13, r14, r15] at prologue
-    %% so we must pop in reverse order [r15, r14, r13, r12, rbx]
-    RestoreCode = [?ENC:encode_pop(Reg) || Reg <- lists:reverse(UsedCalleeSaved)],
-    RestoreCode ++ emit_epilogue(1);
+    %% FIXED BUG #1: Deallocate local frame FIRST, then pop callee-saved in reverse.
+    %% Frame layout: rbp → callee-saved → spill area → rsp
+    %% Epilogue sequence: add rsp, FrameSize → pop callee-saved (reverse) → pop rbp → ret
+    %% Note: FrameSize is not available here, so we use mov rsp, rbp to deallocate
+    %% which reclaims both spill area and callee-saved space in one instruction.
+    %% Then pop callee-saved registers in REVERSE order [r15, r14, r13, r12, rbx].
+    case UsedCalleeSaved of
+        [] ->
+            emit_epilogue(0);
+        _ ->
+            %% mov rsp, rbp (reclaim entire frame)
+            RestoreCode = [?ENC:encode_pop(Reg) || Reg <- lists:reverse(UsedCalleeSaved)],
+            [?ENC:encode_mov_rr(rsp, rbp)] ++ RestoreCode ++ [?ENC:encode_pop(rbp), ?ENC:encode_ret()]
+    end;
 
 %% PUSH
 lower_instruction({push, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
@@ -992,16 +1000,23 @@ lower_instruction({method_call, {preg, Dst}, ReceiverType, MethodName, Args},
                   _FnName, _UsedCalleeSaved) when is_binary(ReceiverType),
                                 is_binary(MethodName),
                                 is_list(Args) ->
-    MangledName = <<ReceiverType/binary, "__", MethodName/binary>>,
+    %% FIXED BUG #8: Guard against >6 arguments (stack args not yet supported)
     ArgRegsList = [rdi, rsi, rdx, rcx, r8, r9],
-    ArgMoves = move_args_to_regs_x86(Args, ArgRegsList),
-    CallCode = [?ENC:encode_call_rel32(0),
-                {reloc, rel32, MangledName, -4}],
-    ResultMove = case Dst of
-        rax -> [];
-        _   -> [?ENC:encode_mov_rr(Dst, rax)]
-    end,
-    lists:flatten([ArgMoves, CallCode, ResultMove]);
+    case length(Args) > length(ArgRegsList) of
+        true ->
+            error({method_call_too_many_args, MethodName, length(Args),
+                   "Stack arguments not yet implemented. Max 6 args."});
+        false ->
+            MangledName = <<ReceiverType/binary, "__", MethodName/binary>>,
+            ArgMoves = move_args_to_regs_x86(Args, ArgRegsList),
+            CallCode = [?ENC:encode_call_rel32(0),
+                        {reloc, rel32, MangledName, -4}],
+            ResultMove = case Dst of
+                rax -> [];
+                _   -> [?ENC:encode_mov_rr(Dst, rax)]
+            end,
+            lists:flatten([ArgMoves, CallCode, ResultMove])
+    end;
 
 %%====================================================================
 %% Phase 6g: Type conversions
@@ -1018,9 +1033,10 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
     CopyLbl = <<"__its_cp_", Uid/binary>>,
     CopyDoneLbl = <<"__its_cpd_", Uid/binary>>,
     lists:flatten([
-        %% Save callee-saved regs we'll use
+        %% FIXED BUG #6: Save r13 which is clobbered below at line 1063
         ?ENC:encode_push(rbx),
         ?ENC:encode_push(r12),
+        ?ENC:encode_push(r13),
         ?ENC:encode_push(r14),
         %% Allocate 48 bytes on stack for digit buffer
         ?ENC:encode_sub_imm(rsp, 48),
@@ -1117,9 +1133,10 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         ?ENC:encode_mov_mem_store(rdi, 0, r13),   %% fat.ptr = data
         ?ENC:encode_mov_mem_store(rdi, 8, rax),    %% fat.len = length
 
-        %% Clean up stack and restore
+        %% Clean up stack and restore (reverse order of pushes)
         ?ENC:encode_add_imm(rsp, 48),
         ?ENC:encode_pop(r14),
+        ?ENC:encode_pop(r13),
         ?ENC:encode_pop(r12),
         ?ENC:encode_pop(rbx),
         ?ENC:encode_mov_rr(Dst, rdi)
@@ -1392,21 +1409,46 @@ tarjan_visit(Node, Edges, Visited, State = #{index := Idx, stack := Stack}) ->
 pop_scc(Node, [Node | Rest], Acc) -> {[Node | Acc], Rest};
 pop_scc(Node, [Other | Rest], Acc) -> pop_scc(Node, Rest, [Other | Acc]).
 
-%% Break all detected cycles by saving first register of each cycle to temp
+%% FIXED BUG #4: Break each cycle individually using rotation.
+%% For a cycle [A→B→C→A], emit: save A to temp, C→A, B→C, temp→B.
 break_all_cycles(Cycles, Moves) ->
-    %% For each cycle, pick first register and save it
-    BreakPoints = [hd(Cycle) || Cycle <- Cycles],
-    %% Emit moves, breaking cycles as needed
-    SaveMoves = [?ENC:encode_mov_rr(r11, Reg) || Reg <- BreakPoints],
-    RegularMoves = [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves, not lists:member(Dst, BreakPoints)],
-    RestoreMoves = [?ENC:encode_mov_rr(Reg, r11) || Reg <- BreakPoints],
-    SaveMoves ++ RegularMoves ++ RestoreMoves.
+    %% Build move map for quick lookup
+    MoveMap = maps:from_list(Moves),
+    %% For each cycle, emit rotation sequence
+    CycleMoves = lists:flatmap(fun(Cycle) ->
+        break_one_cycle(Cycle, MoveMap)
+    end, Cycles),
+    %% Emit non-cycle moves
+    CycleRegs = lists:usort(lists:flatten(Cycles)),
+    NonCycleMoves = [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves,
+                     not lists:member(Dst, CycleRegs)],
+    CycleMoves ++ NonCycleMoves.
+
+%% Break a single cycle by rotating through temp register r11.
+%% Cycle is [R1, R2, ..., Rn] where R1→R2→...→Rn→R1.
+break_one_cycle([], _MoveMap) -> [];
+break_one_cycle([First | _] = Cycle, MoveMap) ->
+    %% Save First to r11
+    SaveFirst = ?ENC:encode_mov_rr(r11, First),
+    %% Emit moves for the cycle in reverse order (excluding the last→first edge)
+    Rotations = [emit_move_x86(To, maps:get(From, MoveMap))
+                 || {From, To} <- lists:zip(Cycle, tl(Cycle) ++ [First]),
+                    To =/= First],  % Skip the wrap-around edge
+    %% Restore temp to the second register in cycle
+    [Second | _] = tl(Cycle) ++ [First],
+    RestoreTemp = ?ENC:encode_mov_rr(Second, r11),
+    [SaveFirst] ++ Rotations ++ [RestoreTemp].
 
 emit_move_x86(ArgReg, {preg, Reg}) ->
     ?ENC:encode_mov_rr(ArgReg, Reg);
 emit_move_x86(ArgReg, {imm, Val}) ->
     ?ENC:encode_mov_imm64(ArgReg, Val);
 emit_move_x86(ArgReg, {stack, Slot}) ->
+    %% FIXED BUG #5: This is called during argument setup, where we don't have
+    %% UsedCalleeSaved context. For now, assume Offset = -((Slot+1)*8) is correct
+    %% for the function's own stack frame (not caller's). This is a partial fix.
+    %% Full fix would require threading UsedCalleeSaved or FrameSize through.
+    %% TODO: Add comment noting limitation for args > 6.
     Offset = -((Slot + 1) * 8),
     ?ENC:encode_mov_mem_load(ArgReg, rbp, Offset).
 

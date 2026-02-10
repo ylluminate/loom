@@ -108,7 +108,13 @@ init(Opts) ->
     Serial = maps:get(serial, Opts, true),
     Framebuffer = maps:get(framebuffer, Opts, false),
     Log = maps:get(log, Opts, true),
-    MaxLogSize = maps:get(max_log_size, Opts, ?MAX_LOG_SIZE),
+    RawMaxLogSize = maps:get(max_log_size, Opts, ?MAX_LOG_SIZE),
+
+    %% BUG 1 FIX: Validate max_log_size
+    MaxLogSize = case is_integer(RawMaxLogSize) andalso RawMaxLogSize > 0 of
+        true -> RawMaxLogSize;
+        false -> ?MAX_LOG_SIZE  %% Use default if invalid
+    end,
 
     %% Initial cursor position (left margin, top of screen)
     Margin = 8,
@@ -129,8 +135,9 @@ init(Opts) ->
 
 %% @private
 handle_call(get_log, _From, #{log_buffer := LogBuf} = State) ->
-    %% Concatenate all log entries
-    CombinedLog = iolist_to_binary(lists:reverse(LogBuf)),
+    %% BUG 2 FIX: Cap returned log data to 1MB max
+    MaxBytes = 1024 * 1024,
+    CombinedLog = truncate_log_entries(lists:reverse(LogBuf), MaxBytes),
     {reply, CombinedLog, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -353,12 +360,40 @@ advance_cursor(_Char, X, Y, Margin, Width, Height) ->
 %% @doc Append to in-memory log buffer (ring buffer with max size)
 -spec output_log(binary(), state()) -> state().
 output_log(String, #{log_buffer := LogBuf, log_count := Count, max_log_size := MaxSize} = State) ->
+    %% BUG 3 FIX: Truncate individual log entries to max 64KB
+    MaxEntrySize = 64 * 1024,
+    TruncatedString = case byte_size(String) of
+        Size when Size > MaxEntrySize ->
+            <<Prefix:MaxEntrySize/binary, _/binary>> = String,
+            Prefix;
+        _ ->
+            String
+    end,
+
     NewLogBuf = case Count >= MaxSize of
         true ->
             %% Drop oldest entry (at tail of list)
-            [String | lists:droplast(LogBuf)];
+            [TruncatedString | lists:droplast(LogBuf)];
         false ->
-            [String | LogBuf]
+            [TruncatedString | LogBuf]
     end,
     NewCount = min(Count + 1, MaxSize),
     State#{log_buffer := NewLogBuf, log_count := NewCount}.
+
+%% BUG 2 FIX: Helper to truncate log entries to fit within byte limit
+-spec truncate_log_entries([binary()], non_neg_integer()) -> binary().
+truncate_log_entries(Entries, MaxBytes) ->
+    truncate_log_entries(Entries, MaxBytes, <<>>).
+
+truncate_log_entries([], _MaxBytes, Acc) ->
+    Acc;
+truncate_log_entries([Entry | Rest], MaxBytes, Acc) ->
+    AccSize = byte_size(Acc),
+    EntrySize = byte_size(Entry),
+    case AccSize + EntrySize of
+        Total when Total =< MaxBytes ->
+            truncate_log_entries(Rest, MaxBytes, <<Acc/binary, Entry/binary>>);
+        _ ->
+            %% Would exceed limit, stop here
+            Acc
+    end.

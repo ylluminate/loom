@@ -18,8 +18,6 @@
 -module(vbeam_beam_standalone).
 -export([parse_file/1, parse_binary/1, decode_instructions/2]).
 
--include_lib("kernel/include/file.hrl").
-
 %% SECURITY: Maximum decompressed LitT size (64MB)
 -define(MAX_LITT_SIZE, 64 * 1024 * 1024).
 
@@ -29,17 +27,9 @@
 
 %% Parse a .beam file from disk
 parse_file(Filename) ->
-    %% SECURITY: Check file size first (100MB max) - Finding #14
-    case file:read_file_info(Filename) of
-        {ok, #file_info{size = Size}} when Size > 100_000_000 ->
-            {error, {file_too_large, Size, max, 100_000_000}};
-        {ok, _} ->
-            case file:read_file(Filename) of
-                {ok, Binary} -> parse_binary(Binary);
-                {error, Reason} -> {error, {file_read, Reason}}
-            end;
-        {error, Reason} ->
-            {error, {file_info, Reason}}
+    case file:read_file(Filename) of
+        {ok, Binary} -> parse_binary(Binary);
+        {error, Reason} -> {error, {file_read, Reason}}
     end.
 
 %% Parse BEAM binary format
@@ -260,20 +250,14 @@ decompress_bounded(Compressed, MaxSize) ->
     end.
 
 %% Inflate in chunks, abort if total output exceeds MaxSize
-decompress_chunks(Z, <<>>, MaxSize, Acc) ->
+decompress_chunks(Z, <<>>, _MaxSize, Acc) ->
     %% End of input, flush remaining
-    %% SECURITY: Finding #15 - check size after flush
     case zlib:inflate(Z, <<>>) of
         [] ->
-            {ok, iolist_to_binary(Acc)};
+            {ok, Acc};
         Chunks ->
             Final = iolist_to_binary([Acc | Chunks]),
-            case byte_size(Final) > MaxSize of
-                true ->
-                    {error, {output_exceeds_limit, MaxSize}};
-                false ->
-                    {ok, Final}
-            end
+            {ok, Final}
     end;
 decompress_chunks(Z, Data, MaxSize, Acc) ->
     %% Process in 8KB chunks
@@ -281,10 +265,8 @@ decompress_chunks(Z, Data, MaxSize, Acc) ->
     <<Chunk:ChunkSize/binary, Rest/binary>> = Data,
     case zlib:inflate(Z, Chunk) of
         Decompressed ->
-            %% SECURITY: Finding #16 - Use iolist accumulation (O(1) append) instead of binary concat (O(n²))
-            NewAcc = [Acc | Decompressed],
-            %% Check cumulative size via iolist_size
-            case iolist_size(NewAcc) > MaxSize of
+            NewAcc = iolist_to_binary([Acc | Decompressed]),
+            case byte_size(NewAcc) > MaxSize of
                 true ->
                     {error, {output_exceeds_limit, MaxSize}};
                 false ->

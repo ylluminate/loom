@@ -223,8 +223,7 @@ init_state(Module, Function, Arity, Args, Instructions, OutputFun) ->
         x => InitX,           % X registers: #{{x, N} => Value}
         y => [],              % Y registers (stack): [Value1, Value2, ...]
         stack => [],          % Call stack: [{Fun, Arity, PC}, ...]
-        output_fun => OutputFun,
-        reductions => 1000000  % Reduction budget
+        output_fun => OutputFun
     }.
 
 init_x_registers([], _Index, Acc) ->
@@ -234,22 +233,13 @@ init_x_registers([Arg | Rest], Index, Acc) ->
 
 %% Main execution loop
 execute(State) ->
-    %% Check reduction budget
-    Reds = maps:get(reductions, State),
-    case Reds =< 0 of
-        true ->
-            {error, reduction_limit_exceeded};
-        false ->
-            %% Decrement reductions
-            State1 = State#{reductions => Reds - 1},
-            case execute_instruction(State1) of
-                {continue, NewState} ->
-                    execute(NewState);
-                {return, Value} ->
-                    {ok, Value};
-                {error, Reason} ->
-                    {error, Reason}
-            end
+    case execute_instruction(State) of
+        {continue, NewState} ->
+            execute(NewState);
+        {return, Value} ->
+            {ok, Value};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% Execute one instruction
@@ -529,26 +519,17 @@ handle_local_call(Label, State, IsTailCall) ->
     end.
 
 handle_bif_call(ModIdx, FunIdx, Arity, State, IsTailCall) ->
-    %% Validate arity is within bounds
-    case is_integer(Arity) andalso Arity >= 0 andalso Arity =< 255 of
-        false ->
-            {error, {invalid_arity, Arity}};
-        true ->
-            %% Resolve atom indices to actual names (may be binaries from parser)
-            Module = maps:get(module, State),
-            Atoms = maps:get(atoms, Module),
-            ModRaw = nth_bare(ModIdx, Atoms),
-            FunRaw = nth_bare(FunIdx, Atoms),
-            %% Normalize binaries to atoms for BIF dispatch
-            ModAtom = safe_to_atom(ModRaw),
-            FunAtom = safe_to_atom(FunRaw),
+    %% Resolve atom indices to actual names (may be binaries from parser)
+    Module = maps:get(module, State),
+    Atoms = maps:get(atoms, Module),
+    ModRaw = nth_bare(ModIdx, Atoms),
+    FunRaw = nth_bare(FunIdx, Atoms),
+    %% Normalize binaries to atoms for BIF dispatch
+    ModAtom = safe_to_atom(ModRaw),
+    FunAtom = safe_to_atom(FunRaw),
 
-            %% Get arguments from X registers
-            Args = [get_register({x, I}, State) || I <- seq_bare(0, Arity - 1)],
-            handle_bif_call_inner(ModAtom, FunAtom, Args, Arity, State, IsTailCall)
-    end.
-
-handle_bif_call_inner(ModAtom, FunAtom, Args, Arity, State, IsTailCall) ->
+    %% Get arguments from X registers
+    Args = [get_register({x, I}, State) || I <- seq_bare(0, Arity - 1)],
 
     %% Execute BIF
     case execute_bif(ModAtom, FunAtom, Args, State) of
@@ -799,13 +780,7 @@ set_register(_Other, _Value, State) ->
 
 %% Stack management
 allocate_stack(N, Y) ->
-    %% Validate N is within bounds
-    case is_integer(N) andalso N >= 0 andalso N =< 1024 of
-        true ->
-            duplicate_bare(N, undefined) ++ Y;
-        false ->
-            Y  % Return unchanged on error
-    end.
+    duplicate_bare(N, undefined) ++ Y.
 
 deallocate_stack(N, Y) ->
     nthtail_bare(N, Y).

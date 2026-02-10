@@ -4,6 +4,8 @@
 %%% @end
 -module(vbeam_elf_loader).
 
+-include_lib("kernel/include/file.hrl").
+
 -export([parse/1, resolve_symbols/2, apply_relocations/2, load/2]).
 
 %% ============================================================================
@@ -242,6 +244,17 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
 -spec load(file:filename(), #{binary() => non_neg_integer()}) ->
     {ok, loaded_module()} | {error, term()}.
 load(FilePath, SymbolTable) ->
+    %% BUG 12 FIX: Check file size first
+    case file:read_file_info(FilePath) of
+        {ok, #file_info{size = Size}} when Size > 256 * 1024 * 1024 ->
+            {error, {file_too_large, Size}};
+        {ok, _} ->
+            load_impl(FilePath, SymbolTable);
+        {error, _} = Err ->
+            Err
+    end.
+
+load_impl(FilePath, SymbolTable) ->
     case file:read_file(FilePath) of
         {ok, Binary} ->
             case parse(Binary) of
@@ -434,6 +447,13 @@ parse_symbols(_Binary, Sections) ->
 
                     %% Parse symbol entries
                     NumSyms = byte_size(SymTabData) div EntSize,
+                    %% BUG 13 FIX: Cap NumSyms at 100000
+                    case NumSyms of
+                        N when N > 100000 ->
+                            error({too_many_symbols, N, max, 100000});
+                        _ ->
+                            ok
+                    end,
                     Symbols = [
                         parse_symbol(SymTabData, I * ?SYM_SIZE, StrTabData)
                         || I <- lists:seq(0, NumSyms - 1)
@@ -490,6 +510,13 @@ parse_relocations(_Binary, Sections, _StrTab) ->
             TargetName = maps:get(name, TargetSec),
 
             NumRelas = byte_size(Data) div EntSize,
+            %% BUG 14 FIX: Cap NumRelas at 500000
+            case NumRelas of
+                N when N > 500000 ->
+                    error({too_many_relocations, N, max, 500000});
+                _ ->
+                    ok
+            end,
             Relocs = [
                 parse_rela(Data, I * ?RELA_SIZE)
                 || I <- lists:seq(0, NumRelas - 1)

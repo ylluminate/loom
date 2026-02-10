@@ -18,8 +18,7 @@
     y = [],         % Y registers (stack frame) - list for easy push/pop
     pc = 0,         % Program counter
     stack = [],     % Call stack (return addresses)
-    heap = [],      % Heap (for cons cells, tuples)
-    reductions = 1000000  % Reduction budget
+    heap = []       % Heap (for cons cells, tuples)
 }).
 
 %% Execute a function in a loaded BEAM module
@@ -142,22 +141,14 @@ find_function_label(#proc{exports = Exports, atoms = Atoms}, FunName, Arity) ->
     end.
 
 %% Main interpreter loop
-run(#proc{reductions = Reds} = Proc, Options) ->
-    %% Check reduction budget
-    case Reds =< 0 of
-        true ->
-            {error, reduction_limit_exceeded};
-        false ->
-            %% Decrement reductions
-            Proc1 = Proc#proc{reductions = Reds - 1},
-            case decode_and_execute(Proc1, Options) of
-                {continue, Proc2} ->
-                    run(Proc2, Options);
-                {return, Value, _Proc2} ->
-                    {ok, Value};
-                {error, Reason} ->
-                    {error, Reason}
-            end
+run(Proc, Options) ->
+    case decode_and_execute(Proc, Options) of
+        {continue, Proc2} ->
+            run(Proc2, Options);
+        {return, Value, _Proc2} ->
+            {ok, Value};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% Decode and execute one instruction
@@ -207,31 +198,20 @@ decode_and_execute(#proc{code = Code, pc = PC} = Proc, Options) ->
             end;
 
         {allocate, StackNeed, _Live, NextPC} ->
-            %% Allocate stack frame - validate StackNeed
-            case is_integer(StackNeed) andalso StackNeed >= 0 andalso StackNeed =< 1024 of
-                true ->
-                    Proc2 = Proc#proc{
-                        y = lists:duplicate(StackNeed, undefined) ++ Proc#proc.y,
-                        pc = NextPC
-                    },
-                    {continue, Proc2};
-                false ->
-                    {error, {invalid_allocate, StackNeed}}
-            end;
+            %% Allocate stack frame
+            Proc2 = Proc#proc{
+                y = lists:duplicate(StackNeed, undefined) ++ Proc#proc.y,
+                pc = NextPC
+            },
+            {continue, Proc2};
 
         {deallocate, N, NextPC} ->
-            %% Deallocate stack frame - validate N
-            Y = Proc#proc.y,
-            case is_integer(N) andalso N >= 0 andalso N =< length(Y) of
-                true ->
-                    Proc2 = Proc#proc{
-                        y = lists:nthtail(N, Y),
-                        pc = NextPC
-                    },
-                    {continue, Proc2};
-                false ->
-                    {error, {invalid_deallocate, N}}
-            end;
+            %% Deallocate stack frame
+            Proc2 = Proc#proc{
+                y = lists:nthtail(N, Proc#proc.y),
+                pc = NextPC
+            },
+            {continue, Proc2};
 
         {test_heap, _Need, _Live, NextPC} ->
             %% Heap allocation test (no-op for now)
@@ -454,28 +434,8 @@ get_value(_Other, _Proc) ->
 set_register({x, N}, Value, #proc{x = X} = Proc) ->
     Proc#proc{x = X#{N => Value}};
 set_register({y, N}, Value, #proc{y = Y} = Proc) ->
-    %% Validate N is within bounds
-    case is_integer(N) andalso N >= 0 of
-        true ->
-            Len = length(Y),
-            %% Prevent excessive stack growth
-            case N > Len + 1024 of
-                true ->
-                    Proc;  % Invalid - too far beyond current stack
-                false ->
-                    Y2 = if
-                        N < Len ->
-                            lists:sublist(Y, N) ++ [Value] ++ lists:nthtail(N + 1, Y);
-                        N =:= Len ->
-                            Y ++ [Value];
-                        true ->
-                            Y ++ lists:duplicate(N - Len, undefined) ++ [Value]
-                    end,
-                    Proc#proc{y = Y2}
-            end;
-        false ->
-            Proc
-    end;
+    Y2 = lists:sublist(Y, N) ++ [Value] ++ lists:nthtail(N + 1, Y),
+    Proc#proc{y = Y2};
 set_register(_Other, _Value, Proc) ->
     Proc.
 

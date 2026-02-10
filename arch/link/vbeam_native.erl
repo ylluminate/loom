@@ -61,8 +61,10 @@ compile(Module) ->
 compile(Module, _Opts) ->
     case vbeam_native_ir:validate_module(Module) of
         ok ->
-            Module2 = inject_runtime_builtins(Module),
-            do_compile(Module2);
+            case inject_runtime_builtins(Module) of
+                {error, _} = Err -> Err;
+                Module2 -> do_compile(Module2)
+            end;
         Err -> Err
     end.
 
@@ -261,15 +263,24 @@ inject_runtime_builtins(#{functions := Functions} = Module) ->
                 none -> {Found, [Name | NotFound]}
             end
         end, {[], []}, UnresolvedList),
-    %% Auto-generate stubs for remaining unresolved symbols.
-    %% This allows programs to compile even when some methods/functions
-    %% are not yet implemented. The stubs return 0.
-    Target = maps:get(target, Module, arm64),
-    AutoStubs = [make_auto_stub(Name, Target) || Name <- StillUnresolved],
-    AllNew = Builtins ++ AutoStubs,
-    case AllNew of
-        [] -> Module;
-        _ -> Module#{functions := Functions ++ AllNew}
+    %% Check if user explicitly allows stub generation
+    AllowStubs = maps:get(allow_stubs, Module, false),
+    case {StillUnresolved, AllowStubs} of
+        {[], _} ->
+            %% No unresolved symbols, add builtins if any
+            case Builtins of
+                [] -> Module;
+                _ -> Module#{functions := Functions ++ Builtins}
+            end;
+        {_, false} ->
+            %% Unresolved symbols and stubs not allowed - error
+            {error, {unresolved_symbols, StillUnresolved}};
+        {_, true} ->
+            %% Unresolved symbols but stubs allowed - generate them
+            Target = maps:get(target, Module, arm64),
+            AutoStubs = [make_auto_stub(Name, Target) || Name <- StillUnresolved],
+            AllNew = Builtins ++ AutoStubs,
+            Module#{functions := Functions ++ AllNew}
     end.
 
 %% Generate a minimal auto-stub function that returns 0.

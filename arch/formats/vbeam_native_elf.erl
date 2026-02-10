@@ -99,6 +99,7 @@ emit(Code, Data, EntryOffset, Arch) ->
     ShOff = align(ShStrTabOff + ShStrTabSize, 8),
 
     %% Entry point virtual address
+    true = EntryOffset < byte_size(Code),  %% Validate entry offset
     EntryVAddr = TextVAddr + EntryOffset,
 
     %% Build the components

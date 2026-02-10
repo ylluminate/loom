@@ -47,6 +47,7 @@ test_x86_64_stub_generation() ->
         Module = #{
             target => x86_64,
             format => elf64,
+            allow_stubs => true,
             functions => [
                 #{
                     name => <<"main">>,
@@ -115,6 +116,7 @@ test_arm64_stub_generation() ->
         Module = #{
             target => arm64,
             format => macho,
+            allow_stubs => true,
             functions => [
                 #{
                     name => <<"main">>,

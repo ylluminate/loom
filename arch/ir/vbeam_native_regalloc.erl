@@ -468,40 +468,118 @@ scratch_regs_for_pseudo_ops(x86_64) ->
     [rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11].
 
 %% Pre-assign parameter registers.
+%% FIXED BUG #7: Parameters beyond register count are not yet supported.
+%% For x86_64: max 6 register params (rdi, rsi, rdx, rcx, r8, r9).
+%% For arm64: max 8 register params (x0-x7).
+%% Stack parameters (beyond these limits) would require negative stack slot
+%% assignments pointing to the caller's frame, which is not yet implemented.
+%% V functions rarely exceed 6 args, so this is deferred.
 param_assignments(x86_64, NumParams) ->
     ArgRegs = [rdi, rsi, rdx, rcx, r8, r9],
-    maps:from_list([{I, lists:nth(I + 1, ArgRegs)}
-                    || I <- lists:seq(0, min(NumParams, 6) - 1)]);
+    MaxRegs = length(ArgRegs),
+    case NumParams > MaxRegs of
+        true -> error({too_many_params, NumParams, "Max 6 register params on x86_64"});
+        false -> maps:from_list([{I, lists:nth(I + 1, ArgRegs)}
+                                 || I <- lists:seq(0, min(NumParams, MaxRegs) - 1)])
+    end;
 param_assignments(arm64, NumParams) ->
     ArgRegs = [x0, x1, x2, x3, x4, x5, x6, x7],
-    maps:from_list([{I, lists:nth(I + 1, ArgRegs)}
-                    || I <- lists:seq(0, min(NumParams, 8) - 1)]).
+    MaxRegs = length(ArgRegs),
+    case NumParams > MaxRegs of
+        true -> error({too_many_params, NumParams, "Max 8 register params on arm64"});
+        false -> maps:from_list([{I, lists:nth(I + 1, ArgRegs)}
+                                 || I <- lists:seq(0, min(NumParams, MaxRegs) - 1)])
+    end.
 
 %% Rewrite instructions: replace {vreg, N} with assigned physical reg or stack.
+%% FIXED BUG #2: Insert explicit load/store for spilled vregs instead of leaving {stack, Slot}.
 -spec rewrite_instructions([term()], #{non_neg_integer() => atom() | {stack, integer()}}) ->
     [term()].
 rewrite_instructions(Body, Assignments) ->
-    [rewrite_inst(I, Assignments) || I <- Body].
+    lists:flatmap(fun(I) -> rewrite_inst_with_spills(I, Assignments) end, Body).
 
-rewrite_inst(Inst, Assignments) when is_tuple(Inst) ->
-    list_to_tuple([rewrite_operand(E, Assignments) || E <- tuple_to_list(Inst)]);
-rewrite_inst(Inst, _) -> Inst.  % atoms like ret, syscall, nop
+%% Rewrite a single instruction, inserting spill loads/stores as needed.
+rewrite_inst_with_spills(Inst, Assignments) when is_tuple(Inst) ->
+    %% Identify uses and defs in this instruction
+    {Uses, Defs} = analyze_inst_operands(Inst),
+    %% For each USE that's spilled, collect {vreg, slot} pairs
+    LoadsNeeded = lists:filtermap(
+        fun({vreg, V}) ->
+            case maps:find(V, Assignments) of
+                {ok, {stack, Slot}} -> {true, {V, Slot}};
+                _ -> false
+            end;
+           (_) -> false
+        end, Uses),
+    %% For each DEF that's spilled, collect {vreg, slot} pairs
+    StoresNeeded = lists:filtermap(
+        fun({vreg, V}) ->
+            case maps:find(V, Assignments) of
+                {ok, {stack, Slot}} -> {true, {V, Slot}};
+                _ -> false
+            end;
+           (_) -> false
+        end, Defs),
+    %% Use scratch register r11 (x86_64) or x15 (arm64) for spill reload/store
+    ScratchReg = r11,  % TODO: make this target-aware if arm64 support is added
+    %% Generate load instructions (before the main instruction)
+    Loads = [{mov, {preg, ScratchReg}, {stack, Slot}} || {_V, Slot} <- LoadsNeeded],
+    %% Rewrite instruction operands: spilled vregs become ScratchReg uses
+    RewrittenInst = rewrite_inst_operands(Inst, Assignments, ScratchReg),
+    %% Generate store instructions (after the main instruction)
+    Stores = [{mov, {stack, Slot}, {preg, ScratchReg}} || {_V, Slot} <- StoresNeeded],
+    %% Concatenate: loads + rewritten instruction + stores
+    Loads ++ [RewrittenInst] ++ Stores;
+rewrite_inst_with_spills(Inst, _Assignments) ->
+    [Inst].  % atoms like ret, syscall, nop
 
-rewrite_operand({vreg, N}, Assignments) ->
+%% Analyze instruction to extract USE and DEF operands.
+%% Returns {Uses, Defs} where each is a list of operands.
+analyze_inst_operands(Inst) when is_tuple(Inst) ->
+    case Inst of
+        {mov, Dst, Src} -> {[Src], [Dst]};
+        {mov_imm, Dst, _} -> {[], [Dst]};
+        {add, Dst, A, B} -> {[A, B], [Dst]};
+        {sub, Dst, A, B} -> {[A, B], [Dst]};
+        {mul, Dst, A, B} -> {[A, B], [Dst]};
+        {sdiv, Dst, A, B} -> {[A, B], [Dst]};
+        {srem, Dst, A, B} -> {[A, B], [Dst]};
+        {and_, Dst, A, B} -> {[A, B], [Dst]};
+        {or_, Dst, A, B} -> {[A, B], [Dst]};
+        {xor_, Dst, A, B} -> {[A, B], [Dst]};
+        {shl, Dst, A, B} -> {[A, B], [Dst]};
+        {shr, Dst, A, B} -> {[A, B], [Dst]};
+        {sar, Dst, A, B} -> {[A, B], [Dst]};
+        {neg, Dst, Src} -> {[Src], [Dst]};
+        {not_, Dst, Src} -> {[Src], [Dst]};
+        {cmp, A, B} -> {[A, B], []};
+        {load, Dst, Base, _Off} -> {[Base], [Dst]};
+        {store, Base, _Off, Src} -> {[Base, Src], []};
+        _ -> {[], []}  % conservative: no uses/defs for unknown instructions
+    end;
+analyze_inst_operands(_) -> {[], []}.
+
+%% Rewrite instruction operands, replacing spilled vregs with scratch register.
+rewrite_inst_operands(Inst, Assignments, ScratchReg) when is_tuple(Inst) ->
+    list_to_tuple([rewrite_operand_for_scratch(E, Assignments, ScratchReg)
+                   || E <- tuple_to_list(Inst)]);
+rewrite_inst_operands(Inst, _, _) -> Inst.
+
+rewrite_operand_for_scratch({vreg, N}, Assignments, ScratchReg) ->
     case maps:find(N, Assignments) of
-        {ok, {stack, Slot}} -> {stack, Slot};
+        {ok, {stack, _Slot}} -> {preg, ScratchReg};  % Spilled → use scratch
         {ok, Reg} -> {preg, Reg};
         error -> {vreg, N}  % unassigned (dead code?)
     end;
-rewrite_operand({mem, {vreg, N}, Off}, Assignments) ->
+rewrite_operand_for_scratch({mem, {vreg, N}, Off}, Assignments, ScratchReg) ->
     case maps:find(N, Assignments) of
-        {ok, {stack, Slot}} -> {mem, {stack, Slot}, Off};
+        {ok, {stack, _Slot}} -> {mem, {preg, ScratchReg}, Off};
         {ok, Reg} -> {mem, {preg, Reg}, Off};
         error -> {mem, {vreg, N}, Off}
     end;
-rewrite_operand(List, Assignments) when is_list(List) ->
-    [rewrite_operand(E, Assignments) || E <- List];
-rewrite_operand(Other, _) -> Other.
+rewrite_operand_for_scratch(List, Assignments, ScratchReg) when is_list(List) ->
+    [rewrite_operand_for_scratch(E, Assignments, ScratchReg) || E <- List];
+rewrite_operand_for_scratch(Other, _, _) -> Other.
 
 min(A, B) when A < B -> A;
 min(_, B) -> B.

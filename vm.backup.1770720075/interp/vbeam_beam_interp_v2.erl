@@ -15,8 +15,7 @@
     cp = undefined, % Continuation pointer (return address)
     stack = [],     % Call stack: [{Module, Function, PC}]
     current_fun,    % Current function {Name, Arity}
-    current_instrs, % Current function's instruction list
-    reductions = 1000000  % Reduction budget
+    current_instrs  % Current function's instruction list
 }).
 
 %% Execute a function from a .beam file
@@ -131,18 +130,7 @@ run(Proc, Options) ->
     end.
 
 %% Execute one instruction
-execute_instruction(#proc{reductions = Reds} = Proc, Options) ->
-    %% Check reduction budget
-    case Reds =< 0 of
-        true ->
-            {error, reduction_limit_exceeded};
-        false ->
-            %% Decrement reductions
-            Proc1 = Proc#proc{reductions = Reds - 1},
-            execute_instruction_inner(Proc1, Options)
-    end.
-
-execute_instruction_inner(#proc{current_instrs = Instrs, pc = PC} = Proc, Options) ->
+execute_instruction(#proc{current_instrs = Instrs, pc = PC} = Proc, Options) ->
     case PC >= length(Instrs) of
         true ->
             %% End of function - return
@@ -253,24 +241,14 @@ execute_instr({call_ext_only, Arity, {extfunc, Mod, Fun, Arity}}, Proc, Options)
     end;
 
 execute_instr({allocate, StackNeed, _Live}, Proc, _Options) ->
-    %% Allocate stack frame - validate StackNeed
-    case is_integer(StackNeed) andalso StackNeed >= 0 andalso StackNeed =< 1024 of
-        true ->
-            NewY = lists:duplicate(StackNeed, undefined) ++ Proc#proc.y,
-            {continue, Proc#proc{y = NewY, pc = Proc#proc.pc + 1}};
-        false ->
-            {error, {invalid_allocate, StackNeed}}
-    end;
+    %% Allocate stack frame
+    NewY = lists:duplicate(StackNeed, undefined) ++ Proc#proc.y,
+    {continue, Proc#proc{y = NewY, pc = Proc#proc.pc + 1}};
 
 execute_instr({allocate_zero, StackNeed, _Live}, Proc, _Options) ->
-    %% Allocate and zero stack frame - validate StackNeed
-    case is_integer(StackNeed) andalso StackNeed >= 0 andalso StackNeed =< 1024 of
-        true ->
-            NewY = lists:duplicate(StackNeed, undefined) ++ Proc#proc.y,
-            {continue, Proc#proc{y = NewY, pc = Proc#proc.pc + 1}};
-        false ->
-            {error, {invalid_allocate_zero, StackNeed}}
-    end;
+    %% Allocate and zero stack frame (same as allocate in this impl)
+    NewY = lists:duplicate(StackNeed, undefined) ++ Proc#proc.y,
+    {continue, Proc#proc{y = NewY, pc = Proc#proc.pc + 1}};
 
 execute_instr({deallocate, N}, Proc, _Options) ->
     %% Deallocate stack frame
@@ -494,25 +472,18 @@ set_register({x, N}, Value, #proc{x = X} = Proc) ->
     Proc#proc{x = X#{{x, N} => Value}};
 set_register({y, N}, Value, #proc{y = Y} = Proc) ->
     %% SECURITY FIX: Validate N is non-negative integer before using sublist/nthtail
-    %% Also check bounds to prevent unbounded stack growth
     case is_integer(N) andalso N >= 0 of
         true ->
             Len = length(Y),
-            %% Prevent excessive stack growth
-            case N > Len + 1024 of
+            NewY = if
+                N < Len ->
+                    lists:sublist(Y, N) ++ [Value] ++ lists:nthtail(N + 1, Y);
+                N =:= Len ->
+                    Y ++ [Value];
                 true ->
-                    Proc;  % Invalid - too far beyond current stack
-                false ->
-                    NewY = if
-                        N < Len ->
-                            lists:sublist(Y, N) ++ [Value] ++ lists:nthtail(N + 1, Y);
-                        N =:= Len ->
-                            Y ++ [Value];
-                        true ->
-                            Y ++ lists:duplicate(N - Len, undefined) ++ [Value]
-                    end,
-                    Proc#proc{y = NewY}
-            end;
+                    Y ++ lists:duplicate(N - Len, undefined) ++ [Value]
+            end,
+            Proc#proc{y = NewY};
         false ->
             %% Invalid Y register index - return unchanged
             Proc

@@ -1,0 +1,409 @@
+%%% @doc BEAM-to-native x86_64 translator for V-on-BEAM.
+%%% Reads .beam files and generates bare-metal x86_64 code.
+%%% @end
+-module(vbeam_beam_to_native).
+
+-export([translate_beam/1, translate_beam/2, translate_function/2]).
+-export([serial_putchar_code/0, serial_puts_code/0]).
+
+%% ============================================================================
+%% Public API
+%% ============================================================================
+
+%% @doc Translate a .beam file to x86_64 machine code.
+-spec translate_beam(file:filename()) ->
+    {ok, #{code => binary(), data => binary(), entry => non_neg_integer()}} |
+    {error, term()}.
+translate_beam(BeamFile) ->
+    translate_beam(BeamFile, #{}).
+
+%% @doc Translate a .beam file with options.
+-spec translate_beam(file:filename(), map()) ->
+    {ok, #{code => binary(), data => binary(), entry => non_neg_integer()}} |
+    {error, term()}.
+translate_beam(BeamFile, _Options) ->
+    case file:read_file(BeamFile) of
+        {ok, BeamBinary} ->
+            case vbeam_beam_standalone:parse_binary(BeamBinary) of
+                {ok, ParsedData} ->
+                    translate_chunks(ParsedData);
+                {error, Reason} ->
+                    {error, {beam_parse_error, Reason}}
+            end;
+        {error, Reason} ->
+            {error, {file_read_error, Reason}}
+    end.
+
+%% @doc Translate a single function's bytecode to x86_64.
+-spec translate_function([term()], map()) -> {ok, binary()} | {error, term()}.
+translate_function(Bytecodes, _Options) ->
+    try
+        Code = lists:foldl(fun translate_opcode/2, <<>>, Bytecodes),
+        {ok, Code}
+    catch
+        error:Reason:Stack ->
+            {error, {translation_error, Reason, Stack}}
+    end.
+
+%% ============================================================================
+%% Serial Output Code Generation
+%% ============================================================================
+
+%% @doc Generate x86_64 code for serial putchar.
+%% Input: AL = character to output
+%% Clobbers: DX, AL
+serial_putchar_code() ->
+    iolist_to_binary([
+        %% wait_tx_ready:
+        <<16#BA, 16#FD, 16#03, 16#00, 16#00>>,  % mov edx, 0x3FD (LSR)
+        <<16#EC>>,                                % in al, dx
+        <<16#A8, 16#20>>,                         % test al, 0x20 (TX empty?)
+        <<16#74, 16#F6>>,                         % jz wait_tx_ready (-10 bytes)
+
+        %% Write character (in BL, saved by caller)
+        <<16#88, 16#D8>>,                         % mov al, bl
+        <<16#BA, 16#F8, 16#03, 16#00, 16#00>>,   % mov edx, 0x3F8 (THR)
+        <<16#EE>>,                                % out dx, al
+        <<16#C3>>                                 % ret
+    ]).
+
+%% @doc Generate x86_64 code for serial puts (null-terminated string).
+%% Input: RSI = pointer to null-terminated string
+%% Clobbers: RSI, RAX, RBX, RDX
+serial_puts_code() ->
+    SerialPutcharSize = byte_size(serial_putchar_code()),
+
+    %% Calculate relative call offset to serial_putchar
+    %% serial_puts comes right after serial_putchar in the layout
+    %% The call instruction is 5 bytes (E8 xx xx xx xx)
+    %% Instruction layout before call:
+    %%   +0: lodsb (1 byte)
+    %%   +1: test al,al (2 bytes)
+    %%   +3: jz done (2 bytes)
+    %%   +5: mov bl,al (2 bytes)
+    %%   +7: call rel32 (5 bytes, ends at +12)
+    %% At offset 7, the call instruction starts. It ends at 7+5=12.
+    %% Target is serial_putchar, which is at -(SerialPutcharSize + 7)
+    %% But displacement is from END of call instruction, so from position 12
+    %% Displacement = target - instruction_end = -(SerialPutcharSize + 7) - 5
+    CallOffset = -(SerialPutcharSize + 12),
+
+    iolist_to_binary([
+        %% loop:
+        <<16#AC>>,                                % lodsb (load byte from [RSI++] to AL)
+        <<16#84, 16#C0>>,                         % test al, al
+        <<16#74, 16#09>>,                         % jz done (+9 bytes to ret)
+        <<16#88, 16#C3>>,                         % mov bl, al (save char)
+        <<16#E8, CallOffset:32/little-signed>>,   % call serial_putchar
+        <<16#EB, 16#F2>>,                         % jmp loop (-14 bytes)
+        %% done:
+        <<16#C3>>                                 % ret
+    ]).
+
+%% ============================================================================
+%% Internal Translation
+%% ============================================================================
+
+%% Translate chunks from beam file (standalone parser format)
+translate_chunks(ParsedData) ->
+    %% ParsedData is a map: #{atoms, exports, imports, code, code_info, literals, strings, funs}
+    Atoms = maps:get(atoms, ParsedData, []),
+    CodeBinary = maps:get(code, ParsedData, <<>>),
+
+    case CodeBinary of
+        <<>> ->
+            {error, no_code_chunk};
+        _ ->
+            %% Decode instructions from bytecode using standalone parser
+            Instructions = vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms),
+
+            %% Split flat instruction list into per-function lists
+            Functions = extract_functions(Instructions),
+
+            %% Build helper functions
+            SerialPutchar = serial_putchar_code(),
+            SerialPuts = serial_puts_code(),
+
+            %% Translate each function
+            TranslatedFunctions = [translate_function_internal(F) || F <- Functions],
+
+            %% Combine code sections
+            %% Layout: [serial_putchar][serial_puts][function1][function2]...
+            CodeSections = [SerialPutchar, SerialPuts | TranslatedFunctions],
+            Code = iolist_to_binary(CodeSections),
+
+            %% Entry point is first translated function (after helpers)
+            EntryOffset = byte_size(SerialPutchar) + byte_size(SerialPuts),
+
+            %% Data section (empty for now - strings embedded in code via RIP-relative)
+            Data = <<>>,
+
+            {ok, #{code => Code, data => Data, entry => EntryOffset}}
+    end.
+
+%% Extract function definitions from flat instruction list
+%% Split by func_info markers into per-function instruction lists
+extract_functions(Instructions) ->
+    split_functions(Instructions, [], []).
+
+%% Split instruction list by func_info markers
+split_functions([], CurrentFun, Acc) ->
+    %% Save final function if exists
+    NewAcc = case CurrentFun of
+        [] -> Acc;
+        _ -> [lists:reverse(CurrentFun) | Acc]
+    end,
+    %% Return accumulated functions (in original order)
+    lists:reverse(NewAcc);
+
+split_functions([{func_info, [_Mod, _Fun, _Arity]} | Rest], CurrentFun, Acc) ->
+    %% New function starts - save previous if exists, start new
+    NewAcc = case CurrentFun of
+        [] -> Acc;  %% First function
+        _ -> [lists:reverse(CurrentFun) | Acc]
+    end,
+    %% Start new function (don't include func_info in instructions)
+    split_functions(Rest, [], NewAcc);
+
+split_functions([Instr | Rest], CurrentFun, Acc) ->
+    %% Accumulate instruction into current function
+    split_functions(Rest, [Instr | CurrentFun], Acc).
+
+%% Translate a single function's instruction list
+translate_function_internal(Instructions) ->
+    lists:foldl(fun translate_opcode/2, <<>>, Instructions).
+
+%% ============================================================================
+%% Opcode Translation
+%% ============================================================================
+
+%% BEAM register mapping to x86_64:
+%% x0 -> RAX (accumulator)
+%% x1 -> RBX (general)
+%% x2 -> RCX (general, MS x64 arg1)
+%% x3 -> RDX (general, MS x64 arg2)
+%% y(N) -> [RSP + N*8] (stack slot)
+
+%% Translate a single BEAM opcode to x86_64
+%% First normalize instruction shape from decoded format {op, [Operands...]} to expected format
+translate_opcode(Instruction, Acc) ->
+    translate_opcode_normalized(normalize_instruction(Instruction), Acc).
+
+%% Normalize decoded instruction format to expected format
+normalize_instruction({label, [{integer, N}]}) ->
+    {label, N};
+normalize_instruction({line, _} = I) ->
+    I;
+normalize_instruction({func_info, [Mod, Fun, {integer, Arity}]}) ->
+    {func_info, Mod, Fun, Arity};
+normalize_instruction({allocate, [{integer, N}, {integer, M}]}) ->
+    {allocate, N, M};
+normalize_instruction({deallocate, [{integer, N}]}) ->
+    {deallocate, N};
+normalize_instruction({move, [Src, Dst]}) ->
+    {move, Src, Dst};
+normalize_instruction({call_ext, [{integer, Arity}, ExtFunc]}) ->
+    {call_ext, Arity, ExtFunc};
+normalize_instruction({call_ext_last, [{integer, Arity}, ExtFunc, {integer, Dealloc}]}) ->
+    {call_ext_last, Arity, ExtFunc, Dealloc};
+normalize_instruction({return, []}) ->
+    return;
+normalize_instruction({test_heap, [{integer, Need}, {integer, Live}]}) ->
+    {test_heap, Need, Live};
+normalize_instruction({put_string, [{integer, Len}, String, Dst]}) ->
+    {put_string, Len, String, Dst};
+normalize_instruction({bs_put_string, [{integer, Len}, String]}) ->
+    {bs_put_string, Len, String};
+normalize_instruction(Other) ->
+    %% Already normalized or unknown format - pass through
+    Other.
+
+translate_opcode_normalized({label, _N}, Acc) ->
+    %% Labels are positional - we'd need multi-pass for full support
+    %% For now, just mark position (no code emitted)
+    Acc;
+
+translate_opcode_normalized({line, _}, Acc) ->
+    %% Debug info - skip
+    Acc;
+
+translate_opcode_normalized({func_info, _Mod, _Fun, _Arity}, Acc) ->
+    %% Function info for error handling - skip for now
+    Acc;
+
+translate_opcode_normalized({allocate, StackNeeded, _Live}, Acc) ->
+    %% Allocate stack frame: sub rsp, N*8
+    StackBytes = StackNeeded * 8,
+    %% FIX 2: Handle large frames (>31 words = >248 bytes)
+    Code = if
+        StackBytes =< 127 ->
+            %% 8-bit immediate encoding
+            <<16#48, 16#83, 16#EC, StackBytes:8>>;  % sub rsp, imm8
+        true ->
+            %% 32-bit immediate encoding for large frames
+            <<16#48, 16#81, 16#EC, StackBytes:32/little>>  % sub rsp, imm32
+    end,
+    <<Acc/binary, Code/binary>>;
+
+translate_opcode_normalized({deallocate, N}, Acc) ->
+    %% Deallocate stack frame: add rsp, N*8
+    StackBytes = N * 8,
+    %% FIX 2: Handle large frames (>31 words = >248 bytes)
+    Code = if
+        StackBytes =< 127 ->
+            %% 8-bit immediate encoding
+            <<16#48, 16#83, 16#C4, StackBytes:8>>;  % add rsp, imm8
+        true ->
+            %% 32-bit immediate encoding for large frames
+            <<16#48, 16#81, 16#C4, StackBytes:32/little>>  % add rsp, imm32
+    end,
+    <<Acc/binary, Code/binary>>;
+
+translate_opcode_normalized({move, Src, Dst}, Acc) ->
+    %% Move between registers/stack slots
+    Code = translate_move(Src, Dst),
+    <<Acc/binary, Code/binary>>;
+
+translate_opcode_normalized({call_ext, _Arity, {extfunc, Mod, Fun, _A}}, Acc) ->
+    %% External function call - handle io:format, erlang:display as serial output
+    Code = translate_external_call(Mod, Fun),
+    <<Acc/binary, Code/binary>>;
+
+translate_opcode_normalized({call_ext_last, _Arity, {extfunc, Mod, Fun, _A}, Dealloc}, Acc) ->
+    %% Tail call - deallocate then call
+    Code1 = translate_opcode_normalized({deallocate, Dealloc}, <<>>),
+    Code2 = translate_external_call(Mod, Fun),
+    <<Acc/binary, Code1/binary, Code2/binary>>;
+
+translate_opcode_normalized(return, Acc) ->
+    %% Return from function
+    Code = <<16#C3>>,  % ret
+    <<Acc/binary, Code/binary>>;
+
+translate_opcode_normalized({test_heap, _Need, _Live}, Acc) ->
+    %% Heap allocation test - skip for bare metal (no GC)
+    Acc;
+
+translate_opcode_normalized({put_string, Len, String, Dst}, Acc) ->
+    %% Load string pointer into register
+    %% For bare metal, we embed string and load address
+    %% Simplified: load immediate (would need proper RIP-relative addressing)
+    Code = translate_put_string(Len, String, Dst),
+    <<Acc/binary, Code/binary>>;
+
+translate_opcode_normalized({bs_put_string, _Len, _String}, Acc) ->
+    %% Binary string operation - skip for now
+    Acc;
+
+translate_opcode_normalized(UnknownOp, _Acc) ->
+    %% SECURITY FIX: Fail closed on unknown opcodes instead of silently producing NOP
+    %% This prevents guest code from using undocumented/future opcodes to bypass translation
+    error({unknown_opcode, UnknownOp}).
+
+%% ============================================================================
+%% Move Translation
+%% ============================================================================
+
+translate_move({x, 0}, {x, 1}) ->
+    <<16#48, 16#89, 16#C3>>;  % mov rbx, rax
+
+translate_move({x, 1}, {x, 0}) ->
+    <<16#48, 16#89, 16#D8>>;  % mov rax, rbx
+
+translate_move({x, 0}, {x, 2}) ->
+    <<16#48, 16#89, 16#C1>>;  % mov rcx, rax
+
+translate_move({x, 2}, {x, 0}) ->
+    <<16#48, 16#89, 16#C8>>;  % mov rax, rcx
+
+translate_move({x, 0}, {y, N}) ->
+    %% mov [rsp+N*8], rax
+    Offset = N * 8,
+    if
+        Offset < 128 ->
+            <<16#48, 16#89, 16#44, 16#24, Offset:8>>;  % mov [rsp+disp8], rax
+        true ->
+            <<16#48, 16#89, 16#84, 16#24, Offset:32/little>>  % mov [rsp+disp32], rax
+    end;
+
+translate_move({y, N}, {x, 0}) ->
+    %% mov rax, [rsp+N*8]
+    Offset = N * 8,
+    if
+        Offset < 128 ->
+            <<16#48, 16#8B, 16#44, 16#24, Offset:8>>;  % mov rax, [rsp+disp8]
+        true ->
+            <<16#48, 16#8B, 16#84, 16#24, Offset:32/little>>  % mov rax, [rsp+disp32]
+    end;
+
+translate_move({integer, Val}, {x, 0}) ->
+    %% mov rax, immediate
+    if
+        Val >= -16#80000000, Val =< 16#7FFFFFFF ->
+            %% 32-bit sign-extended immediate
+            <<16#48, 16#C7, 16#C0, Val:32/little-signed>>;  % mov rax, imm32
+        true ->
+            %% 64-bit immediate (movabs)
+            <<16#48, 16#B8, Val:64/little-signed>>  % movabs rax, imm64
+    end;
+
+translate_move({atom, _Atom}, {x, 0}) ->
+    %% For atoms, we'd need an atom table - for now, load 0
+    <<16#48, 16#31, 16#C0>>;  % xor rax, rax
+
+translate_move(_Src, _Dst) ->
+    %% Unhandled move - emit nop
+    <<16#90>>.
+
+%% ============================================================================
+%% External Call Translation
+%% ============================================================================
+
+translate_external_call(io, format) ->
+    translate_serial_output();
+
+translate_external_call(erlang, display) ->
+    translate_serial_output();
+
+translate_external_call(_Mod, _Fun) ->
+    %% Unknown external function - emit nop
+    <<16#90>>.
+
+%% Generate inline serial output code
+%% Assumes RSI points to string (loaded by caller from put_string)
+translate_serial_output() ->
+    %% Inline string output loop - this is expanded INLINE in the function body,
+    %% so we must NOT end with 'ret' (that would return from the caller prematurely)
+    %% FIX 3: Removed 'ret' instruction - this is inline code, not a helper function
+    iolist_to_binary([
+        %% Inline string output loop
+        %% RSI = string pointer (assumed already loaded)
+        <<16#AC>>,                                % lodsb
+        <<16#84, 16#C0>>,                         % test al, al
+        <<16#74, 16#16>>,                         % jz done (+22 bytes)
+        <<16#88, 16#C3>>,                         % mov bl, al
+        %% Wait for TX ready
+        <<16#BA, 16#FD, 16#03, 16#00, 16#00>>,   % mov edx, 0x3FD
+        <<16#EC>>,                                % in al, dx
+        <<16#A8, 16#20>>,                         % test al, 0x20
+        <<16#74, 16#FB>>,                         % jz wait (-5)
+        <<16#88, 16#D8>>,                         % mov al, bl
+        <<16#BA, 16#F8, 16#03, 16#00, 16#00>>,   % mov edx, 0x3F8
+        <<16#EE>>,                                % out dx, al
+        <<16#EB, 16#E5>>                          % jmp loop (-27)
+        %% done: (fall through to next instruction in caller)
+    ]).
+
+%% ============================================================================
+%% String Embedding
+%% ============================================================================
+
+translate_put_string(_Len, String, {x, 0}) ->
+    %% For bare metal, we need RIP-relative addressing
+    %% Simplified: load string pointer (would embed string in data section)
+    %% For now, just load 0 (strings would need multi-pass compilation)
+    _ = String,  % Suppress warning
+    <<16#48, 16#31, 16#C0>>;  % xor rax, rax (placeholder)
+
+translate_put_string(_Len, _String, _Dst) ->
+    <<16#90>>.  % nop

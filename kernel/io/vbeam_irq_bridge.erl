@@ -123,7 +123,7 @@ start_link() ->
 %% @doc Register a PID to handle IRQ N.
 %% Only one handler per IRQ number.
 -spec register_handler(non_neg_integer(), pid()) -> ok.
-register_handler(IrqNum, Pid) when is_integer(IrqNum), IrqNum >= 0, is_pid(Pid) ->
+register_handler(IrqNum, Pid) when is_integer(IrqNum), IrqNum >= 0, IrqNum =< 255, is_pid(Pid) ->
     gen_server:call(?MODULE, {register_handler, IrqNum, Pid}).
 
 %% @doc Unregister handler for IRQ N.
@@ -258,7 +258,14 @@ handle_call({register_handler, IrqNum, Pid}, From, #state{handlers = Handlers, m
     end;
 
 
-handle_call({unregister_handler, IrqNum}, _From, #state{handlers = Handlers, monitors = Monitors} = State) ->
+handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Handlers, monitors = Monitors} = State) ->
+    %% Check caller ownership — only the process that registered the handler can unregister
+    case maps:get(IrqNum, Handlers, undefined) of
+        undefined ->
+            {reply, {error, not_found}, State};
+        OwnerPid when OwnerPid =/= CallerPid ->
+            {reply, {error, not_owner}, State};
+        _OwnerPid ->
     %% Demonitor if handler exists
     NewMonitors = case maps:get(IrqNum, Handlers, undefined) of
         undefined ->
@@ -279,7 +286,8 @@ handle_call({unregister_handler, IrqNum}, _From, #state{handlers = Handlers, mon
             end
     end,
     NewHandlers = maps:remove(IrqNum, Handlers),
-    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}};
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}}
+    end;
 
 handle_call(get_handlers, _From, #state{handlers = Handlers} = State) ->
     {reply, Handlers, State};

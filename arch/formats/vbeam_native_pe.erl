@@ -119,6 +119,7 @@ emit(Code, Data, EntryOffset, Arch, Subsystem) ->
     ImageSize = RelocRVA + section_align(RelocVirtualSize),
 
     %% Entry point RVA (relative to image base)
+    true = EntryOffset < byte_size(Code),  %% Validate entry offset
     EntryRVA = TextRVA + EntryOffset,
 
     %% Data directories

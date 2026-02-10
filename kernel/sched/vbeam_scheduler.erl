@@ -283,7 +283,7 @@ handle_call({spawn_process, Module, Function}, _From, State) ->
            heap_registry = HeapReg, ready_normal = ReadyNormal, config = Config} = State,
 
     %% Check max_processes limit
-    MaxProcesses = maps:get(max_processes, Config, infinity),
+    MaxProcesses = maps:get(max_processes, Config, 10000),
     case MaxProcesses =/= infinity andalso map_size(Processes) >= MaxProcesses of
         true ->
             {reply, {error, max_processes_reached}, State};
@@ -330,6 +330,11 @@ handle_call({spawn_process, Module, Function}, _From, State) ->
 handle_call({kill_process, Pid}, _From, State) ->
     #state{processes = Processes, page_alloc = PageAlloc, heap_registry = HeapReg} = State,
 
+    %% Protect idle process (PID 0) from being killed
+    case Pid of
+        0 -> {reply, {error, cannot_kill_idle}, State};
+        _ ->
+
     case maps:get(Pid, Processes, undefined) of
         undefined ->
             {reply, {error, not_found}, State};
@@ -347,6 +352,7 @@ handle_call({kill_process, Pid}, _From, State) ->
             }),
 
             {reply, ok, NewState}
+    end
     end;
 
 handle_call({get_process, Pid}, _From, #state{processes = Processes} = State) ->
