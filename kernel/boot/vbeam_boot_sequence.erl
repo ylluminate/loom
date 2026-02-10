@@ -30,7 +30,9 @@
 %%      For now, simplified to just return a basic boot sequence
 %%      without serial output (serial_print_call is complex due to
 %%      RIP-relative addressing and we can add it later).
--spec boot_code(map()) -> binary().
+%%
+%% CODEX R38 FINDING #5 FIX: Spec can return error tuple from paging module
+-spec boot_code(map()) -> binary() | {error, term()}.
 boot_code(Config) ->
     #{
         gdt_base := GDTBase,

@@ -189,22 +189,28 @@ parse_chunk_data('LocT', Data) ->
     end;
 
 parse_chunk_data('Attr', Data) ->
+    %% CODEX R38 FINDING #3 FIX: Match {'EXIT', _} explicitly before generic term
     %% Attributes - Erlang term (external term format)
     case catch binary_to_term(Data, [safe]) of
+        {'EXIT', _} -> Data;  % Failed to decode - return raw data
         Term when not is_reference(Term) -> Term;
         _ -> Data
     end;
 
 parse_chunk_data('CInf', Data) ->
+    %% CODEX R38 FINDING #3 FIX: Match {'EXIT', _} explicitly before generic term
     %% Compilation info - Erlang term
     case catch binary_to_term(Data, [safe]) of
+        {'EXIT', _} -> Data;  % Failed to decode - return raw data
         Term when not is_reference(Term) -> Term;
         _ -> Data
     end;
 
 parse_chunk_data('Abst', Data) ->
+    %% CODEX R38 FINDING #3 FIX: Match {'EXIT', _} explicitly before generic term
     %% Abstract code - Erlang term
     case catch binary_to_term(Data, [safe]) of
+        {'EXIT', _} -> Data;  % Failed to decode - return raw data
         Term when not is_reference(Term) -> Term;
         _ -> Data
     end;

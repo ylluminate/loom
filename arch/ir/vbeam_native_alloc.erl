@@ -97,9 +97,9 @@ emit_alloc_init(x86_64, Format) ->
     %% x86_64 mmap syscall: format-aware for Linux vs macOS
     %%   rdi = addr (0), rsi = length, rdx = prot,
     %%   r10 = flags, r8 = fd, r9 = offset
-    {MmapNum, ExitNum} = case Format of
-        elf64 -> {9, 60};        %% Linux: mmap=9, exit=60
-        _     -> {16#20000C5, 16#2000001}  %% macOS: mmap=0x20000C5, exit=0x2000001
+    {MmapNum, ExitNum, MmapFlags, ErrorCheck} = case Format of
+        elf64 -> {9, 60, 16#22, jns};        %% Linux: mmap=9, exit=60, flags=MAP_PRIVATE|MAP_ANONYMOUS, sign-check
+        _     -> {16#20000C5, 16#2000001, 16#1002, jnc}  %% macOS: mmap=0x20000C5, exit=0x2000001, flags=MAP_ANON|MAP_PRIVATE, carry-check
     end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__alloc_init_x64_ok_", Uid/binary>>,
@@ -108,14 +108,16 @@ emit_alloc_init(x86_64, Format) ->
         ?X86_ENC:encode_mov_imm64(rdi, 0),
         ?X86_ENC:encode_mov_imm64(rsi, ?HEAP_SIZE),
         ?X86_ENC:encode_mov_imm64(rdx, 3),
-        ?X86_ENC:encode_mov_imm64(r10, 16#22),
+        ?X86_ENC:encode_mov_imm64(r10, MmapFlags),
         ?X86_ENC:encode_mov_imm64(r8, -1),
         ?X86_ENC:encode_mov_imm64(r9, 0),
         ?X86_ENC:encode_mov_imm64(rax, MmapNum),
         ?X86_ENC:encode_syscall(),
-        %% Validate mmap result: negative rax means error
-        ?X86_ENC:encode_test_rr(rax, rax),
-        ?X86_ENC:encode_jns(0),
+        %% Validate mmap result: Linux uses sign (jns), macOS uses carry flag (jnc)
+        case ErrorCheck of
+            jns -> [?X86_ENC:encode_test_rr(rax, rax), ?X86_ENC:encode_jns(0)];
+            jnc -> ?X86_ENC:encode_jcc_rel32(nc, 0)
+        end,
         {reloc, rel32, OkLbl, -4},
         %% Failure path
         {label, FailLbl},

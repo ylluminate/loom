@@ -443,8 +443,10 @@ available_regs(x86_64) ->
     %% which get silently clobbered by these operations.
     %% CRITICAL FIX (Round 28, Finding 1): Exclude r14 as heap-end register.
     %% r14 holds the heap bound for bounds checks; r15 is heap pointer.
+    %% CRITICAL FIX (Round 38, Finding 3): Exclude r10 as spill scratch register.
+    %% The regalloc uses r10/r11 as scratch for loading/storing spilled operands.
     %% Put callee-saved last (prefer caller-saved to minimize saves)
-    [rax, rcx, rdx, rsi, rdi, r8, r9, r10,
+    [rax, rcx, rdx, rsi, rdi, r8, r9,
      rbx, r12, r13];
 available_regs(arm64) ->
     %% Exclude x29 (frame pointer), x30 (link register), sp (stack pointer)
@@ -452,9 +454,11 @@ available_regs(arm64) ->
     %% Exclude x18 (platform register on macOS)
     %% CRITICAL FIX (Round 28, Finding 1): Exclude x27 as heap-end register.
     %% x27 holds the heap bound for bounds checks; x28 is heap pointer.
+    %% CRITICAL FIX (Round 38, Finding 3): Exclude x14, x15 as spill scratch registers.
+    %% The regalloc uses x14/x15 as scratch for loading/storing spilled operands.
     %% Put callee-saved last
     [x0, x1, x2, x3, x4, x5, x6, x7,
-     x8, x9, x10, x11, x12, x13, x14, x15,
+     x8, x9, x10, x11, x12, x13,
      x19, x20, x21, x22, x23, x24, x25, x26].
 
 %% Available registers excluding the heap pointer register.

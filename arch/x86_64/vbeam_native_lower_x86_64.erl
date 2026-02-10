@@ -629,6 +629,8 @@ lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _
 %% PRINT_STR: Print string via write syscall.
 %% Saves all caller-visible registers that might hold user values.
 %% SYSCALL clobbers rcx and r11; we save those too.
+%% LIMITATION: Hardcoded to Linux syscalls (sys_write=1). macOS uses 0x2000004.
+%% TODO: Thread format through lowering context to use platform-correct syscall numbers.
 lower_instruction({print_str, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     lists:flatten([
         %% Save registers (SYSCALL clobbers rcx, r11 in addition to args)
@@ -643,7 +645,7 @@ lower_instruction({print_str, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_mov_mem_load(r10, Src, 0),        %% r10 = buf (ptr)
         ?ENC:encode_mov_mem_load(r8, Src, 8),         %% r8 = len
         %% write(1, buf, len)
-        ?ENC:encode_mov_imm64(rax, 1),               %% sys_write
+        ?ENC:encode_mov_imm64(rax, 1),               %% sys_write (Linux only - macOS would be 0x2000004)
         ?ENC:encode_mov_imm64(rdi, 1),               %% fd = stdout
         ?ENC:encode_mov_rr(rsi, r10),                 %% buf
         ?ENC:encode_mov_rr(rdx, r8),                  %% len
@@ -695,8 +697,9 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
         ?ENC:encode_jcc_rel32(ltu, 0),                       %% jump if unsigned-less-than (idx < len)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
+        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -728,8 +731,9 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
         ?ENC:encode_jcc_rel32(gtu, 0),                       %% jump if length > index (unsigned)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
+        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -757,8 +761,9 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
         ?ENC:encode_jcc_rel32(gtu, 0),                       %% jump if length > index (unsigned)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
+        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -785,8 +790,9 @@ lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemS
         ?ENC:encode_jcc_rel32(ltu, 0),                       %% jump if unsigned-less-than (idx < len)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
+        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -1407,8 +1413,9 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         {reloc, rel32, PositiveLbl, -4},
 
         %% Negative: write '-' sign to stdout
+        %% LIMITATION: Hardcoded to Linux syscalls (sys_write=1). macOS uses 0x2000004.
         encode_mov_byte_to_stack(0, $-),  %% store '-' at rsp+0
-        ?ENC:encode_mov_imm64(rax, 1),    %% sys_write
+        ?ENC:encode_mov_imm64(rax, 1),    %% sys_write (Linux only - macOS would be 0x2000004)
         ?ENC:encode_mov_imm64(rdi, 1),    %% fd = stdout
         ?ENC:encode_mov_rr(rsi, rsp),      %% buf = rsp+0
         ?ENC:encode_mov_imm64(rdx, 1),    %% len = 1
@@ -1609,6 +1616,9 @@ pop_scc(Node, [Other | Rest], Acc) -> pop_scc(Node, Rest, [Other | Acc]).
 
 %% FIXED BUG #4: Break each cycle individually using rotation.
 %% For a cycle [A→B→C→A], emit: save A to temp, C→A, B→C, temp→B.
+%% CRITICAL FIX (Round 38, Finding 4): Emit non-cycle moves FIRST (in reverse),
+%% then emit cycle moves. This ensures non-cycle reads see original values
+%% before cycle rotation overwrites them.
 break_all_cycles(Cycles, Moves, UsedCalleeSaved) ->
     %% Build move map for quick lookup
     MoveMap = maps:from_list(Moves),
@@ -1621,7 +1631,7 @@ break_all_cycles(Cycles, Moves, UsedCalleeSaved) ->
     NonCycleMoves0 = [{Dst, Src} || {Dst, Src} <- Moves,
                       not lists:member(Dst, CycleRegs)],
     NonCycleMoves = [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- lists:reverse(NonCycleMoves0)],
-    CycleMoves ++ NonCycleMoves.
+    NonCycleMoves ++ CycleMoves.
 
 %% CRITICAL FIX: Break a single cycle by true rotation through temp register r11.
 %% Cycle is [R1, R2, ..., Rn] representing moves R1→R2, R2→R3, ..., Rn→R1.

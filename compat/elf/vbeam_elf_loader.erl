@@ -119,7 +119,8 @@
     offset => non_neg_integer(),
     type => atom(),
     symbol => non_neg_integer(),
-    addend => integer()
+    addend => integer(),
+    format => rela | rel  % Track whether this is RELA (explicit addend) or REL (implicit addend)
 }.
 
 -type loaded_module() :: #{
@@ -660,7 +661,8 @@ parse_rela(Data, Offset) ->
         offset => RelaOffset,
         type => Type,
         symbol => Sym,
-        addend => Addend
+        addend => Addend,
+        format => rela  % RELA format - explicit addend
     }.
 
 %% FINDING 6 FIX: Parse REL entries (addend implicit, derived from target)
@@ -690,7 +692,8 @@ parse_rel(Data, Offset) ->
         %%   3. Sign-extend for signed types (PC32, PLT32, 32S)
         %%
         %% For now: hardcoded 0 (incorrect for non-zero implicit addends)
-        addend => 0
+        addend => 0,
+        format => rel  % REL format - implicit addend (read from target)
     }.
 
 %% ============================================================================
@@ -745,7 +748,7 @@ apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) -
             Section
     end.
 
-apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := Addend},
+apply_relocation(Reloc = #{offset := Offset, type := Type, symbol := SymIdx, addend := Addend},
                  Data, Symbols, AllSections, SectionAddrs, CurrentSectionAddr) ->
     %% BUG 9 FIX: Convert to tuple for O(1) access
     SymbolsTuple = list_to_tuple(Symbols),
@@ -761,14 +764,14 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
 
     SymAddr = calculate_symbol_address(Sym, AllSections, SectionAddrs),
 
-    %% CODEX R37 FINDING #1 FIX: Read implicit addend for REL entries
-    %% If addend is 0 and we have a REL-type relocation, read the implicit addend
-    %% from the target location in the data
-    ActualAddend = case Addend of
-        0 ->
-            %% Try to read implicit addend from Data at Offset
+    %% CODEX R38 FINDING #1 FIX: Use format field to determine addend source
+    %% RELA format has explicit addend (use as-is, even if 0)
+    %% REL format has implicit addend (read from target location)
+    ActualAddend = case maps:get(format, Reloc, rela) of
+        rel ->
+            %% REL format - read implicit addend from target location
             read_implicit_addend(Data, Offset, Type);
-        _ ->
+        rela ->
             %% RELA format - explicit addend already provided
             Addend
     end,

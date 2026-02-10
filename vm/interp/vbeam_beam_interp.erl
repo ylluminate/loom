@@ -27,10 +27,26 @@ execute(Chunks, FunctionName, Args) ->
     execute(Chunks, FunctionName, Args, []).
 
 execute(Chunks, FunctionName, Args, Options) when is_list(Args) ->
-    %% Initialize process state
-    Proc = init_proc(Chunks),
+    %% CODEX R38 FINDING #2 FIX: Wrap init_proc in try/catch for graceful error handling
+    %% Initialize process state - catch malformed input errors
+    case try
+        {ok, init_proc(Chunks)}
+    catch
+        error:Reason:Stacktrace ->
+            {error, {init_proc_failed, Reason, Stacktrace}};
+        throw:Reason ->
+            {error, {init_proc_failed, Reason}}
+    end of
+        {error, _} = Err ->
+            Err;
+        {ok, Proc} ->
+            %% Find the function's entry point
+            execute_with_proc(Proc, FunctionName, Args, Options)
+    end;
+execute(_Chunks, _FunctionName, Args, _Options) ->
+    {error, {invalid_args, Args}}.
 
-    %% Find the function's entry point
+execute_with_proc(Proc, FunctionName, Args, Options) ->
     case find_function_label(Proc, FunctionName, length(Args)) of
         {ok, Label} ->
             %% Set up initial X registers with arguments
@@ -50,9 +66,7 @@ execute(Chunks, FunctionName, Args, Options) when is_list(Args) ->
             run(Proc2, Options);
         error ->
             {error, {function_not_found, FunctionName, length(Args)}}
-    end;
-execute(_Chunks, _FunctionName, Args, _Options) ->
-    {error, {invalid_args, Args}}.
+    end.
 
 %% Initialize process state from parsed chunks
 init_proc(Chunks) ->

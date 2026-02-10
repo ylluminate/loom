@@ -384,6 +384,16 @@ translate_opcode_normalized({bs_put_string, _Len, _String}, Acc) ->
     %% Binary string operation - skip for now
     Acc;
 
+%% CODEX R38 FINDING #4 FIX: Add explicit stubs for local call opcodes
+translate_opcode_normalized({call, _Arity, _Label} = Op, _Acc) ->
+    error({unimplemented_opcode, call, Op});
+
+translate_opcode_normalized({call_only, _Arity, _Label} = Op, _Acc) ->
+    error({unimplemented_opcode, call_only, Op});
+
+translate_opcode_normalized({call_last, _Arity, _Label, _Dealloc} = Op, _Acc) ->
+    error({unimplemented_opcode, call_last, Op});
+
 translate_opcode_normalized(UnknownOp, _Acc) ->
     %% SECURITY FIX: Fail closed on unknown opcodes instead of silently producing NOP
     %% This prevents guest code from using undocumented/future opcodes to bypass translation

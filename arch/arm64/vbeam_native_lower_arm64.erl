@@ -394,14 +394,15 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
 
         %% CRITICAL FIX (Finding 5): INT64_MIN cannot be negated
         %% Check if value is INT64_MIN, if so add 1 before negating
-        %% Use x10 as flag register (caller-saved, safe for scratch)
-        ?ENC:encode_mov_imm64(x10, 0),                %% flag: 0 = normal
+        %% CRITICAL FIX (Round 38, Finding 5): Use x11 as flag register instead of x10.
+        %% x10 is used as quotient register in the division loop below.
+        ?ENC:encode_mov_imm64(x11, 0),                %% flag: 0 = normal
         ?ENC:encode_mov_imm64(x9, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(x19, x9),
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, <<"__pi_not_min_", Uid/binary>>, -4},
         ?ENC:encode_add_imm(x19, x19, 1),             %% x19 = INT64_MIN + 1
-        ?ENC:encode_mov_imm64(x10, 1),                %% flag: was INT64_MIN
+        ?ENC:encode_mov_imm64(x11, 1),                %% flag: was INT64_MIN
         {label, <<"__pi_not_min_", Uid/binary>>},
 
         %% Negate value
@@ -409,6 +410,9 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
 
         %% Positive (or negated)
         {label, PositiveLbl},
+
+        %% Save x11 flag to stack (digit loop needs x11 for remainder)
+        ?ENC:encode_str(x11, sp, 88),                 %% Save INT64_MIN flag at sp+88
 
         %% Digit extraction loop
         {label, DivLoopLbl},
@@ -427,8 +431,9 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, DivLoopLbl, -4},
 
-        %% CRITICAL FIX (Finding 5): If x10=1, fix last digit ('7'→'8')
-        ?ENC:encode_cmp_imm(x10, 0),
+        %% CRITICAL FIX (Finding 5): If flag=1, fix last digit ('7'→'8')
+        ?ENC:encode_ldr(x11, sp, 88),         %% Restore INT64_MIN flag from stack
+        ?ENC:encode_cmp_imm(x11, 0),
         ?ENC:encode_b_cond(eq, 0),
         {reloc, arm64_cond_branch19, <<"__pi_no_fixup_", Uid/binary>>, -4},
         %% Last digit is at [sp + x20], increment it
