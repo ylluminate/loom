@@ -122,9 +122,21 @@ free_page_checked(State, PageNum) ->
     end.
 
 %% @doc Free multiple pages
--spec free_pages(state(), [phys_addr()]) -> state().
+-spec free_pages(state(), [phys_addr()]) -> state() | {error, term()}.
 free_pages(State, PhysAddrs) ->
-    lists:foldl(fun(Addr, S) -> free_page(S, Addr) end, State, PhysAddrs).
+    lists:foldl(
+        fun(Addr, S) ->
+            case S of
+                {error, _} = Err -> Err;  % Propagate error immediately
+                _ ->
+                    case free_page(S, Addr) of
+                        {error, _} = Err -> Err;
+                        NewState -> NewState
+                    end
+            end
+        end,
+        State,
+        PhysAddrs).
 
 %% @doc Mark a physical address range as reserved
 -spec mark_reserved(state(), phys_addr(), phys_addr()) -> state().

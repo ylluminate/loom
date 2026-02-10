@@ -554,11 +554,19 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
                 false -> error({reloc_overflow, r_x86_64_plt32, Val32})
             end;
         r_x86_64_32 ->
-            %% S + A (zero-extend)
-            (S + A) band 16#FFFFFFFF;
+            %% S + A (zero-extend) - must fit in unsigned 32-bit
+            Val = S + A,
+            case Val >= 0 andalso Val =< 16#FFFFFFFF of
+                true -> Val band 16#FFFFFFFF;
+                false -> error({relocation_overflow, r_x86_64_32, Val})
+            end;
         r_x86_64_32s ->
-            %% S + A (sign-extend)
-            (S + A) band 16#FFFFFFFF;
+            %% S + A (sign-extend) - must fit in signed 32-bit
+            Val = S + A,
+            case Val >= -2147483648 andalso Val =< 2147483647 of
+                true -> Val band 16#FFFFFFFF;
+                false -> error({relocation_overflow, r_x86_64_32s, Val})
+            end;
         r_x86_64_none ->
             0
     end,

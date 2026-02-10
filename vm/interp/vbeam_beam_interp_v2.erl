@@ -308,9 +308,14 @@ execute_instr({get_tuple_element, Src, Index, Dst}, Proc, _Options) ->
     %% Extract tuple element (0-indexed)
     case get_value(Src, Proc) of
         Tuple when is_tuple(Tuple) ->
-            Element = element(Index + 1, Tuple),
-            Proc2 = set_register(Dst, Element, Proc),
-            {continue, Proc2#proc{pc = Proc2#proc.pc + 1}};
+            case is_integer(Index) andalso Index >= 0 andalso Index < tuple_size(Tuple) of
+                true ->
+                    Element = element(Index + 1, Tuple),
+                    Proc2 = set_register(Dst, Element, Proc),
+                    {continue, Proc2#proc{pc = Proc2#proc.pc + 1}};
+                false ->
+                    {error, {bad_element_index, Index}}
+            end;
         _ ->
             {error, {badarg, not_a_tuple}}
     end;

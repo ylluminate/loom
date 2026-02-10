@@ -228,10 +228,16 @@ compute_patch(arm64_cond_branch19, Offset, SymAddr, TextBase, Addend) ->
 %% @doc Patch a binary at a given offset with a little-endian value.
 -spec patch_binary(binary(), non_neg_integer(), pos_integer(), integer()) -> binary().
 patch_binary(Bin, Offset, 4, Value) ->
-    <<Before:Offset/binary, _Old:4/binary, After/binary>> = Bin,
-    %% Encode as signed 32-bit little-endian
-    Encoded = <<Value:32/little-signed>>,
-    <<Before/binary, Encoded/binary, After/binary>>;
+    %% Validate that Value fits in signed 32-bit before writing
+    case Value >= -2147483648 andalso Value =< 2147483647 of
+        true ->
+            <<Before:Offset/binary, _Old:4/binary, After/binary>> = Bin,
+            %% Encode as signed 32-bit little-endian
+            Encoded = <<Value:32/little-signed>>,
+            <<Before/binary, Encoded/binary, After/binary>>;
+        false ->
+            error({relocation_overflow, rel32, Value})
+    end;
 
 patch_binary(Bin, Offset, 8, Value) ->
     <<Before:Offset/binary, _Old:8/binary, After/binary>> = Bin,
@@ -260,8 +266,20 @@ patch_add_imm12(Bin, Offset, PageOff) ->
 %% BL encoding: [100101][imm26:26]
 %% imm26 is signed, represents offset/4 (offset in instructions).
 patch_arm64_branch26(Bin, Offset, ByteOffset) ->
+    %% Validate alignment
+    case ByteOffset rem 4 of
+        0 -> ok;
+        _ -> error({arm64_branch26_misaligned, ByteOffset})
+    end,
+    %% Validate signed 26-bit range: offset/4 must fit in [-2^25, 2^25-1]
+    %% In bytes: [-2^27, 2^27-4] = [-134217728, 134217724]
+    InsnOffset = ByteOffset div 4,
+    case (InsnOffset >= -(1 bsl 25)) andalso (InsnOffset < (1 bsl 25)) of
+        true -> ok;
+        false -> error({arm64_branch26_overflow, ByteOffset})
+    end,
     <<Before:Offset/binary, OldInsn:32/little, After/binary>> = Bin,
-    Imm26 = (ByteOffset div 4) band 16#3FFFFFF,
+    Imm26 = InsnOffset band 16#3FFFFFF,
     Masked = OldInsn band (bnot 16#3FFFFFF),
     NewInsn = Masked bor Imm26,
     <<Before/binary, NewInsn:32/little, After/binary>>.
@@ -270,8 +288,20 @@ patch_arm64_branch26(Bin, Offset, ByteOffset) ->
 %% B.cond encoding: [01010100][imm19:19][0][cond:4]
 %% imm19 is signed, represents offset/4 (offset in instructions).
 patch_arm64_cond_branch19(Bin, Offset, ByteOffset) ->
+    %% Validate alignment
+    case ByteOffset rem 4 of
+        0 -> ok;
+        _ -> error({arm64_cond_branch19_misaligned, ByteOffset})
+    end,
+    %% Validate signed 19-bit range: offset/4 must fit in [-2^18, 2^18-1]
+    %% In bytes: [-2^20, 2^20-4] = [-1048576, 1048572]
+    InsnOffset = ByteOffset div 4,
+    case (InsnOffset >= -(1 bsl 18)) andalso (InsnOffset < (1 bsl 18)) of
+        true -> ok;
+        false -> error({arm64_cond_branch19_overflow, ByteOffset})
+    end,
     <<Before:Offset/binary, OldInsn:32/little, After/binary>> = Bin,
-    Imm19 = (ByteOffset div 4) band 16#7FFFF,
+    Imm19 = InsnOffset band 16#7FFFF,
     Masked = OldInsn band (bnot (16#7FFFF bsl 5)),
     NewInsn = Masked bor (Imm19 bsl 5),
     <<Before/binary, NewInsn:32/little, After/binary>>.

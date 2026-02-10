@@ -12,15 +12,18 @@
 -define(EACCES, 13).  % Permission denied
 -define(ENOENT, 2).   % No such file or directory
 
-%% Syscall state tracking
--record(syscall_state, {
-    unimplemented_seen = sets:new() :: sets:set(integer())
-}).
+%% Syscall state tracking via ETS (thread-safe)
+-define(TRACKING_TABLE, vbeam_syscall_tracking).
 
 %% @doc Initialize syscall dispatch system
-%% Creates persistent term for tracking unimplemented syscalls
+%% Creates ETS table for tracking unimplemented syscalls
 init() ->
-    persistent_term:put({?MODULE, state}, #syscall_state{}),
+    case ets:whereis(?TRACKING_TABLE) of
+        undefined ->
+            ets:new(?TRACKING_TABLE, [named_table, public, set]);
+        _ ->
+            ok
+    end,
     ok.
 
 %% @doc Dispatch a syscall to the appropriate handler
@@ -245,25 +248,24 @@ sys_ioctl([Fd, Cmd, Arg]) ->
 %% ============================================================
 
 stub_syscall(SyscallNr, Args) ->
-    %% Log first occurrence (lazy init if needed)
-    State = case persistent_term:get({?MODULE, state}, undefined) of
-        undefined ->
+    %% Log first occurrence using ETS (thread-safe, lazy init)
+    try
+        case ets:lookup(?TRACKING_TABLE, SyscallNr) of
+            [] ->
+                %% First occurrence - log it
+                Name = syscall_name(SyscallNr),
+                io:format("[vbeam] UNIMPLEMENTED SYSCALL: ~s (~p) args=~p~n",
+                         [Name, SyscallNr, Args]),
+                ets:insert(?TRACKING_TABLE, {SyscallNr, true});
+            _ ->
+                %% Already seen
+                ok
+        end
+    catch
+        error:badarg ->
+            %% Table doesn't exist - initialize and retry
             init(),
-            persistent_term:get({?MODULE, state});
-        S ->
-            S
-    end,
-    Seen = State#syscall_state.unimplemented_seen,
-    case sets:is_element(SyscallNr, Seen) of
-        false ->
-            Name = syscall_name(SyscallNr),
-            io:format("[vbeam] UNIMPLEMENTED SYSCALL: ~s (~p) args=~p~n",
-                     [Name, SyscallNr, Args]),
-            NewSeen = sets:add_element(SyscallNr, Seen),
-            NewState = State#syscall_state{unimplemented_seen = NewSeen},
-            persistent_term:put({?MODULE, state}, NewState);
-        true ->
-            ok
+            stub_syscall(SyscallNr, Args)
     end,
     {error, ?ENOSYS}.
 

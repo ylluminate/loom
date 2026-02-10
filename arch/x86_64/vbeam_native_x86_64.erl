@@ -621,19 +621,27 @@ encode_mov_mem_store(Base, Offset, Src) ->
 %% @doc MOV r64, CRn  (read control register)
 %%      Encoding: 0F 20 /r
 %%      CRn in ModR/M reg field, GPR in r/m field.
+%%      For CR8+, use REX.R bit for high bit of CR register.
 -spec encode_mov_from_cr(reg64(), control_reg()) -> binary().
 encode_mov_from_cr(Dst, CRn) ->
-    Rex = rex(1, 0, 0, reg_hi(Dst)),
-    ModRM = modrm(2#11, cr_code(CRn), reg_lo(Dst)),
+    CrCode = cr_code(CRn),
+    CrHi = (CrCode bsr 3) band 1,
+    CrLo = CrCode band 7,
+    Rex = rex(1, CrHi, 0, reg_hi(Dst)),
+    ModRM = modrm(2#11, CrLo, reg_lo(Dst)),
     <<Rex:8, 16#0F:8, 16#20:8, ModRM:8>>.
 
 %% @doc MOV CRn, r64  (write control register)
 %%      Encoding: 0F 22 /r
 %%      CRn in ModR/M reg field, GPR in r/m field.
+%%      For CR8+, use REX.R bit for high bit of CR register.
 -spec encode_mov_to_cr(control_reg(), reg64()) -> binary().
 encode_mov_to_cr(CRn, Src) ->
-    Rex = rex(1, 0, 0, reg_hi(Src)),
-    ModRM = modrm(2#11, cr_code(CRn), reg_lo(Src)),
+    CrCode = cr_code(CRn),
+    CrHi = (CrCode bsr 3) band 1,
+    CrLo = CrCode band 7,
+    Rex = rex(1, CrHi, 0, reg_hi(Src)),
+    ModRM = modrm(2#11, CrLo, reg_lo(Src)),
     <<Rex:8, 16#0F:8, 16#22:8, ModRM:8>>.
 
 %%====================================================================

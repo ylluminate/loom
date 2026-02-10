@@ -238,7 +238,10 @@ parse_literals(<<Count:32, Rest/binary>>) ->
 parse_literal_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_literal_list(<<Size:32, Literal:Size/binary, Rest/binary>>, Count, Acc) ->
-    Term = binary_to_term(Literal),
+    Term = try binary_to_term(Literal, [safe])
+           catch
+               error:badarg -> {error, unsafe_literal}
+           end,
     parse_literal_list(Rest, Count - 1, [Term | Acc]);
 parse_literal_list(_, _, Acc) ->
     lists:reverse(Acc).

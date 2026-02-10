@@ -70,7 +70,7 @@ boot_code(Config) ->
         <<16#EB, 16#FD>> %% jmp -3 (infinite loop)
     ]).
 
-%% @doc Generate boot data section containing GDT, IDT, IDTR, page tables, and strings.
+%% @doc Generate boot data section containing GDT, IDT, IDTR, ISR stubs, page tables, and strings.
 %%      Data is packed sequentially but must align with configured base addresses.
 %%      IDTR is placed at IDTBase + 4096 to match idt_load_code expectations.
 -spec boot_data(map()) -> binary().
@@ -80,6 +80,9 @@ boot_data(Config) ->
         idt_base := IDTBase,
         page_tables_base := PageTablesBase
     } = Config,
+
+    %% Get ISR stubs base from config or compute default
+    ISRStubsBase = maps:get(isr_stubs_base, Config, PageTablesBase + 16#100000),
 
     %% GDT data (includes 5 entries + GDTR at end)
     GDTData = vbeam_gdt_idt:gdt_data(),
@@ -95,8 +98,7 @@ boot_data(Config) ->
     end,
 
     %% IDT data (256 entries, 4096 bytes)
-    %% ISR stubs will be at known location - pass base address
-    ISRStubsBase = 16#210000,  %% Placeholder, actual location TBD
+    %% ISR stubs will be emitted after page tables
     IDTData = vbeam_gdt_idt:idt_data(ISRStubsBase),
     IDTSize = byte_size(IDTData),
 
@@ -119,6 +121,18 @@ boot_data(Config) ->
     %% Page tables (4GB identity-mapped) with absolute base addresses
     PageTablesData = vbeam_paging:page_tables(PageTablesBase, 4),
 
+    %% ISR exception stubs (must be emitted at ISRStubsBase offset)
+    %% Calculate padding needed to reach ISRStubsBase
+    ActualISRStubsOffset = ISRStubsBase - GDTBase,
+    CurrentOffset = GDTSize + byte_size(GDTPadding) + IDTSize + 10 + byte_size(PageTablesPadding) + byte_size(PageTablesData),
+    ISRStubsPadding = if
+        ActualISRStubsOffset > CurrentOffset ->
+            binary:copy(<<0>>, ActualISRStubsOffset - CurrentOffset);
+        true ->
+            <<>>
+    end,
+    ISRStubs = vbeam_gdt_idt:exception_stubs(),
+
     %% Status strings (null-terminated)
     Strings = [
         <<"[BOOT] ExitBootServices...\r\n", 0>>,
@@ -129,7 +143,7 @@ boot_data(Config) ->
         <<"[BOOT] BEAM kernel ready\r\n", 0>>
     ],
 
-    iolist_to_binary([GDTData, GDTPadding, IDTData, IDTRReserved, PageTablesPadding, PageTablesData, Strings]).
+    iolist_to_binary([GDTData, GDTPadding, IDTData, IDTRReserved, PageTablesPadding, PageTablesData, ISRStubsPadding, ISRStubs, Strings]).
 
 %% @doc Returns layout map describing data section structure.
 %%      Must match the structure created by boot_data/1.
@@ -141,16 +155,21 @@ boot_data_layout(Config) ->
         page_tables_base := PageTablesBase
     } = Config,
 
+    %% Get ISR stubs base from config or compute default
+    ISRStubsBase = maps:get(isr_stubs_base, Config, PageTablesBase + 16#100000),
+
     %% Calculate sizes (must match boot_data/1)
     GDTData = vbeam_gdt_idt:gdt_data(),
     GDTSize = byte_size(GDTData),
 
-    ISRStubsBase = 16#210000,
     IDTData = vbeam_gdt_idt:idt_data(ISRStubsBase),
     IDTSize = byte_size(IDTData),
 
     PageTablesData = vbeam_paging:page_tables(PageTablesBase, 4),
     PageTablesSize = byte_size(PageTablesData),
+
+    ISRStubs = vbeam_gdt_idt:exception_stubs(),
+    ISRStubsSize = byte_size(ISRStubs),
 
     %% Calculate padding (same logic as boot_data/1)
     ExpectedIDTOffset = IDTBase - GDTBase,
@@ -164,6 +183,15 @@ boot_data_layout(Config) ->
     PageTablesPaddingSize = if
         ExpectedPageTablesOffset > ActualPageTablesOffset ->
             ExpectedPageTablesOffset - ActualPageTablesOffset;
+        true ->
+            0
+    end,
+
+    ActualISRStubsOffset = ISRStubsBase - GDTBase,
+    CurrentOffset = GDTSize + GDTPaddingSize + IDTSize + 10 + PageTablesPaddingSize + PageTablesSize,
+    ISRStubsPaddingSize = if
+        ActualISRStubsOffset > CurrentOffset ->
+            ActualISRStubsOffset - CurrentOffset;
         true ->
             0
     end,
@@ -182,7 +210,8 @@ boot_data_layout(Config) ->
     GDTOffset = 0,
     IDTOffset = GDTOffset + GDTSize + GDTPaddingSize,
     PageTablesOffset = IDTOffset + IDTSize + 10 + PageTablesPaddingSize,  %% 10 = IDTR
-    StringsOffset = PageTablesOffset + PageTablesSize,
+    ISRStubsOffset = PageTablesOffset + PageTablesSize + ISRStubsPaddingSize,
+    StringsOffset = ISRStubsOffset + ISRStubsSize,
 
     %% Build string offset list
     StringOffsets = build_string_offsets(Strings, StringsOffset),
@@ -194,6 +223,8 @@ boot_data_layout(Config) ->
         idt_size => IDTSize,
         page_tables_offset => PageTablesOffset,
         page_tables_size => PageTablesSize,
+        isr_stubs_offset => ISRStubsOffset,
+        isr_stubs_size => ISRStubsSize,
         strings => StringOffsets
     }.
 

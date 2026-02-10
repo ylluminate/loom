@@ -607,7 +607,13 @@ encode_ldrb(Rt, Rn, Offset) when Offset >= 0, Offset < 4096 ->
 %% 64-bit: opc=01. imm19 is signed offset in instructions (offset/4).
 -spec encode_ldr_literal(atom(), integer()) -> binary().
 encode_ldr_literal(Rt, Offset) when Offset rem 4 =:= 0 ->
-    Imm19 = (Offset div 4) band 16#7FFFF,
+    InsnOffset = Offset div 4,
+    %% Validate signed 19-bit range: [-2^18, 2^18-1]
+    case (InsnOffset >= -(1 bsl 18)) andalso (InsnOffset < (1 bsl 18)) of
+        true -> ok;
+        false -> error({arm64_ldr_literal_imm19_overflow, Offset})
+    end,
+    Imm19 = InsnOffset band 16#7FFFF,
     Inst = (2#01 bsl 30)                     %% opc=01 (64-bit)
         bor (2#011000 bsl 24)                %% fixed
         bor (Imm19 bsl 5)
@@ -620,7 +626,14 @@ encode_ldr_literal(Rt, Offset) when Offset rem 4 =:= 0 ->
 %% Offset is signed, scaled by 8: imm7 = offset/8.
 -spec encode_stp_pre(atom(), atom(), atom(), integer()) -> binary().
 encode_stp_pre(Rt, Rt2, Rn, Offset) when Offset rem 8 =:= 0 ->
-    Imm7 = (Offset div 8) band 16#7F,
+    ScaledOffset = Offset div 8,
+    %% Validate signed 7-bit range: [-64, 63]
+    %% In bytes (scaled by 8): [-512, 504]
+    case (ScaledOffset >= -(1 bsl 6)) andalso (ScaledOffset < (1 bsl 6)) of
+        true -> ok;
+        false -> error({arm64_stp_imm7_overflow, Offset})
+    end,
+    Imm7 = ScaledOffset band 16#7F,
     Inst = (2#10 bsl 30)                     %% opc=10 (64-bit)
         bor (2#101 bsl 27)                   %% fixed
         bor (2#00 bsl 25)                    %% fixed
@@ -636,7 +649,14 @@ encode_stp_pre(Rt, Rt2, Rn, Offset) when Offset rem 8 =:= 0 ->
 %% 64-bit: opc=10, L=1 (load). Post-index variant: bits 24:23 = 01.
 -spec encode_ldp_post(atom(), atom(), atom(), integer()) -> binary().
 encode_ldp_post(Rt, Rt2, Rn, Offset) when Offset rem 8 =:= 0 ->
-    Imm7 = (Offset div 8) band 16#7F,
+    ScaledOffset = Offset div 8,
+    %% Validate signed 7-bit range: [-64, 63]
+    %% In bytes (scaled by 8): [-512, 504]
+    case (ScaledOffset >= -(1 bsl 6)) andalso (ScaledOffset < (1 bsl 6)) of
+        true -> ok;
+        false -> error({arm64_ldp_imm7_overflow, Offset})
+    end,
+    Imm7 = ScaledOffset band 16#7F,
     Inst = (2#10 bsl 30)                     %% opc=10 (64-bit)
         bor (2#101 bsl 27)
         bor (2#00 bsl 25)
@@ -653,6 +673,11 @@ encode_ldp_post(Rt, Rt2, Rn, Offset) when Offset rem 8 =:= 0 ->
 %% offset = immhi:immlo (21-bit signed), in bytes.
 -spec encode_adr(atom(), integer()) -> binary().
 encode_adr(Rd, Offset) ->
+    %% Validate signed 21-bit range: [-2^20, 2^20-1]
+    case (Offset >= -(1 bsl 20)) andalso (Offset < (1 bsl 20)) of
+        true -> ok;
+        false -> error({arm64_adr_imm21_overflow, Offset})
+    end,
     Imm21 = Offset band 16#1FFFFF,
     ImmLo = Imm21 band 2#11,
     ImmHi = (Imm21 bsr 2) band 16#7FFFF,
@@ -669,6 +694,11 @@ encode_adr(Rd, Offset) ->
 encode_adrp(Rd, Offset) ->
     %% Offset is in pages (already divided by 4096 by caller,
     %% or we divide here). We take the raw page offset.
+    %% Validate signed 21-bit range: [-2^20, 2^20-1]
+    case (Offset >= -(1 bsl 20)) andalso (Offset < (1 bsl 20)) of
+        true -> ok;
+        false -> error({arm64_adrp_imm21_overflow, Offset})
+    end,
     Imm21 = Offset band 16#1FFFFF,
     ImmLo = Imm21 band 2#11,
     ImmHi = (Imm21 bsr 2) band 16#7FFFF,
@@ -688,7 +718,13 @@ encode_adrp(Rd, Offset) ->
 %% imm26 is signed offset in instructions (offset/4).
 -spec encode_b(integer()) -> binary().
 encode_b(Offset) when Offset rem 4 =:= 0 ->
-    Imm26 = (Offset div 4) band 16#3FFFFFF,
+    InsnOffset = Offset div 4,
+    %% Validate signed 26-bit range: [-2^25, 2^25-1]
+    case (InsnOffset >= -(1 bsl 25)) andalso (InsnOffset < (1 bsl 25)) of
+        true -> ok;
+        false -> error({arm64_b_imm26_overflow, Offset})
+    end,
+    Imm26 = InsnOffset band 16#3FFFFFF,
     Inst = (2#000101 bsl 26)
         bor Imm26,
     emit(Inst).
@@ -697,7 +733,13 @@ encode_b(Offset) when Offset rem 4 =:= 0 ->
 %% Encoding: [100101][imm26:26]
 -spec encode_bl(integer()) -> binary().
 encode_bl(Offset) when Offset rem 4 =:= 0 ->
-    Imm26 = (Offset div 4) band 16#3FFFFFF,
+    InsnOffset = Offset div 4,
+    %% Validate signed 26-bit range: [-2^25, 2^25-1]
+    case (InsnOffset >= -(1 bsl 25)) andalso (InsnOffset < (1 bsl 25)) of
+        true -> ok;
+        false -> error({arm64_bl_imm26_overflow, Offset})
+    end,
+    Imm26 = InsnOffset band 16#3FFFFFF,
     Inst = (2#100101 bsl 26)
         bor Imm26,
     emit(Inst).
@@ -707,7 +749,13 @@ encode_bl(Offset) when Offset rem 4 =:= 0 ->
 %% imm19 is signed offset in instructions (offset/4).
 -spec encode_b_cond(atom(), integer()) -> binary().
 encode_b_cond(Cond, Offset) when Offset rem 4 =:= 0 ->
-    Imm19 = (Offset div 4) band 16#7FFFF,
+    InsnOffset = Offset div 4,
+    %% Validate signed 19-bit range: [-2^18, 2^18-1]
+    case (InsnOffset >= -(1 bsl 18)) andalso (InsnOffset < (1 bsl 18)) of
+        true -> ok;
+        false -> error({arm64_b_cond_imm19_overflow, Offset})
+    end,
+    Imm19 = InsnOffset band 16#7FFFF,
     CondBits = cond_code(Cond),
     Inst = (2#01010100 bsl 24)
         bor (Imm19 bsl 5)

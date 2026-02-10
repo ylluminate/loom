@@ -37,16 +37,31 @@ compute_frame_size(SpillSlots, UsedCallee) ->
     end.
 
 %% Prologue: stp x29, x30, [sp, #-FrameSize]!; mov x29, sp; save callee-saved
-emit_prologue(FrameSize, UsedCallee) ->
+%% For large frames (>504 bytes), split into stp + sub
+emit_prologue(FrameSize, UsedCallee) when FrameSize =< 504 ->
     [?ENC:encode_stp_pre(x29, x30, sp, -FrameSize),
      ?ENC:encode_mov_rr(x29, sp)] ++
+    save_callee_saved(UsedCallee, 16);
+emit_prologue(FrameSize, UsedCallee) ->
+    %% Large frame: stp x29,x30,[sp,#-16]! then sub sp,sp,#(FrameSize-16)
+    [?ENC:encode_stp_pre(x29, x30, sp, -16),
+     ?ENC:encode_mov_rr(x29, sp),
+     ?ENC:encode_sub_imm(sp, sp, FrameSize - 16)] ++
     save_callee_saved(UsedCallee, 16).
 
 %% Epilogue: restore callee-saved; mov sp, x29; ldp x29, x30, [sp], #FrameSize; ret
-emit_epilogue(FrameSize, UsedCallee) ->
+%% For large frames (>504 bytes), split into add + ldp
+emit_epilogue(FrameSize, UsedCallee) when FrameSize =< 504 ->
     restore_callee_saved(UsedCallee, 16) ++
     [?ENC:encode_mov_rr(sp, x29),
      ?ENC:encode_ldp_post(x29, x30, sp, FrameSize),
+     ?ENC:encode_ret()];
+emit_epilogue(FrameSize, UsedCallee) ->
+    %% Large frame: add sp,sp,#(FrameSize-16) then ldp x29,x30,[sp],#16
+    restore_callee_saved(UsedCallee, 16) ++
+    [?ENC:encode_mov_rr(sp, x29),
+     ?ENC:encode_add_imm(sp, sp, FrameSize - 16),
+     ?ENC:encode_ldp_post(x29, x30, sp, 16),
      ?ENC:encode_ret()].
 
 %% Save callee-saved registers to stack frame.

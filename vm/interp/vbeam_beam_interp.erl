@@ -249,14 +249,14 @@ decode_instruction(Code, PC) ->
 %% Decode opcodes (simplified - real BEAM uses variable-length encoding)
 decode_opcode(1, Rest, PC) ->
     %% label
-    {Label, NextPC} = decode_int(Rest, PC),
+    {Label, _Rest2, NextPC} = decode_int(Rest, PC),
     {label, Label, NextPC};
 
 decode_opcode(2, Rest, PC) ->
     %% func_info
-    {Module, PC2} = decode_int(Rest, PC),
-    {Function, PC3} = decode_int(Rest, PC2),
-    {Arity, NextPC} = decode_int(Rest, PC3),
+    {Module, Rest2, PC2} = decode_int(Rest, PC),
+    {Function, Rest3, PC3} = decode_int(Rest2, PC2),
+    {Arity, _Rest4, NextPC} = decode_int(Rest3, PC3),
     {func_info, Module, Function, Arity, NextPC};
 
 decode_opcode(3, _Rest, PC) ->
@@ -265,8 +265,8 @@ decode_opcode(3, _Rest, PC) ->
 
 decode_opcode(4, Rest, PC) ->
     %% call
-    {Arity, PC2} = decode_int(Rest, PC),
-    {Label, NextPC} = decode_int(Rest, PC2),
+    {Arity, Rest2, PC2} = decode_int(Rest, PC),
+    {Label, _Rest3, NextPC} = decode_int(Rest2, PC2),
     {call, Arity, Label, NextPC};
 
 decode_opcode(19, _Rest, PC) ->
@@ -275,31 +275,31 @@ decode_opcode(19, _Rest, PC) ->
 
 decode_opcode(64, Rest, PC) ->
     %% move
-    {Src, PC2} = decode_arg(Rest, PC),
-    {Dst, NextPC} = decode_arg(Rest, PC2),
+    {Src, Rest2, PC2} = decode_arg(Rest, PC),
+    {Dst, _Rest3, NextPC} = decode_arg(Rest2, PC2),
     {move, Src, Dst, NextPC};
 
 decode_opcode(10, Rest, PC) ->
     %% allocate
-    {StackNeed, PC2} = decode_int(Rest, PC),
-    {Live, NextPC} = decode_int(Rest, PC2),
+    {StackNeed, Rest2, PC2} = decode_int(Rest, PC),
+    {Live, _Rest3, NextPC} = decode_int(Rest2, PC2),
     {allocate, StackNeed, Live, NextPC};
 
 decode_opcode(18, Rest, PC) ->
     %% deallocate
-    {N, NextPC} = decode_int(Rest, PC),
+    {N, _Rest2, NextPC} = decode_int(Rest, PC),
     {deallocate, N, NextPC};
 
 decode_opcode(59, Rest, PC) ->
     %% test_heap
-    {Need, PC2} = decode_int(Rest, PC),
-    {Live, NextPC} = decode_int(Rest, PC2),
+    {Need, Rest2, PC2} = decode_int(Rest, PC),
+    {Live, _Rest3, NextPC} = decode_int(Rest2, PC2),
     {test_heap, Need, Live, NextPC};
 
 decode_opcode(78, Rest, PC) ->
     %% call_ext
-    {Arity, PC2} = decode_int(Rest, PC),
-    {Import, NextPC} = decode_int(Rest, PC2),
+    {Arity, Rest2, PC2} = decode_int(Rest, PC),
+    {Import, _Rest3, NextPC} = decode_int(Rest2, PC2),
     {call_ext, Arity, Import, NextPC};
 
 decode_opcode(Op, _Rest, PC) ->
@@ -308,13 +308,15 @@ decode_opcode(Op, _Rest, PC) ->
     {unknown_opcode, PC + 1}.
 
 %% Decode integer (simplified - just read one byte)
-decode_int(<<Value:8, _/binary>>, PC) ->
-    {Value, PC + 1};
-decode_int(_, PC) ->
-    {0, PC}.
+%% Returns {Value, Rest2} where Rest2 is remaining bytes
+decode_int(<<Value:8, Rest2/binary>>, PC) ->
+    {Value, Rest2, PC + 1};
+decode_int(Rest, PC) ->
+    {0, Rest, PC}.
 
 %% Decode argument (register, literal, etc.)
-decode_arg(<<Tag:4, Value:4, _/binary>>, PC) ->
+%% Returns {Arg, Rest2} where Rest2 is remaining bytes
+decode_arg(<<Tag:4, Value:4, Rest2/binary>>, PC) ->
     Arg = case Tag of
         0 -> {x, Value};  % X register
         1 -> {y, Value};  % Y register
@@ -323,9 +325,9 @@ decode_arg(<<Tag:4, Value:4, _/binary>>, PC) ->
         4 -> {literal, Value};  % Literal
         _ -> {unknown, Value}
     end,
-    {Arg, PC + 1};
-decode_arg(_, PC) ->
-    {{x, 0}, PC}.
+    {Arg, Rest2, PC + 1};
+decode_arg(Rest, PC) ->
+    {{x, 0}, Rest, PC}.
 
 %% Get value from source
 get_value({x, N}, #proc{x = X}) ->

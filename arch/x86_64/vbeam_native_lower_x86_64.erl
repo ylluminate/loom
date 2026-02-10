@@ -18,9 +18,12 @@
 -spec lower_function(map(), term()) -> {[term()], term()}.
 lower_function(#{name := Name, body := Body, arity := _Arity,
                  spill_slots := SpillSlots} = _Fn, LinkState) ->
+    %% Scan body to find which callee-saved registers are actually used
+    UsedCalleeSaved = find_used_callee_saved(Body),
     FrameSize = compute_frame_size(SpillSlots),
-    Prologue = emit_prologue(FrameSize),
-    BodyParts = lower_body(Body, Name),
+    Prologue = emit_prologue(FrameSize, UsedCalleeSaved),
+    %% Thread UsedCalleeSaved through body lowering for ret instruction
+    BodyParts = lower_body(Body, Name, UsedCalleeSaved),
     %% Don't emit epilogue here — ret instructions in body handle it
     Parts = Prologue ++ BodyParts,
     {Parts, LinkState}.
@@ -36,16 +39,28 @@ compute_frame_size(SpillSlots) ->
         _ -> RawSize + (16 - (RawSize rem 16))
     end.
 
-%% Emit function prologue: push rbp; mov rbp, rsp; sub rsp, FrameSize
-emit_prologue(0) ->
+%% Emit function prologue: push rbp; mov rbp, rsp; sub rsp, FrameSize; save callee-saved
+emit_prologue(0, []) ->
     [?ENC:encode_push(rbp),
      ?ENC:encode_mov_rr(rbp, rsp)];
-emit_prologue(FrameSize) ->
+emit_prologue(FrameSize, []) ->
     [?ENC:encode_push(rbp),
      ?ENC:encode_mov_rr(rbp, rsp),
-     ?ENC:encode_sub_imm(rsp, FrameSize)].
+     ?ENC:encode_sub_imm(rsp, FrameSize)];
+emit_prologue(0, UsedCalleeSaved) ->
+    [?ENC:encode_push(rbp),
+     ?ENC:encode_mov_rr(rbp, rsp)] ++
+    [?ENC:encode_push(Reg) || Reg <- UsedCalleeSaved];
+emit_prologue(FrameSize, UsedCalleeSaved) ->
+    [?ENC:encode_push(rbp),
+     ?ENC:encode_mov_rr(rbp, rsp),
+     ?ENC:encode_sub_imm(rsp, FrameSize)] ++
+    [?ENC:encode_push(Reg) || Reg <- UsedCalleeSaved].
 
-%% Emit function epilogue: mov rsp, rbp; pop rbp; ret
+%% Emit function epilogue: restore callee-saved; mov rsp, rbp; pop rbp; ret
+%% Note: This is called from lower_instruction(ret, ...) which doesn't have access to UsedCalleeSaved,
+%% so we can't restore here. Instead, we need to pass UsedCalleeSaved through the lowering context.
+%% For now, keep the old signature and handle restoration in the ret instruction.
 emit_epilogue(0) ->
     [?ENC:encode_pop(rbp),
      ?ENC:encode_ret()];
@@ -55,31 +70,31 @@ emit_epilogue(_FrameSize) ->
      ?ENC:encode_ret()].
 
 %% Lower the body instructions.
-lower_body([], _FnName) -> [];
-lower_body([Inst | Rest], FnName) ->
-    Parts = lower_instruction(Inst, FnName),
-    Parts ++ lower_body(Rest, FnName).
+lower_body([], _FnName, _UsedCalleeSaved) -> [];
+lower_body([Inst | Rest], FnName, UsedCalleeSaved) ->
+    Parts = lower_instruction(Inst, FnName, UsedCalleeSaved),
+    Parts ++ lower_body(Rest, FnName, UsedCalleeSaved).
 
 %% Lower a single IR instruction to code parts.
 
 %% Labels
-lower_instruction({label, Name}, _FnName) ->
+lower_instruction({label, Name}, _FnName, _UsedCalleeSaved) ->
     [{label, Name}];
 
 %% Comments (no code emitted)
-lower_instruction({comment, _}, _FnName) ->
+lower_instruction({comment, _}, _FnName, _UsedCalleeSaved) ->
     [];
 
 %% NOP
-lower_instruction(nop, _FnName) ->
+lower_instruction(nop, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_nop()];
 
 %% MOV register to register
-lower_instruction({mov, {preg, Dst}, {preg, Src}}, _FnName) ->
+lower_instruction({mov, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_rr(Dst, Src)];
 
 %% MOV immediate to register
-lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName) when is_integer(Imm) ->
+lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _UsedCalleeSaved) when is_integer(Imm) ->
     if Imm >= -2147483648, Imm =< 2147483647 ->
         [?ENC:encode_mov_imm32(Dst, Imm)];
        true ->
@@ -87,26 +102,26 @@ lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName) when is_integer(Imm) ->
     end;
 
 %% MOV with stack operands (spilled registers)
-lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName) ->
+lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     %% Store to stack: MOV [rbp - offset], Src
     Offset = -(Slot + 1) * 8,
     [?ENC:encode_mov_mem_store(rbp, Offset, Src)];
-lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName) ->
+lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _UsedCalleeSaved) ->
     %% Load from stack: MOV Dst, [rbp - offset]
     Offset = -(Slot + 1) * 8,
     [?ENC:encode_mov_mem_load(Dst, rbp, Offset)];
 
 %% LOAD from memory
-lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName) ->
+lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Base, Off)];
-lower_instruction({load, {preg, Dst}, {stack, Slot}, Off}, _FnName) ->
+lower_instruction({load, {preg, Dst}, {stack, Slot}, Off}, _FnName, _UsedCalleeSaved) ->
     %% Load base from stack first, then load from it
     BaseOff = -(Slot + 1) * 8,
     [?ENC:encode_mov_mem_load(Dst, rbp, BaseOff),
      ?ENC:encode_mov_mem_load(Dst, Dst, Off)];
 
 %% LOAD_BYTE from memory (zero-extends byte to 64-bit)
-lower_instruction({load_byte, {preg, Dst}, {preg, Base}, Off}, _FnName) ->
+lower_instruction({load_byte, {preg, Dst}, {preg, Base}, Off}, _FnName, _UsedCalleeSaved) ->
     %% MOVZX r64, byte [Base + Off]: REX.W 0F B6 /r
     Rex = ?ENC:rex(1, ?ENC:reg_hi(Dst), 0, ?ENC:reg_hi(Base)),
     DstLo = ?ENC:reg_lo(Dst),
@@ -136,15 +151,34 @@ lower_instruction({load_byte, {preg, Dst}, {preg, Base}, Off}, _FnName) ->
     end;
 
 %% STORE to memory
-lower_instruction({store, {preg, Base}, Off, {preg, Src}}, _FnName) ->
+lower_instruction({store, {preg, Base}, Off, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_store(Base, Off, Src)];
 
 %% STORE_BYTE to memory
-lower_instruction({store_byte, {preg, Base}, Off, {preg, Src}}, _FnName) ->
+lower_instruction({store_byte, {preg, Base}, Off, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     Rex = 16#40 bor (?ENC:reg_hi(Src) bsl 2) bor ?ENC:reg_hi(Base),
     SrcLo = ?ENC:reg_lo(Src),
     BaseLo = ?ENC:reg_lo(Base),
+    %% rsp and r12 both encode as rm=4 and require SIB byte
     case {Base, Off} of
+        {rsp, 0} ->
+            M = ?ENC:modrm(0, SrcLo, 4),
+            [<<Rex:8, 16#88:8, M:8, 16#24:8>>];
+        {rsp, Off} when Off >= -128, Off =< 127 ->
+            M = ?ENC:modrm(1, SrcLo, 4),
+            [<<Rex:8, 16#88:8, M:8, 16#24:8, Off:8/signed>>];
+        {rsp, _} ->
+            M = ?ENC:modrm(2, SrcLo, 4),
+            [<<Rex:8, 16#88:8, M:8, 16#24:8, Off:32/little-signed>>];
+        {r12, 0} ->
+            M = ?ENC:modrm(0, SrcLo, 4),
+            [<<Rex:8, 16#88:8, M:8, 16#24:8>>];
+        {r12, Off} when Off >= -128, Off =< 127 ->
+            M = ?ENC:modrm(1, SrcLo, 4),
+            [<<Rex:8, 16#88:8, M:8, 16#24:8, Off:8/signed>>];
+        {r12, _} ->
+            M = ?ENC:modrm(2, SrcLo, 4),
+            [<<Rex:8, 16#88:8, M:8, 16#24:8, Off:32/little-signed>>];
         {_, 0} when Base =/= rbp, Base =/= r13 ->
             M = ?ENC:modrm(0, SrcLo, BaseLo),
             [<<Rex:8, 16#88:8, M:8>>];
@@ -157,7 +191,7 @@ lower_instruction({store_byte, {preg, Base}, Off, {preg, Src}}, _FnName) ->
     end;
 
 %% ADD
-lower_instruction({add, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({add, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     if Dst =:= A ->
         [?ENC:encode_add_rr(Dst, B)];
        Dst =:= B ->
@@ -166,25 +200,25 @@ lower_instruction({add, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
         [?ENC:encode_mov_rr(Dst, A),
          ?ENC:encode_add_rr(Dst, B)]
     end;
-lower_instruction({add, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName) ->
+lower_instruction({add, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_add_imm(Dst, Imm)];
 
 %% SUB
-lower_instruction({sub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({sub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_sub_rr(Dst, B)];
-lower_instruction({sub, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName) ->
+lower_instruction({sub, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_sub_imm(Dst, Imm)];
 
 %% MUL (IMUL r64, r64)
-lower_instruction({mul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({mul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_imul_rr(Dst, B)];
 
 %% SDIV (uses rdx:rax / src -> rax=quot, rdx=rem)
-lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     %% Move dividend to rax, sign-extend to rdx:rax, divide, result in rax
     MovA = if A =/= rax -> [?ENC:encode_mov_rr(rax, A)]; true -> [] end,
     DivParts = MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(B)],
@@ -193,7 +227,7 @@ lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
     MovDst;
 
 %% SREM (remainder is in rdx after idiv)
-lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     MovA = if A =/= rax -> [?ENC:encode_mov_rr(rax, A)]; true -> [] end,
     DivParts = MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(B)],
     MovDst = if Dst =/= rdx -> DivParts ++ [?ENC:encode_mov_rr(Dst, rdx)];
@@ -201,99 +235,101 @@ lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
     MovDst;
 
 %% AND
-lower_instruction({and_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({and_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_and_rr(Dst, B)];
 
 %% OR
-lower_instruction({or_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({or_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_or_rr(Dst, B)];
 
 %% XOR
-lower_instruction({xor_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({xor_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_xor_rr(Dst, B)];
 
 %% SHL (shift left — shift amount must be in CL register)
-lower_instruction({shl, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({shl, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
     Parts0 ++ MovCL ++ [?ENC:encode_shl_cl(Dst)];
 
 %% SHR (logical shift right)
-lower_instruction({shr, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({shr, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
     Parts0 ++ MovCL ++ [?ENC:encode_shr_cl(Dst)];
 
 %% SAR (arithmetic shift right)
-lower_instruction({sar, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({sar, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
     Parts0 ++ MovCL ++ [?ENC:encode_sar_cl(Dst)];
 
 %% NEG
-lower_instruction({neg, {preg, Dst}, {preg, Src}}, _FnName) ->
+lower_instruction({neg, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= Src -> [?ENC:encode_mov_rr(Dst, Src)]; true -> [] end,
     Parts0 ++ [?ENC:encode_neg(Dst)];
 
 %% NOT
-lower_instruction({not_, {preg, Dst}, {preg, Src}}, _FnName) ->
+lower_instruction({not_, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= Src -> [?ENC:encode_mov_rr(Dst, Src)]; true -> [] end,
     Parts0 ++ [?ENC:encode_not(Dst)];
 
 %% CMP
-lower_instruction({cmp, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({cmp, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_cmp_rr(A, B)];
-lower_instruction({cmp, {preg, A}, {imm, Imm}}, _FnName) ->
+lower_instruction({cmp, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_cmp_imm(A, Imm)];
 
 %% JMP (unconditional)
-lower_instruction({jmp, Label}, _FnName) ->
+lower_instruction({jmp, Label}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_jmp_rel32(0),  %% placeholder offset
      {reloc, rel32, Label, -4}]; %% reloc to patch
 
 %% JCC (conditional)
-lower_instruction({jcc, Cond, Label}, _FnName) ->
+lower_instruction({jcc, Cond, Label}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_jcc_rel32(Cond, 0),  %% placeholder
      {reloc, rel32, Label, -4}];
 
 %% CALL by symbol
-lower_instruction({call, {sym, Name}}, _FnName) ->
+lower_instruction({call, {sym, Name}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_call_rel32(0),  %% placeholder
      {reloc, rel32, Name, -4}];
 
 %% CALL indirect through register
-lower_instruction({call_indirect, {preg, Reg}}, _FnName) ->
+lower_instruction({call_indirect, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_call_reg(Reg)];
 
 %% RET
-lower_instruction(ret, _FnName) ->
-    %% Emit epilogue before ret
-    %% We use a simple epilogue: mov rsp,rbp; pop rbp; ret
-    emit_epilogue(1);  %% nonzero triggers full epilogue
+lower_instruction(ret, _FnName, UsedCalleeSaved) ->
+    %% Restore callee-saved registers in reverse order, then emit epilogue
+    %% Callee-saved are pushed in order [rbx, r12, r13, r14, r15] at prologue
+    %% so we must pop in reverse order [r15, r14, r13, r12, rbx]
+    RestoreCode = [?ENC:encode_pop(Reg) || Reg <- lists:reverse(UsedCalleeSaved)],
+    RestoreCode ++ emit_epilogue(1);
 
 %% PUSH
-lower_instruction({push, {preg, Reg}}, _FnName) ->
+lower_instruction({push, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_push(Reg)];
-lower_instruction({push, {imm, _Imm}}, _FnName) ->
+lower_instruction({push, {imm, _Imm}}, _FnName, _UsedCalleeSaved) ->
     %% x86_64 PUSH imm32: 68 + imm32
     %% For simplicity, mov to rax then push
     %% (This is rare in generated code)
     [];
 
 %% POP
-lower_instruction({pop, {preg, Reg}}, _FnName) ->
+lower_instruction({pop, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_pop(Reg)];
 
 %% LEA (load effective address, RIP-relative for data references)
-lower_instruction({lea, {preg, Dst}, {data_ref, Name}}, _FnName) ->
+lower_instruction({lea, {preg, Dst}, {data_ref, Name}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_lea_rip_rel(Dst, 0),  %% placeholder
      {reloc, rel32, Name, -4}];
 
 %% SYSCALL
-lower_instruction(syscall, _FnName) ->
+lower_instruction(syscall, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_syscall()];
 
 %%====================================================================
@@ -302,7 +338,7 @@ lower_instruction(syscall, _FnName) ->
 
 %% STRING_LIT: Load string literal address and build fat pointer.
 %% Allocates 16 bytes on heap: {ptr, len}
-lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}, Len}, _FnName) ->
+lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}, Len}, _FnName, _UsedCalleeSaved) ->
     AllocCode = vbeam_native_alloc:emit_alloc(x86_64, Dst, 16),
     %% LEA rax, [rip + Name]  (load data address)
     LeaCode = [?ENC:encode_lea_rip_rel(rax, 0),
@@ -314,16 +350,16 @@ lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}, Len}, _FnName) ->
     lists:flatten([AllocCode, LeaCode, StoreCode]);
 
 %% STRING_LIT (2-arg form): just LEA
-lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}}, _FnName) ->
+lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_lea_rip_rel(Dst, 0),
      {reloc, rel32, Name, -4}];
 
 %% STRING_LEN: Load length from fat pointer.
-lower_instruction({string_len, {preg, Dst}, {preg, Src}}, _FnName) ->
+lower_instruction({string_len, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Src, 8)];
 
 %% STRING_CMP: Compare two strings byte-by-byte.
-lower_instruction({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__scmp_loop_", Uid/binary>>,
     EqLbl = <<"__scmp_eq_", Uid/binary>>,
@@ -352,18 +388,14 @@ lower_instruction({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
         ?ENC:encode_jcc_rel32(ge, 0),
         {reloc, rel32, EqLbl, -4},
         %% Compare bytes
-        %% Load A[r10] and B[r10] using byte-level access
-        %% We need MOVZX for byte load; use MOV [base+index] approach
-        %% For simplicity, use ADD to compute address then load
+        %% Load A[r10] and B[r10] using byte-level MOVZX
+        %% Use ADD to compute address, then MOVZX byte load
         ?ENC:encode_mov_rr(rax, rsi),
         ?ENC:encode_add_rr(rax, r10),
-        ?ENC:encode_mov_mem_load(rax, rax, 0),   %% loads 8 bytes, we mask
-        %% AND rax, 0xFF
-        encode_and_imm_x86(rax, 16#FF),
+        encode_movzx_byte_mem(rax, rax),  %% MOVZX rax, byte [rax]
         ?ENC:encode_mov_rr(rcx, rdi),
         ?ENC:encode_add_rr(rcx, r10),
-        ?ENC:encode_mov_mem_load(rcx, rcx, 0),
-        encode_and_imm_x86(rcx, 16#FF),
+        encode_movzx_byte_mem(rcx, rcx),  %% MOVZX rcx, byte [rcx]
         ?ENC:encode_cmp_rr(rax, rcx),
         ?ENC:encode_jcc_rel32(lt, 0),
         {reloc, rel32, LtLbl, -4},
@@ -395,7 +427,7 @@ lower_instruction({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
     ]);
 
 %% STRING_CONCAT: Concatenate two strings.
-lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     CopyALbl = <<"__scat_cpA_", Uid/binary>>,
     CopyADone = <<"__scat_cpAd_", Uid/binary>>,
@@ -468,7 +500,7 @@ lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) -
 %% PRINT_STR: Print string via write syscall.
 %% Saves all caller-visible registers that might hold user values.
 %% SYSCALL clobbers rcx and r11; we save those too.
-lower_instruction({print_str, {preg, Src}}, _FnName) ->
+lower_instruction({print_str, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     lists:flatten([
         %% Save registers (SYSCALL clobbers rcx, r11 in addition to args)
         ?ENC:encode_push(rdi),
@@ -502,7 +534,7 @@ lower_instruction({print_str, {preg, Src}}, _FnName) ->
 %%====================================================================
 
 %% ARRAY_NEW
-lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _FnName) ->
+lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _FnName, _UsedCalleeSaved) ->
     BufSize = ElemSize * InitCap,
     lists:flatten([
         vbeam_native_alloc:emit_alloc(x86_64, rax, BufSize), %% elem buffer in rax
@@ -518,7 +550,7 @@ lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _Fn
 
 %% ARRAY_GET (register index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemSize}},
-                  _FnName) ->
+                  _FnName, _UsedCalleeSaved) ->
     lists:flatten([
         ?ENC:encode_mov_mem_load(rax, Arr, 0),               %% rax = ptr
         ?ENC:encode_mov_imm64(rcx, ElemSize),
@@ -530,7 +562,7 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
 
 %% ARRAY_GET (immediate index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSize}},
-                  _FnName) ->
+                  _FnName, _UsedCalleeSaved) ->
     Offset = Idx * ElemSize,
     lists:flatten([
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
@@ -539,7 +571,7 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 
 %% ARRAY_SET (immediate index)
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName) ->
+                  _FnName, _UsedCalleeSaved) ->
     Offset = Idx * ElemSize,
     lists:flatten([
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
@@ -548,7 +580,7 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 
 %% ARRAY_SET (register index)
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName) ->
+                  _FnName, _UsedCalleeSaved) ->
     lists:flatten([
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
         ?ENC:encode_mov_imm64(rcx, ElemSize),
@@ -559,12 +591,12 @@ lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemS
     ]);
 
 %% ARRAY_LEN
-lower_instruction({array_len, {preg, Dst}, {preg, Arr}}, _FnName) ->
+lower_instruction({array_len, {preg, Dst}, {preg, Arr}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Arr, 8)];
 
 %% ARRAY_APPEND
 lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, ElemSize}},
-                  _FnName) ->
+                  _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     NeedGrowLbl = <<"__aapp_grow_", Uid/binary>>,
     StoreLbl = <<"__aapp_store_", Uid/binary>>,
@@ -651,20 +683,20 @@ lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, El
 %% Phase 6c: Struct instructions
 %%====================================================================
 
-lower_instruction({struct_new, {preg, Dst}, {imm, Size}}, _FnName) ->
+lower_instruction({struct_new, {preg, Dst}, {imm, Size}}, _FnName, _UsedCalleeSaved) ->
     vbeam_native_alloc:emit_alloc(x86_64, Dst, Size);
 
-lower_instruction({field_get, {preg, Dst}, {preg, Struct}, {imm, Offset}}, _FnName) ->
+lower_instruction({field_get, {preg, Dst}, {preg, Struct}, {imm, Offset}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Struct, Offset)];
 
-lower_instruction({field_set, {preg, Struct}, {imm, Offset}, {preg, Val}}, _FnName) ->
+lower_instruction({field_set, {preg, Struct}, {imm, Offset}, {preg, Val}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_store(Struct, Offset, Val)];
 
 %%====================================================================
 %% Phase 6d: Map instructions
 %%====================================================================
 
-lower_instruction({map_new, {preg, Dst}}, _FnName) ->
+lower_instruction({map_new, {preg, Dst}}, _FnName, _UsedCalleeSaved) ->
     InitCap = 8,
     BufSize = InitCap * 16,
     lists:flatten([
@@ -679,7 +711,7 @@ lower_instruction({map_new, {preg, Dst}}, _FnName) ->
         ?ENC:encode_mov_mem_store(Dst, 16, rcx)
     ]);
 
-lower_instruction({map_get, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName) ->
+lower_instruction({map_get, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__mg_loop_", Uid/binary>>,
     FoundLbl = <<"__mg_found_", Uid/binary>>,
@@ -722,7 +754,7 @@ lower_instruction({map_get, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName) ->
     ]);
 
 lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
-                  _FnName) ->
+                  _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__mp_loop_", Uid/binary>>,
     FoundLbl = <<"__mp_found_", Uid/binary>>,
@@ -788,7 +820,7 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         ?ENC:encode_mov_rr(Dst, Map)
     ]);
 
-lower_instruction({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName) ->
+lower_instruction({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__md_loop_", Uid/binary>>,
     FoundLbl = <<"__md_found_", Uid/binary>>,
@@ -853,7 +885,7 @@ lower_instruction({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName) 
 %% Phase 6e: Float instructions (placeholder)
 %%====================================================================
 
-lower_instruction({int_to_float, {preg, Dst}, {preg, Src}}, _FnName) ->
+lower_instruction({int_to_float, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     %% CVTSI2SD xmm0, Src; MOVQ Dst, xmm0
     %% For now, emit placeholder NOPs (TODO: proper FPU encoding)
     _SrcCode = ?ENC:reg_code(Src),
@@ -868,7 +900,7 @@ lower_instruction({int_to_float, {preg, Dst}, {preg, Src}}, _FnName) ->
     Movq = <<16#66:8, Rex2:8, 16#0F:8, 16#7E:8, ModRM2:8>>,
     [Cvt, Movq];
 
-lower_instruction({float_to_int, {preg, Dst}, {preg, Src}}, _FnName) ->
+lower_instruction({float_to_int, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     %% MOVQ xmm0, Src; CVTTSD2SI Dst, xmm0
     Rex1 = ?ENC:rex(1, 0, 0, ?ENC:reg_hi(Src)),
     ModRM1 = ?ENC:modrm(2#11, 0, ?ENC:reg_lo(Src)),
@@ -883,7 +915,7 @@ lower_instruction({float_to_int, {preg, Dst}, {preg, Src}}, _FnName) ->
 %%====================================================================
 
 lower_instruction({method_call, {preg, Dst}, ReceiverType, MethodName, Args},
-                  _FnName) when is_binary(ReceiverType),
+                  _FnName, _UsedCalleeSaved) when is_binary(ReceiverType),
                                 is_binary(MethodName),
                                 is_list(Args) ->
     MangledName = <<ReceiverType/binary, "__", MethodName/binary>>,
@@ -903,7 +935,7 @@ lower_instruction({method_call, {preg, Dst}, ReceiverType, MethodName, Args},
 
 %% INT_TO_STR: Convert integer to string (fat pointer).
 %% Uses a stack buffer for digit extraction, then copies to heap.
-lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName) ->
+lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     NonZeroLbl = <<"__its_nz_", Uid/binary>>,
     PositiveLbl = <<"__its_pos_", Uid/binary>>,
@@ -1020,7 +1052,7 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName) ->
     ]);
 
 %% FLOAT_TO_STR: Simplified — convert float to int, then int to string.
-lower_instruction({float_to_str, {preg, Dst}, {preg, Src}}, FnName) ->
+lower_instruction({float_to_str, {preg, Dst}, {preg, Src}}, FnName, _UsedCalleeSaved) ->
     %% MOVQ xmm0, Src; CVTTSD2SI r10, xmm0; then int_to_str(Dst, r10)
     Rex1 = ?ENC:rex(1, 0, 0, ?ENC:reg_hi(Src)),
     ModRM1 = ?ENC:modrm(2#11, 0, ?ENC:reg_lo(Src)),
@@ -1028,30 +1060,30 @@ lower_instruction({float_to_str, {preg, Dst}, {preg, Src}}, FnName) ->
     Rex2 = ?ENC:rex(1, ?ENC:reg_hi(r10), 0, 0),
     ModRM2 = ?ENC:modrm(2#11, ?ENC:reg_lo(r10), 0),
     Cvt = <<16#F2:8, Rex2:8, 16#0F:8, 16#2C:8, ModRM2:8>>,
-    [Movq, Cvt] ++ lower_instruction({int_to_str, {preg, Dst}, {preg, r10}}, FnName);
+    [Movq, Cvt] ++ lower_instruction({int_to_str, {preg, Dst}, {preg, r10}}, FnName, _UsedCalleeSaved);
 
 %%====================================================================
 %% Float arithmetic x86_64
 %%====================================================================
 
 %% FADD: MOVQ xmm0, A; MOVQ xmm1, B; ADDSD xmm0, xmm1; MOVQ Dst, xmm0
-lower_instruction({fadd, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({fadd, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#58:8>>);
 
 %% FSUB
-lower_instruction({fsub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({fsub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#5C:8>>);
 
 %% FMUL
-lower_instruction({fmul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({fmul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#59:8>>);
 
 %% FDIV
-lower_instruction({fdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) ->
+lower_instruction({fdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#5E:8>>);
 
 %% RAW bytes (inline asm)
-lower_instruction({raw, Bytes}, _FnName) when is_binary(Bytes) ->
+lower_instruction({raw, Bytes}, _FnName, _UsedCalleeSaved) when is_binary(Bytes) ->
     [Bytes];
 
 %% PRINT_INT — expand to full integer-to-stdout routine for x86_64.
@@ -1066,7 +1098,7 @@ lower_instruction({raw, Bytes}, _FnName) when is_binary(Bytes) ->
 %%   rbx = value being printed (preserved callee-saved, save/restore)
 %%   r12 = buffer position index (preserved callee-saved, save/restore)
 %%   r13 = temp (preserved callee-saved, save/restore)
-lower_instruction({print_int, {preg, Reg}}, _FnName) ->
+lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     NonZeroLbl = <<"__pi_nz_", Uid/binary>>,
     PositiveLbl = <<"__pi_pos_", Uid/binary>>,
@@ -1183,7 +1215,7 @@ lower_instruction({print_int, {preg, Reg}}, _FnName) ->
     ]);
 
 %% Catch-all for unhandled instructions
-lower_instruction(Inst, _FnName) ->
+lower_instruction(Inst, _FnName, _UsedCalleeSaved) ->
     io:format(standard_error, "ERROR: unhandled x86_64 instruction: ~p~n", [Inst]),
     %% Emit ud2 (illegal instruction trap) so it crashes predictably
     [<<16#0F:8, 16#0B:8>>].
@@ -1294,3 +1326,68 @@ emit_float_binop_x86(Dst, A, B, OpPrefix) ->
     ModRMDst = ?ENC:modrm(2#11, 0, ?ENC:reg_lo(Dst)),
     MovqDst = <<16#66:8, RexDst:8, 16#0F:8, 16#7E:8, ModRMDst:8>>,
     [MovqA, MovqB, FloatOp, MovqDst].
+
+%% @doc Scan function body to find which callee-saved registers are used.
+%%      Callee-saved registers in System V AMD64 ABI: rbx, r12, r13, r14, r15
+%%      Returns list of used callee-saved registers (may be empty).
+find_used_callee_saved(Body) ->
+    CalleeSaved = [rbx, r12, r13, r14, r15],
+    UsedRegs = lists:foldl(fun(Inst, Acc) ->
+        extract_regs(Inst) ++ Acc
+    end, [], Body),
+    %% Return intersection of callee-saved and used registers
+    lists:filter(fun(Reg) -> lists:member(Reg, UsedRegs) end, CalleeSaved).
+
+%% Extract all register references from an instruction
+extract_regs({mov, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({mov_imm, {preg, Dst}, _}) -> [Dst];
+extract_regs({load, {preg, Dst}, {preg, Base}, _}) -> [Dst, Base];
+extract_regs({load_byte, {preg, Dst}, {preg, Base}, _}) -> [Dst, Base];
+extract_regs({store, {preg, Base}, _, {preg, Src}}) -> [Base, Src];
+extract_regs({store_byte, {preg, Base}, _, {preg, Src}}) -> [Base, Src];
+extract_regs({add, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({sub, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({mul, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({sdiv, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({srem, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({and_, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({or_, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({xor_, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({shl, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({shr, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({sar, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({neg, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({not_, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({cmp, {preg, A}, {preg, B}}) -> [A, B];
+extract_regs({push, {preg, Reg}}) -> [Reg];
+extract_regs({pop, {preg, Reg}}) -> [Reg];
+extract_regs({call_indirect, {preg, Reg}}) -> [Reg];
+extract_regs({print_int, {preg, Reg}}) -> [Reg];
+extract_regs({print_str, {preg, Reg}}) -> [Reg];
+extract_regs({string_lit, {preg, Dst}, _, _}) -> [Dst];
+extract_regs({string_len, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({string_concat, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({array_new, {preg, Dst}, _, _}) -> [Dst];
+extract_regs({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, _}) -> [Dst, Arr, Idx];
+extract_regs({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, _}) -> [Arr, Idx, Val];
+extract_regs({array_len, {preg, Dst}, {preg, Arr}}) -> [Dst, Arr];
+extract_regs({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, _}) -> [Dst, Arr, Val];
+extract_regs({struct_new, {preg, Dst}, _}) -> [Dst];
+extract_regs({field_get, {preg, Dst}, {preg, Struct}, _}) -> [Dst, Struct];
+extract_regs({field_set, {preg, Struct}, _, {preg, Val}}) -> [Struct, Val];
+extract_regs({map_new, {preg, Dst}}) -> [Dst];
+extract_regs({map_get, {preg, Dst}, {preg, Map}, {preg, Key}}) -> [Dst, Map, Key];
+extract_regs({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}}) -> [Dst, Map, Key, Val];
+extract_regs({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}) -> [Dst, Map, Key];
+extract_regs({int_to_float, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({float_to_int, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({int_to_str, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({float_to_str, {preg, Dst}, {preg, Src}}) -> [Dst, Src];
+extract_regs({fadd, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({fsub, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({fmul, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({fdiv, {preg, Dst}, {preg, A}, {preg, B}}) -> [Dst, A, B];
+extract_regs({method_call, {preg, Dst}, _, _, Args}) -> 
+    [Dst | [R || {preg, R} <- Args]];
+extract_regs(_) -> [].

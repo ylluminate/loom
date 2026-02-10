@@ -77,7 +77,8 @@
     ticks :: non_neg_integer(),
     context_switches :: non_neg_integer(),
     idle_ticks :: non_neg_integer(),
-    start_time :: integer()
+    start_time :: integer(),
+    quota_state :: #{atom() => non_neg_integer()}  % Track quota per priority
 }).
 
 %%% ==========================================================================
@@ -261,7 +262,8 @@ init(Config) ->
         ticks = 0,
         context_switches = 0,
         idle_ticks = 0,
-        start_time = erlang:monotonic_time(millisecond)
+        start_time = erlang:monotonic_time(millisecond),
+        quota_state = #{high => 0, normal => 0, low => 0}
     },
 
     {ok, State}.
@@ -476,15 +478,36 @@ preempt(Pid, #state{processes = Processes, config = Config} = State) ->
             State
     end.
 
-%% @doc Schedule next process from ready queues
-%% Priority: high (2x frequency) > normal > low (0.5x frequency)
+%% @doc Schedule next process from ready queues with quota rotation
+%% Quota: high:2 per tick, normal:1 per tick, low:1 every 2 ticks
+%% Only applies when multiple priority levels have runnable processes
 schedule_next(#state{ready_high = High, ready_normal = Normal, ready_low = Low,
-                     ticks = Ticks, processes = _Processes,
-                     context_switches = CS, idle_ticks = IdleTicks} = State) ->
-    %% Weighted scheduling: high every tick, normal every tick, low every 2 ticks
-    TickMod = Ticks rem 2,
+                     ticks = _Ticks, processes = _Processes,
+                     context_switches = _CS, idle_ticks = _IdleTicks,
+                     quota_state = _Quota} = State) ->
+    %% Check which queues have runnable processes
+    HasHigh = not queue:is_empty(High),
+    HasNormal = not queue:is_empty(Normal),
+    HasLow = not queue:is_empty(Low),
 
-    %% Try queues in priority order
+    %% Determine if quota rotation applies (multiple priority levels active)
+    UseQuota = (HasHigh andalso HasNormal) orelse
+               (HasHigh andalso HasLow) orelse
+               (HasNormal andalso HasLow),
+
+    case UseQuota of
+        false ->
+            %% Simple priority: only one level has processes, use strict priority
+            schedule_next_strict(State);
+        true ->
+            %% Quota rotation: prevent starvation
+            schedule_next_quota(State)
+    end.
+
+%% Strict priority when only one level is active
+schedule_next_strict(#state{ready_high = High, ready_normal = Normal, ready_low = Low,
+                            ticks = Ticks, context_switches = CS, idle_ticks = IdleTicks} = State) ->
+    TickMod = Ticks rem 2,
     case queue:out(High) of
         {{value, Pid}, NewHigh} ->
             run_process(Pid, State#state{ready_high = NewHigh, context_switches = CS + 1});
@@ -493,7 +516,6 @@ schedule_next(#state{ready_high = High, ready_normal = Normal, ready_low = Low,
                 {{value, Pid}, NewNormal} ->
                     run_process(Pid, State#state{ready_normal = NewNormal, context_switches = CS + 1});
                 {empty, _} ->
-                    %% Low priority only runs on even ticks
                     case TickMod =:= 0 andalso queue:out(Low) of
                         {{value, Pid}, NewLow} ->
                             IsIdle = Pid =:= ?IDLE_PID,
@@ -501,8 +523,46 @@ schedule_next(#state{ready_high = High, ready_normal = Normal, ready_low = Low,
                             run_process(Pid, State#state{ready_low = NewLow, context_switches = CS + 1,
                                                          idle_ticks = NewIdleTicks});
                         _ ->
-                            %% No ready processes, stay idle
                             State#state{idle_ticks = IdleTicks + 1}
+                    end
+            end
+    end.
+
+%% Quota-based scheduling to prevent starvation
+schedule_next_quota(#state{ready_high = High, ready_normal = Normal, ready_low = Low,
+                           ticks = Ticks, context_switches = CS, idle_ticks = IdleTicks,
+                           quota_state = Quota} = State) ->
+    HighQuota = maps:get(high, Quota, 0),
+    NormalQuota = maps:get(normal, Quota, 0),
+    LowQuota = maps:get(low, Quota, 0),
+    TickMod = Ticks rem 2,
+
+    %% High gets 2 per tick
+    case HighQuota < 2 andalso queue:out(High) of
+        {{value, Pid}, NewHigh} ->
+            NewQuota = Quota#{high := HighQuota + 1},
+            run_process(Pid, State#state{ready_high = NewHigh, context_switches = CS + 1,
+                                         quota_state = NewQuota});
+        _ ->
+            %% Normal gets 1 per tick
+            case NormalQuota < 1 andalso queue:out(Normal) of
+                {{value, Pid}, NewNormal} ->
+                    NewQuota = Quota#{normal := NormalQuota + 1},
+                    run_process(Pid, State#state{ready_normal = NewNormal, context_switches = CS + 1,
+                                                 quota_state = NewQuota});
+                _ ->
+                    %% Low gets 1 every 2 ticks
+                    case TickMod =:= 0 andalso LowQuota < 1 andalso queue:out(Low) of
+                        {{value, Pid}, NewLow} ->
+                            NewQuota = Quota#{low := LowQuota + 1},
+                            IsIdle = Pid =:= ?IDLE_PID,
+                            NewIdleTicks = case IsIdle of true -> IdleTicks + 1; false -> IdleTicks end,
+                            run_process(Pid, State#state{ready_low = NewLow, context_switches = CS + 1,
+                                                         idle_ticks = NewIdleTicks, quota_state = NewQuota});
+                        _ ->
+                            %% Reset quotas and try again
+                            NewQuota = #{high => 0, normal => 0, low => 0},
+                            schedule_next_strict(State#state{quota_state = NewQuota})
                     end
             end
     end.

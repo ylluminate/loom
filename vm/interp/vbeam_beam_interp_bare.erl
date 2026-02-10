@@ -382,9 +382,14 @@ execute_instr({get_tuple_element, [Src, Index, Dst]}, State) ->
     case get_value(Src, State) of
         Tuple when is_tuple(Tuple) ->
             IndexVal = get_value(Index, State),
-            Element = element(IndexVal + 1, Tuple),
-            NewState = set_register(Dst, Element, State),
-            {continue, advance_pc(NewState)};
+            case is_integer(IndexVal) andalso IndexVal >= 0 andalso IndexVal < tuple_size(Tuple) of
+                true ->
+                    Element = element(IndexVal + 1, Tuple),
+                    NewState = set_register(Dst, Element, State),
+                    {continue, advance_pc(NewState)};
+                false ->
+                    {error, {bad_element_index, IndexVal}}
+            end;
         _ ->
             {error, {badarg, not_a_tuple}}
     end;
@@ -814,12 +819,13 @@ reverse_bare_acc([H | T], Acc) ->
     reverse_bare_acc(T, [H | Acc]).
 
 %% Convert binary or atom to atom for BIF dispatch
+%% If atom doesn't exist, return the binary itself
 safe_to_atom(A) when is_atom(A) -> A;
 safe_to_atom(B) when is_binary(B) ->
     try binary_to_existing_atom(B, utf8)
     catch error:badarg ->
         try binary_to_existing_atom(B, latin1)
-        catch error:badarg -> binary_to_atom(B, utf8)
+        catch error:badarg -> B  % Return binary as-is, don't create atom
         end
     end.
 
