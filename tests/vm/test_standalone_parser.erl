@@ -115,7 +115,10 @@ run() ->
             io:format("   Code size: ~p bytes~n~n", [byte_size(Code)]),
 
             io:format("8. Decoding instructions...~n"),
-            Instructions = vbeam_beam_standalone:decode_instructions(Code, Atoms),
+            Instructions = case vbeam_beam_standalone:decode_instructions(Code, Atoms) of
+                {ok, Instrs} -> Instrs;
+                Instrs when is_list(Instrs) -> Instrs
+            end,
             io:format("   Decoded ~p instructions~n~n", [length(Instructions)]),
 
             %% Show first 20 instructions

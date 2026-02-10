@@ -352,9 +352,18 @@ mod_timer(Timer, ExpiresJiffies) ->
             %% Cancel old timer if exists and delete ref
             case get_timer_ref(Timer) of
                 undefined -> ok;
-                OldTRef ->
+                {OldTRef, _Gen} ->
+                    %% FINDING 7 FIX: Extract actual timer ref from tuple
                     erlang:cancel_timer(OldTRef),
                     %% LOW FIX: Flush any stale messages from cancelled timer
+                    receive
+                        {timer_expired, Timer, _OldGen} -> ok
+                    after 0 -> ok
+                    end,
+                    remove_timer_ref(Timer);
+                OldTRef when is_reference(OldTRef) ->
+                    %% Legacy format (bare ref) - still handle it
+                    erlang:cancel_timer(OldTRef),
                     receive
                         {timer_expired, Timer, _OldGen} -> ok
                     after 0 -> ok

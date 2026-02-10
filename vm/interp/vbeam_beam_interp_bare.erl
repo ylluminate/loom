@@ -48,7 +48,10 @@ load_module(BeamBinary) ->
             %% Decode instructions from Code chunk
             Atoms = get_atoms(Parsed),
             CodeBinary = maps:get(code, Parsed, <<>>),
-            Instructions = vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms),
+            Instructions = case vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms) of
+                {ok, Instrs} -> Instrs;
+                Instrs when is_list(Instrs) -> Instrs
+            end,
 
             %% Build function map and label map
             {Functions, Labels} = build_maps(Instructions, Atoms, Parsed),

@@ -137,16 +137,19 @@ translate_chunks(ParsedData) ->
                 {error, no_code_chunk};
             _ ->
                 %% Decode instructions from bytecode using standalone parser
-                Instructions = vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms),
-
-                %% SECURITY FIX (Finding #3): Check total instruction count
-                InstrCount = length(Instructions),
-                case InstrCount > ?MAX_INSTRUCTIONS_PER_FUNCTION of
-                    true ->
-                        {error, {instruction_count_exceeded, InstrCount, max, ?MAX_INSTRUCTIONS_PER_FUNCTION}};
-                    false ->
-                        %% Split flat instruction list into per-function lists
-                        Functions = extract_functions(Instructions),
+                %% CRITICAL FIX (Finding #5): Propagate decode errors instead of compiling truncated stream
+                case vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms) of
+                    {error, DecodeError} ->
+                        {error, {beam_decode_error, DecodeError}};
+                    {ok, Instructions} ->
+                        %% SECURITY FIX (Finding #3): Check total instruction count
+                        InstrCount = length(Instructions),
+                        case InstrCount > ?MAX_INSTRUCTIONS_PER_FUNCTION of
+                            true ->
+                                {error, {instruction_count_exceeded, InstrCount, max, ?MAX_INSTRUCTIONS_PER_FUNCTION}};
+                            false ->
+                                %% Split flat instruction list into per-function lists
+                                Functions = extract_functions(Instructions),
 
                         %% SECURITY FIX (Finding #3): Check function count
                         FunctionCount = length(Functions),
@@ -188,6 +191,7 @@ translate_chunks(ParsedData) ->
                                 end
                         end
                 end
+                end  %% close {ok, Instructions} case from Finding #5 fix
         end
     catch
         error:CatchReason:Stack ->

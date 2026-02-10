@@ -643,19 +643,25 @@ lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}},
 %% Arr points to header {ptr, len, cap}. Index is in register.
 %% Element address = ptr + index * elem_size
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemSize}},
-                  _FnName, _FS, _Fmt, _UC) ->
+                  _FnName, _FS, Fmt, _UC) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_ok_", Uid/binary>>,
+    %% CRITICAL FIX: Format-aware syscall for OOB error path
+    {SysNumReg, ExitNum, SvcImm} = case Fmt of
+        macho -> {x16, 1, 16#80};   %% macOS: x16=1 (exit), svc #0x80
+        _     -> {x8, 93, 0}         %% Linux: x8=93 (exit), svc #0
+    end,
     lists:flatten([
         %% Bounds check: load array length from Arr+8
         ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
         ?ENC:encode_cmp_rr(Idx, x17),                   %% compare index with length
         ?ENC:encode_b_cond(ltu, 0),                     %% branch if unsigned-less-than (idx < len)
         {reloc, arm64_cond_branch19, OkLbl, -4},
-        %% Out of bounds: exit with code 2
-        ?ENC:encode_mov_imm64(x0, 2),
-        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
-        ?ENC:encode_svc(0),
+        %% Out of bounds: exit with code 2 (format-aware syscall)
+        ?ENC:encode_mov_imm64(x0, 2),                   %% exit code 2
+        ?ENC:encode_mov_imm64(SysNumReg, ExitNum),      %% syscall number (format-aware)
+        ?ENC:encode_svc(SvcImm),                        %% svc (format-aware)
+        ?ENC:encode_brk(0),                             %% TRAP fallback (non-returning)
         %% In bounds: proceed with access
         {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr
@@ -667,20 +673,26 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
 
 %% ARRAY_GET with immediate index
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSize}},
-                  _FnName, _FS, _Fmt, _UC) ->
+                  _FnName, _FS, Fmt, _UC) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
+    %% CRITICAL FIX: Format-aware syscall for OOB error path
+    {SysNumReg, ExitNum, SvcImm} = case Fmt of
+        macho -> {x16, 1, 16#80};   %% macOS: x16=1 (exit), svc #0x80
+        _     -> {x8, 93, 0}         %% Linux: x8=93 (exit), svc #0
+    end,
     lists:flatten([
         %% Bounds check: load array length from Arr+8
         ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
         ?ENC:encode_cmp_imm(x17, Idx),                  %% compare length with index
         ?ENC:encode_b_cond(gtu, 0),                     %% branch if unsigned-greater-than (len > idx)
         {reloc, arm64_cond_branch19, OkLbl, -4},
-        %% Out of bounds: exit with code 2
-        ?ENC:encode_mov_imm64(x0, 2),
-        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
-        ?ENC:encode_svc(0),
+        %% Out of bounds: exit with code 2 (format-aware syscall)
+        ?ENC:encode_mov_imm64(x0, 2),                   %% exit code 2
+        ?ENC:encode_mov_imm64(SysNumReg, ExitNum),      %% syscall number (format-aware)
+        ?ENC:encode_svc(SvcImm),                        %% svc (format-aware)
+        ?ENC:encode_brk(0),                             %% TRAP fallback (non-returning)
         %% In bounds: proceed with access
         {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr
@@ -695,20 +707,26 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 
 %% ARRAY_SET with immediate index.
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName, _FS, _Fmt, _UC) ->
+                  _FnName, _FS, Fmt, _UC) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
+    %% CRITICAL FIX: Format-aware syscall for OOB error path
+    {SysNumReg, ExitNum, SvcImm} = case Fmt of
+        macho -> {x16, 1, 16#80};   %% macOS: x16=1 (exit), svc #0x80
+        _     -> {x8, 93, 0}         %% Linux: x8=93 (exit), svc #0
+    end,
     lists:flatten([
         %% Bounds check: load array length from Arr+8
         ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
         ?ENC:encode_cmp_imm(x17, Idx),                  %% compare length with index
         ?ENC:encode_b_cond(gtu, 0),                     %% branch if unsigned-greater-than (len > idx)
         {reloc, arm64_cond_branch19, OkLbl, -4},
-        %% Out of bounds: exit with code 2
-        ?ENC:encode_mov_imm64(x0, 2),
-        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
-        ?ENC:encode_svc(0),
+        %% Out of bounds: exit with code 2 (format-aware syscall)
+        ?ENC:encode_mov_imm64(x0, 2),                   %% exit code 2
+        ?ENC:encode_mov_imm64(SysNumReg, ExitNum),      %% syscall number (format-aware)
+        ?ENC:encode_svc(SvcImm),                        %% svc (format-aware)
+        ?ENC:encode_brk(0),                             %% TRAP fallback (non-returning)
         %% In bounds: proceed with store
         {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr
@@ -723,19 +741,25 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 
 %% ARRAY_SET with register index.
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName, _FS, _Fmt, _UC) ->
+                  _FnName, _FS, Fmt, _UC) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_ok_", Uid/binary>>,
+    %% CRITICAL FIX: Format-aware syscall for OOB error path
+    {SysNumReg, ExitNum, SvcImm} = case Fmt of
+        macho -> {x16, 1, 16#80};   %% macOS: x16=1 (exit), svc #0x80
+        _     -> {x8, 93, 0}         %% Linux: x8=93 (exit), svc #0
+    end,
     lists:flatten([
         %% Bounds check: load array length from Arr+8
         ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
         ?ENC:encode_cmp_rr(Idx, x17),                   %% compare index with length
         ?ENC:encode_b_cond(ltu, 0),                     %% branch if unsigned-less-than (idx < len)
         {reloc, arm64_cond_branch19, OkLbl, -4},
-        %% Out of bounds: exit with code 2
-        ?ENC:encode_mov_imm64(x0, 2),
-        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
-        ?ENC:encode_svc(0),
+        %% Out of bounds: exit with code 2 (format-aware syscall)
+        ?ENC:encode_mov_imm64(x0, 2),                   %% exit code 2
+        ?ENC:encode_mov_imm64(SysNumReg, ExitNum),      %% syscall number (format-aware)
+        ?ENC:encode_svc(SvcImm),                        %% svc (format-aware)
+        ?ENC:encode_brk(0),                             %% TRAP fallback (non-returning)
         %% In bounds: proceed with store
         {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr

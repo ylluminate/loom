@@ -110,11 +110,12 @@ init(Opts) ->
     Log = maps:get(log, Opts, true),
     RawMaxLogSize = maps:get(max_log_size, Opts, ?MAX_LOG_SIZE),
 
-    %% BUG 1 FIX: Validate max_log_size (positive, capped at 100MB)
-    MaxLogBytes = 100 * 1024 * 1024,  % BUG 5 FIX: Clamp to 100MB max
+    %% FINDING 12 FIX: Validate max_log_size as ENTRY COUNT (not bytes)
+    %% max_log_size is enforced as entry count in output_log/2
+    MaxLogEntries = 10000,  % Cap at 10000 entries
     MaxLogSize = case is_integer(RawMaxLogSize) andalso RawMaxLogSize > 0 of
-        true -> min(RawMaxLogSize, MaxLogBytes);
-        false -> ?MAX_LOG_SIZE  %% Use default if invalid
+        true -> min(RawMaxLogSize, MaxLogEntries);
+        false -> ?MAX_LOG_SIZE  %% Use default if invalid (1000 entries)
     end,
 
     %% Initial cursor position (left margin, top of screen)
@@ -145,7 +146,14 @@ handle_call(_Request, _From, State) ->
 
 %% @private
 handle_cast({direct_write, Data}, State) ->
-    String = unicode:characters_to_binary(Data),
+    %% FINDING 8 FIX: Protect against invalid iodata causing unicode crash
+    String = try
+        unicode:characters_to_binary(Data)
+    catch
+        _:_ ->
+            %% Invalid iodata - fall back to safe representation
+            iolist_to_binary(io_lib:format("[INVALID DATA: ~p]", [Data]))
+    end,
     NewState = output_all(String, State),
     {noreply, NewState};
 handle_cast(_Msg, State) ->

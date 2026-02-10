@@ -97,6 +97,9 @@ build_label_map(Code, PC, Acc) ->
     case decode_instruction(Code, PC) of
         {label, Label, NextPC} ->
             build_label_map(Code, NextPC, Acc#{Label => PC});
+        {unknown_opcode, NextPC} ->
+            %% FINDING 9 FIX: Handle 2-tuple unknown opcode decode result
+            build_label_map(Code, NextPC, Acc);
         {_, _, NextPC} ->
             build_label_map(Code, NextPC, Acc);
         done ->

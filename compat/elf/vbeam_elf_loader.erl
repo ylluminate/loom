@@ -457,9 +457,15 @@ resolve_section_name(#{name_offset := NameOff} = Hdr, ShStrTab, Binary) ->
     Data = extract_section_data(Binary, Hdr),
     Hdr#{name => Name, data => Data}.
 
-extract_section_data(_Binary, #{type := nobits, size := Size}) ->
+%% CRITICAL FIX (Finding #7): Cap .bss section size to prevent OOM from crafted ELF
+-define(MAX_SECTION_SIZE, 256 * 1024 * 1024).  % 256MB
+
+extract_section_data(_Binary, #{type := nobits, size := Size}) when Size =< ?MAX_SECTION_SIZE ->
     %% HIGH FIX: SHT_NOBITS sections (.bss) need allocated zeroed memory
     <<0:(Size*8)>>;
+extract_section_data(_Binary, #{type := nobits, size := Size}) ->
+    %% Size exceeds maximum - error instead of OOM
+    error({section_too_large, Size, max, ?MAX_SECTION_SIZE});
 extract_section_data(Binary, #{offset := Offset, size := Size}) ->
     <<_:Offset/binary, Data:Size/binary, _/binary>> = Binary,
     Data.

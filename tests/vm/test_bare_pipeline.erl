@@ -197,7 +197,10 @@ test_standalone_parser() ->
         CodeOk = byte_size(Code) > 0,
 
         %% Decode instructions
-        Instructions = vbeam_beam_standalone:decode_instructions(Code, Atoms),
+        Instructions = case vbeam_beam_standalone:decode_instructions(Code, Atoms) of
+            {ok, Instrs} -> Instrs;
+            Instrs when is_list(Instrs) -> Instrs
+        end,
         InstsOk = is_list(Instructions) andalso length(Instructions) > 0,
 
         AllOk = AtomsOk andalso ExportsOk andalso CodeOk andalso InstsOk,

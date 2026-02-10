@@ -42,7 +42,10 @@ dispatch(SyscallNr, Args) when is_integer(SyscallNr), is_list(Args) ->
         _:_ ->
             %% Catch all errors to isolate handler failures
             {error, ?EINVAL}
-    end.
+    end;
+%% FINDING 11 FIX: Fallback clause for malformed dispatch calls
+dispatch(_, _) ->
+    {error, ?EINVAL}.
 
 %% @private Internal dispatch implementation
 dispatch_impl(SyscallNr, Args) ->

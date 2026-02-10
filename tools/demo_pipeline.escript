@@ -81,7 +81,10 @@ step2_standalone_parse(BeamBinary) ->
 
             %% Decode instructions
             CodeBinary = maps:get(code, Module, <<>>),
-            Instructions = vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms),
+            Instructions = case vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms) of
+                {ok, Instrs} -> Instrs;
+                Instrs when is_list(Instrs) -> Instrs
+            end,
             InstructionCount = length(Instructions),
 
             io:format("  ~s├─ Atoms: ~p~s~n", [?CYAN, AtomCount, ?RESET]),

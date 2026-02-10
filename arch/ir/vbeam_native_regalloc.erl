@@ -295,9 +295,15 @@ find_call_positions(Body) ->
 %% Detect call-like instructions that clobber caller-saved registers.
 %% FIXED: Include method_call as a call-clobbering instruction.
 %% method_call is a 5-element tuple: {method_call, Dst, ReceiverType, MethodName, Args}
+%% CRITICAL FIX (Finding #3): Pseudo-ops (print_str, print_int, int_to_str) clobber
+%% caller-saved regs but weren't treated as call barriers. Live params in r8+ get
+%% silently corrupted. Treat these as call barriers for liveness analysis.
 is_call_instruction({call, _}) -> true;
 is_call_instruction({call_indirect, _}) -> true;
 is_call_instruction({method_call, _, _, _, _}) -> true;
+is_call_instruction({print_str, _}) -> true;
+is_call_instruction({print_int, _}) -> true;
+is_call_instruction({int_to_str, _, _}) -> true;
 is_call_instruction(_) -> false.
 
 %% Check if a vreg's live interval spans any call position.
@@ -306,10 +312,14 @@ spans_call(#interval{start = Start, stop = Stop}, CallPositions) ->
     lists:any(fun(Pos) -> Pos >= Start andalso Pos =< Stop end, CallPositions).
 
 %% Callee-saved and caller-saved register sets.
+%% NOTE: Heap registers (x28/r15) are EXCLUDED from callee-saved.
+%% They are global state (heap pointer), not local call-saved state.
+%% Builtins explicitly mutate them (string__to_upper, get_raw_line), so
+%% saving/restoring them would ROLL BACK heap bumps.
 callee_saved_regs(arm64) ->
-    [x19, x20, x21, x22, x23, x24, x25, x26, x27, x28];
+    [x19, x20, x21, x22, x23, x24, x25, x26, x27];  % x28 EXCLUDED
 callee_saved_regs(x86_64) ->
-    [rbx, r12, r13, r14, r15].
+    [rbx, r12, r13, r14].  % r15 EXCLUDED
 
 caller_saved_regs(arm64) ->
     [x0, x1, x2, x3, x4, x5, x6, x7,

@@ -61,7 +61,8 @@ parse_binary(_) ->
 
 %% Decode instructions from Code chunk binary
 %% Args: CodeBinary (from Code chunk's 'code' field), AtomTable (list of atoms)
-%% Returns: list of {Opcode, [Operand1, Operand2, ...]}
+%% Returns: {ok, [{Opcode, [Operand1, Operand2, ...]}]} | {error, Reason}
+%% CRITICAL FIX (Finding #5): Now returns {ok, List} or {error, ...} instead of bare List
 decode_instructions(CodeBinary, AtomTable) ->
     decode_instr_loop(CodeBinary, AtomTable, []).
 
@@ -501,15 +502,20 @@ decode_compact_term_int(_) ->
 %% ============================================================================
 
 %% Decode instruction stream
+%% CRITICAL FIX (Finding #5): On decode failure, return {error, ...} instead of
+%% the partial list. Failing open allowed truncated bytecode to be compiled.
 decode_instr_loop(<<>>, _Atoms, Acc) ->
-    lists:reverse(Acc);
+    {ok, lists:reverse(Acc)};
 decode_instr_loop(Binary, Atoms, Acc) ->
     case decode_instruction(Binary, Atoms) of
         {Instr, Rest} ->
             decode_instr_loop(Rest, Atoms, [Instr | Acc]);
+        {error, Reason} ->
+            %% Decode failed - return error with partial results for analysis
+            {error, {decode_failed, Reason, lists:reverse(Acc)}};
         error ->
-            %% If we can't decode, return what we have
-            lists:reverse(Acc)
+            %% Legacy error format - also fail with partial results
+            {error, {decode_failed, unknown, lists:reverse(Acc)}}
     end.
 
 %% Decode a single instruction
