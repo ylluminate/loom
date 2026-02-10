@@ -711,10 +711,12 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
     LoopLbl = <<"__mp_loop_", Uid/binary>>,
     FoundLbl = <<"__mp_found_", Uid/binary>>,
     AppendLbl = <<"__mp_append_", Uid/binary>>,
+    CapFullLbl = <<"__mp_capfull_", Uid/binary>>,
     DoneLbl = <<"__mp_done_", Uid/binary>>,
     lists:flatten([
-        ?ENC:encode_mov_mem_load(rsi, Map, 0),
-        ?ENC:encode_mov_mem_load(rdx, Map, 8),
+        ?ENC:encode_mov_mem_load(rsi, Map, 0),   %% entries ptr
+        ?ENC:encode_mov_mem_load(rdx, Map, 8),   %% len
+        ?ENC:encode_mov_mem_load(rcx, Map, 16),  %% cap
         ?ENC:encode_mov_imm64(rdi, 0),
 
         {label, LoopLbl},
@@ -743,6 +745,11 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         {reloc, rel32, DoneLbl, -4},
 
         {label, AppendLbl},
+        %% Bounds check: if len >= cap, fail (growth would go here)
+        ?ENC:encode_cmp_rr(rdx, rcx),
+        ?ENC:encode_jcc_rel32(ge, 0),
+        {reloc, rel32, CapFullLbl, -4},
+
         ?ENC:encode_mov_imm64(r8, 16),
         ?ENC:encode_mov_rr(r9, rdx),
         ?ENC:encode_imul_rr(r9, r8),
@@ -752,6 +759,13 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         ?ENC:encode_mov_mem_store(r10, 8, Val),
         ?ENC:encode_add_imm(rdx, 1),
         ?ENC:encode_mov_mem_store(Map, 8, rdx),
+        ?ENC:encode_jmp_rel32(0),
+        {reloc, rel32, DoneLbl, -4},
+
+        {label, CapFullLbl},
+        %% FIXME: Map capacity exhausted - should grow/reallocate here
+        %% For now: trap via ud2 (illegal instruction)
+        ?ENC:encode_ud2(),
 
         {label, DoneLbl},
         ?ENC:encode_mov_rr(Dst, Map)

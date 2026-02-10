@@ -190,7 +190,7 @@ The linuxkpi layer provides BEAM implementations of common Linux kernel APIs, al
 
 ```erlang
 %% In .ko loader, resolve symbol:
-{ok, {Module, Function, Arity}} = vbeam_kapi_symbols:resolve("kmalloc").
+{ok, {Module, Function, Arity}} = vbeam_kpi_symbols:resolve("kmalloc").
 %% Returns: {ok, {vbeam_linuxkpi, kmalloc, 2}}
 
 %% Call from driver code:
@@ -198,13 +198,13 @@ The linuxkpi layer provides BEAM implementations of common Linux kernel APIs, al
 %% Allocates 4KB BEAM binary
 
 %% Check if symbol is supported:
-true = vbeam_kapi_symbols:is_supported("pci_enable_device").
+true = vbeam_kpi_symbols:is_supported("pci_enable_device").
 ```
 
 ## Adding New Symbols
 
 1. Add implementation to `vbeam_linuxkpi.erl`
-2. Add mapping to `vbeam_kapi_symbols.erl` `all_symbols()` map
+2. Add mapping to `vbeam_kpi_symbols.erl` `all_symbols()` map
 3. Update this document
 
 ## References

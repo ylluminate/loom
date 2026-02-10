@@ -104,22 +104,40 @@ build_label_map(Code, PC, Acc) ->
 
 %% Find function entry label
 find_function_label(#proc{exports = Exports, atoms = Atoms}, FunName, Arity) ->
-    FunAtom = list_to_atom(FunName),
-    case lists:keyfind(FunAtom, 1, lists:zip(Atoms, lists:seq(1, length(Atoms)))) of
-        {FunAtom, FunIndex} ->
-            case lists:keyfind({FunIndex, Arity, '_'}, 1,
-                               [{F, A, L} || {F, A, L} <- Exports]) of
-                false ->
-                    %% Try without label wildcard
-                    case [L || {F, A, L} <- Exports, F =:= FunIndex, A =:= Arity] of
-                        [Label | _] -> {ok, Label};
-                        [] -> error
-                    end;
-                {_, _, Label} ->
-                    {ok, Label}
+    %% Safely convert to atom - only if it already exists
+    FunAtom = case FunName of
+        A when is_atom(A) -> A;
+        S when is_list(S) ->
+            try
+                list_to_existing_atom(S)
+            catch
+                error:badarg ->
+                    %% Atom doesn't exist - function not found
+                    undefined
             end;
-        false ->
-            error
+        _ -> undefined
+    end,
+
+    case FunAtom of
+        undefined ->
+            error;
+        _ ->
+            case lists:keyfind(FunAtom, 1, lists:zip(Atoms, lists:seq(1, length(Atoms)))) of
+                {FunAtom, FunIndex} ->
+                    case lists:keyfind({FunIndex, Arity, '_'}, 1,
+                                       [{F, A, L} || {F, A, L} <- Exports]) of
+                        false ->
+                            %% Try without label wildcard
+                            case [L || {F, A, L} <- Exports, F =:= FunIndex, A =:= Arity] of
+                                [Label | _] -> {ok, Label};
+                                [] -> error
+                            end;
+                        {_, _, Label} ->
+                            {ok, Label}
+                    end;
+                false ->
+                    error
+            end
     end.
 
 %% Main interpreter loop

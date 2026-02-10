@@ -5,7 +5,8 @@
 
 test() ->
     %% Parse the standalone parser's own BEAM file
-    case vbeam_beam_standalone:parse_file("vbeam_beam_standalone.beam") of
+    BeamFile = "_build/vbeam_beam_standalone.beam",
+    case vbeam_beam_standalone:parse_file(BeamFile) of
         {ok, Result} ->
             Atoms = maps:get(atoms, Result),
             Exports = maps:get(exports, Result),
@@ -31,6 +32,6 @@ test() ->
             
             ok;
         {error, Reason} ->
-            io:format("ERROR: ~p~n", [Reason]),
-            error
+            io:format("ERROR: Failed to parse ~s: ~p~n", [BeamFile, Reason]),
+            error  %% This will now cause halt(1) via Makefile
     end.

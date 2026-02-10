@@ -110,7 +110,7 @@ Update a running driver without stopping the system. Same PID. Same state. New c
 | UEFI boot nucleus | 5KB .efi, boots in QEMU | `boot/` |
 | Boot splash | GOP framebuffer, VGA fonts, loom grid | `boot/` |
 | BEAM interpreter | 30+ opcodes, runs V hello world | `vm/interp/` |
-| Standalone parser | No OTP deps, bare-metal ready | `vm/parser/` |
+| Standalone parser | Minimal OTP deps (file I/O, zlib), standalone from beam_lib/beam_disasm | `vm/parser/` |
 | BEAM-to-native JIT | BEAM bytecode -> x86_64 machine code | `vm/jit/` |
 | Kernel: boot sequence | GDT→IDT→paging→stack→kernel | `kernel/boot/` |
 | Kernel: memory mgmt | Page allocator, paging, heap | `kernel/mm/` |

@@ -853,6 +853,7 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
     LoopLbl = <<"__mp_loop_", Uid/binary>>,
     FoundLbl = <<"__mp_found_", Uid/binary>>,
     AppendLbl = <<"__mp_append_", Uid/binary>>,
+    CapFullLbl = <<"__mp_capfull_", Uid/binary>>,
     DoneLbl = <<"__mp_done_", Uid/binary>>,
     lists:flatten([
         ?ENC:encode_ldr(x9, Map, 0),                    %% entries ptr
@@ -884,8 +885,13 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         ?ENC:encode_b(0),
         {reloc, arm64_branch26, DoneLbl, -4},
 
-        %% Append new entry at end (no capacity check for simplicity)
+        %% Append new entry at end (with capacity check)
         {label, AppendLbl},
+        %% Bounds check: if len >= cap, fail (growth would go here)
+        ?ENC:encode_cmp_rr(x10, x11),
+        ?ENC:encode_b_cond(ge, 0),
+        {reloc, arm64_cond_branch19, CapFullLbl, -4},
+
         ?ENC:encode_mov_imm64(x13, 16),
         ?ENC:encode_mul(x13, x10, x13),                %% offset = len * 16
         ?ENC:encode_add_rrr(x14, x9, x13),
@@ -893,6 +899,13 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         ?ENC:encode_str(Val, x14, 8),                  %% entry.value = Val
         ?ENC:encode_add_imm(x10, x10, 1),
         ?ENC:encode_str(x10, Map, 8),                  %% len++
+        ?ENC:encode_b(0),
+        {reloc, arm64_branch26, DoneLbl, -4},
+
+        {label, CapFullLbl},
+        %% FIXME: Map capacity exhausted - should grow/reallocate here
+        %% For now: trap via supervisor call with special immediate
+        ?ENC:encode_svc(16#FFFF),                      %% trap: map capacity full
 
         {label, DoneLbl},
         ?ENC:encode_mov_rr(Dst, Map)                   %% return same map

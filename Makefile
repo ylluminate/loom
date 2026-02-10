@@ -168,7 +168,7 @@ test-kernel: compile ## Run kernel unit tests
 		[ -f "$$f" ] || continue; \
 		mod=$$(basename "$$f" .erl); \
 		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; \
-		if $(ERL) -noshell -pa $(EBIN) -eval "$$mod:test()." -s init stop 2>/dev/null; then \
+		if $(ERL) -noshell -pa $(EBIN) -eval "case $$mod:test() of ok -> halt(0); _ -> halt(1) end" 2>/dev/null; then \
 			printf "  $(_G)PASS$(_N)  $$mod\n"; \
 		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
@@ -181,7 +181,7 @@ test-vm: compile ## Run VM unit tests
 		[ -f "$$f" ] || continue; \
 		mod=$$(basename "$$f" .erl); \
 		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; \
-		if $(ERL) -noshell -pa $(EBIN) -eval "$$mod:test()." -s init stop 2>/dev/null; then \
+		if $(ERL) -noshell -pa $(EBIN) -eval "case $$mod:test() of ok -> halt(0); _ -> halt(1) end" 2>/dev/null; then \
 			printf "  $(_G)PASS$(_N)  $$mod\n"; \
 		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
@@ -213,7 +213,8 @@ check: $(EBIN) ## Syntax-check all source modules (strict)
 	done; \
 	printf "  $(_G)$$PASS passed$(_N)"; \
 	if [ $$FAIL -gt 0 ]; then printf ", $(_R)$$FAIL failed$(_N)"; fi; \
-	printf "\n"
+	printf "\n"; \
+	test $$FAIL -eq 0
 
 lint: check ## Alias for check
 

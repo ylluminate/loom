@@ -20,7 +20,7 @@ Loom OS — a research operating system where BEAM runs on bare metal, with UEFI
 ### What Works
 - `make compile` → 33/33 source modules + 14 test modules OK
 - `make check` → **33/33 passed** (strict `-Wall -Werror`)
-- `make test` → **ALL PASS** (9 kernel + 3 VM test suites, 90+ assertions)
+- `make test` → **kernel+vm suites pass** (9 kernel + 3 VM, 90+ assertions; native tests run separately via `make test-native`)
 - `make nucleus` → 5120 bytes
 - `./tools/demo_pipeline.escript` → full pipeline demo (parse → interpret → JIT → nucleus)
 - Integration test: standalone parse + bare-metal interpret end-to-end
@@ -41,8 +41,8 @@ tools/                            Scripts and utilities
 | File | What |
 |------|------|
 | `boot/vbeam_nucleus_boot.erl` | UEFI PE32+ boot (~738 LOC) |
-| `vm/interp/vbeam_beam_interp_bare.erl` | Bare-metal interpreter (856 LOC, zero OTP) |
-| `vm/parser/vbeam_beam_standalone.erl` | Standalone parser (923 LOC, zero OTP) |
+| `vm/interp/vbeam_beam_interp_bare.erl` | Bare-metal interpreter (856 LOC, minimal deps) |
+| `vm/parser/vbeam_beam_standalone.erl` | Standalone parser (923 LOC, minimal OTP deps: file/zlib) |
 | `vm/jit/vbeam_beam_to_native.erl` | JIT translator (now uses standalone parser) |
 | `tools/demo_pipeline.escript` | Full pipeline demo for hackathon |
 | `tests/vm/test_bare_pipeline.erl` | Integration test (3/3 pass) |
@@ -55,6 +55,12 @@ tools/                            Scripts and utilities
 3. **Driver framework** — supervised driver processes with hot reload
 4. **V compiler integration** — wire V-to-BEAM output into the standalone pipeline
 
+## Known Limitations
+
+- Standalone parser uses file/zlib (adaptation needed for true bare-metal)
+- Interpreter requires adaptation of BIF dispatch for bare-metal use
+- Native test suite (arch/) runs separately from kernel+vm tests
+
 ## Blockers
 
-- None — hackathon-ready, all pipelines verified, full quality audit clean.
+- None — hackathon-ready, all pipelines verified, quality audit complete.

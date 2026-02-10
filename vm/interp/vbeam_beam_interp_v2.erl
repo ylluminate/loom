@@ -39,13 +39,29 @@ execute({Module, Code}, FunctionName, Args, Options) ->
     CodeMap = build_code_map(Code),
     Labels = build_label_map(Code),
 
-    %% Find the function
-    FunAtom = list_to_atom(FunctionName),
+    %% Safely convert function name to atom - only if it already exists
+    FunAtom = case FunctionName of
+        A when is_atom(A) -> A;
+        S when is_list(S) ->
+            try
+                list_to_existing_atom(S)
+            catch
+                error:badarg ->
+                    %% Atom doesn't exist - function not found
+                    undefined
+            end;
+        _ -> undefined
+    end,
+
     Arity = length(Args),
 
-    case maps:get({FunAtom, Arity}, CodeMap, undefined) of
+    case FunAtom of
         undefined ->
-            {error, {function_not_found, FunAtom, Arity}};
+            {error, {function_not_found, FunctionName, Arity}};
+        _ ->
+            case maps:get({FunAtom, Arity}, CodeMap, undefined) of
+                undefined ->
+                    {error, {function_not_found, FunAtom, Arity}};
         Instructions ->
             %% Initialize process state
             InitX = lists:foldl(
@@ -68,6 +84,7 @@ execute({Module, Code}, FunctionName, Args, Options) ->
 
             %% Run the interpreter
             run(Proc, Options)
+            end
     end.
 
 %% Build function -> instructions mapping
@@ -390,10 +407,8 @@ execute_instr({line, _LineInfo}, Proc, _Options) ->
     {continue, Proc#proc{pc = Proc#proc.pc + 1}};
 
 execute_instr(Instr, Proc, _Options) ->
-    %% Unknown instruction - error
-    io:format("Warning: Unimplemented instruction ~p at PC ~p in ~p~n",
-              [Instr, Proc#proc.pc, Proc#proc.current_fun]),
-    {continue, Proc#proc{pc = Proc#proc.pc + 1}}.
+    %% Unknown instruction - halt instead of continuing
+    {error, {unknown_instruction, Instr, Proc#proc.pc, Proc#proc.current_fun}}.
 
 %% Jump to label
 jump_to_label(Label, Proc) ->

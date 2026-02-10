@@ -18,8 +18,8 @@
 }).
 
 %% @doc Initialize syscall dispatch system
+%% Creates persistent term for tracking unimplemented syscalls
 init() ->
-    %% Create persistent term for tracking unimplemented syscalls
     persistent_term:put({?MODULE, state}, #syscall_state{}),
     ok.
 
@@ -234,8 +234,14 @@ sys_ioctl([Fd, Cmd, Arg]) ->
 %% ============================================================
 
 stub_syscall(SyscallNr, Args) ->
-    %% Log first occurrence
-    State = persistent_term:get({?MODULE, state}),
+    %% Log first occurrence (lazy init if needed)
+    State = case persistent_term:get({?MODULE, state}, undefined) of
+        undefined ->
+            init(),
+            persistent_term:get({?MODULE, state});
+        S ->
+            S
+    end,
     Seen = State#syscall_state.unimplemented_seen,
     case sets:is_element(SyscallNr, Seen) of
         false ->

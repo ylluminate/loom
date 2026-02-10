@@ -464,15 +464,13 @@ execute_instr({bif, Operands}, State) when is_list(Operands) ->
             {error, {bad_bif_format, Operands}}
     end;
 
-%% Unknown opcodes - skip silently (likely line numbers or other metadata)
-execute_instr({{unknown_opcode, _N}, _Args}, State) ->
-    {continue, advance_pc(State)};
+%% Unknown opcodes - return error instead of silently continuing
+execute_instr({{unknown_opcode, N}, Args}, State) ->
+    {error, {unknown_opcode, N, Args, maps:get(pc, State)}};
 
-%% Unknown instruction
-execute_instr(_Instr, State) ->
-    %% Silently skip unknown instructions for now
-    %% (Could enable for debugging: OutputFun("Warning: Unknown instruction\n"))
-    {continue, advance_pc(State)}.
+%% Unknown instruction - halt instead of silently continuing
+execute_instr(Instr, State) ->
+    {error, {unknown_instruction, Instr, maps:get(pc, State)}}.
 
 %% ============================================================================
 %% Call Handlers

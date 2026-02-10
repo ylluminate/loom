@@ -8,7 +8,7 @@ Enables running Linux kernel modules and applications on Loom OS.
 |-----------|-----------|---------|
 | `syscall/` | `vbeam_linux_syscall` | x86_64 Linux syscall dispatch table (~450 syscalls mapped, 50 critical implemented) |
 | `elf/` | `vbeam_elf_loader` | ELF64 relocatable object loader — parses .ko kernel modules, resolves x86_64 relocations |
-| `kpi/` | `vbeam_linuxkpi`, `vbeam_kapi_symbols` | Linux Kernel Programming Interface shims (66 functions: kmalloc, printk, mutex_lock, etc.) + kernel symbol resolver for .ko imports |
+| `kpi/` | `vbeam_linuxkpi`, `vbeam_kpi_symbols` | Linux Kernel Programming Interface shims (66 functions: kmalloc, printk, mutex_lock, etc.) + kernel symbol resolver for .ko imports |
 
 ## Strategy
 
