@@ -46,14 +46,13 @@
 
 %% @doc Initialize LinuxKPI subsystem (ETS tables, etc.)
 %% BUG 11 FIX: Make init idempotent with try/catch
-%% Codex R34 Finding #3: Change to public table for multi-process timer operations
+%% FINDING R43-10 FIX: Change to protected table - operations are only called by owning module
 init() ->
     try
         case ets:whereis(?TIMER_TABLE) of
             undefined ->
-                %% Must be public: timer operations (insert/delete) are called
-                %% from arbitrary processes, not just the table owner
-                ets:new(?TIMER_TABLE, [named_table, public, set]),
+                %% FINDING R43-10 FIX: protected, not public - all timer operations go through this module
+                ets:new(?TIMER_TABLE, [named_table, protected, set]),
                 ok;
             _ ->
                 ok

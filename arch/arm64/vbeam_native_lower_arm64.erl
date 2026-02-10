@@ -205,22 +205,64 @@ lower_instruction({mul, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _FS, _Fmt,
      ?ENC:encode_mul(Dst, A, x16)];
 
 %% SDIV
-lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _FS, _Fmt, _UC) ->
-    [?ENC:encode_sdiv(Dst, A, B)];
+lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _FS, Fmt, _UC) ->
+    %% CRITICAL FIX (Finding 4): ARM64 SDIV returns 0 on divide-by-zero instead of trapping.
+    %% Explicit zero check needed for consistent cross-platform behavior.
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__sdiv_ok_", Uid/binary>>,
+    {SysNumReg, ExitNum, SvcImm} = case Fmt of
+        macho -> {x16, 1, 16#80};       %% macOS: exit=1, svc #0x80
+        elf64 -> {x8, 93, 0};            %% Linux: exit=93, svc #0
+        pe -> {x8, 93, 0}                %% PE/UEFI uses Linux-like convention
+    end,
+    lists:flatten([
+        ?ENC:encode_cmp_imm(B, 0),       %% Compare divisor with 0
+        ?ENC:encode_b_cond(ne, 0),       %% Branch if not equal (B != 0)
+        {reloc, rel32, OkLbl, -4},
+        %% Divide by zero: exit with code 2
+        ?ENC:encode_mov_imm64(x0, 2),    %% exit code
+        ?ENC:encode_mov_imm64(SysNumReg, ExitNum),
+        ?ENC:encode_svc(SvcImm),
+        ?ENC:encode_brk(0),              %% Trap if syscall returns
+        {label, OkLbl},
+        ?ENC:encode_sdiv(Dst, A, B)
+    ]);
 lower_instruction({sdiv, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _FS, _Fmt, _UC) ->
-    [?ENC:encode_mov_imm64(x16, Imm),
-     ?ENC:encode_sdiv(Dst, A, x16)];
+    case Imm of
+        0 -> error({divide_by_zero, "Immediate divisor cannot be zero"});
+        _ -> [?ENC:encode_mov_imm64(x16, Imm),
+              ?ENC:encode_sdiv(Dst, A, x16)]
+    end;
 
 %% SREM (remainder = A - (A/B)*B, using MSUB)
-lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _FS, _Fmt, _UC) ->
-    %% Use x16 as temp for quotient
-    [?ENC:encode_sdiv(x16, A, B),
-     ?ENC:encode_msub(Dst, x16, B, A)];
+lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _FS, Fmt, _UC) ->
+    %% CRITICAL FIX (Finding 4): SREM also needs divide-by-zero check
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__srem_ok_", Uid/binary>>,
+    {SysNumReg, ExitNum, SvcImm} = case Fmt of
+        macho -> {x16, 1, 16#80};
+        elf64 -> {x8, 93, 0};
+        pe -> {x8, 93, 0}
+    end,
+    lists:flatten([
+        ?ENC:encode_cmp_imm(B, 0),
+        ?ENC:encode_b_cond(ne, 0),
+        {reloc, rel32, OkLbl, -4},
+        ?ENC:encode_mov_imm64(x0, 2),
+        ?ENC:encode_mov_imm64(SysNumReg, ExitNum),
+        ?ENC:encode_svc(SvcImm),
+        ?ENC:encode_brk(0),
+        {label, OkLbl},
+        ?ENC:encode_sdiv(x16, A, B),
+        ?ENC:encode_msub(Dst, x16, B, A)
+    ]);
 lower_instruction({srem, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _FS, _Fmt, _UC) ->
-    %% Load imm to x17, use x16 for quotient
-    [?ENC:encode_mov_imm64(x17, Imm),
-     ?ENC:encode_sdiv(x16, A, x17),
-     ?ENC:encode_msub(Dst, x16, x17, A)];
+    case Imm of
+        0 -> error({divide_by_zero, "Immediate divisor cannot be zero"});
+        _ -> [?ENC:encode_mov_imm64(x17, Imm),
+              ?ENC:encode_sdiv(x16, A, x17),
+              ?ENC:encode_msub(Dst, x16, x17, A)]
+    end;
 
 %% AND
 lower_instruction({and_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _FS, _Fmt, _UC) ->

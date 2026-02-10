@@ -312,17 +312,26 @@ parse_atoms(Binary) ->
         <<Count:32/signed, Rest/binary>> when Count < 0, abs(Count) < 10000 ->
             %% OTP encodes atom count with high bit set; read as signed, use abs
             %% FINDING 4 FIX: Cap absolute value to prevent resource exhaustion
-            parse_atom_list(Rest, abs(Count), []);
+            %% FINDING R43-9 FIX: Propagate errors from parse_atom_list
+            case parse_atom_list(Rest, abs(Count), []) of
+                {error, _Reason} = Error -> Error;
+                AtomList when is_list(AtomList) -> AtomList
+            end;
         <<Count:32/unsigned, Rest/binary>> when Count > 0, Count < 10000 ->
             %% Positive count (standard encoding)
-            parse_atom_list(Rest, Count, []);
+            %% FINDING R43-9 FIX: Propagate errors from parse_atom_list
+            case parse_atom_list(Rest, Count, []) of
+                {error, _Reason} = Error -> Error;
+                AtomList when is_list(AtomList) -> AtomList
+            end;
         _ ->
-            []
+            %% FINDING R43-9 FIX: Return error for invalid atom table header
+            {error, invalid_atom_table_header}
     end.
 
 parse_atom_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);
-parse_atom_list(Binary, Count, Acc) ->
+parse_atom_list(Binary, Count, Acc) when Count > 0 ->
     %% BEAM atom tables use compact-term encoding for name lengths
     %% (verified by hexdump: 0x80 = compact literal 8, not raw byte 128)
     case decode_compact_term_int(Binary) of
@@ -332,11 +341,19 @@ parse_atom_list(Binary, Count, Acc) ->
                     %% Keep atoms as binaries to avoid exhausting atom table
                     parse_atom_list(Rest2, Count - 1, [Atom | Acc]);
                 _ ->
-                    lists:reverse(Acc)
+                    %% FINDING R43-9 FIX: Return error when atom data truncated
+                    {error, {truncated_atom_table, expected_count, Count, parsed, length(Acc)}}
             end;
+        {error, Reason} ->
+            %% FINDING R43-9 FIX: Propagate decode errors
+            {error, {atom_decode_failed, Reason, expected_count, Count, parsed, length(Acc)}};
         _ ->
-            lists:reverse(Acc)
-    end.
+            %% FINDING R43-9 FIX: Return error on unexpected decode result
+            {error, {truncated_atom_table, expected_count, Count, parsed, length(Acc)}}
+    end;
+parse_atom_list(_, _, Acc) ->
+    %% FINDING R43-9 FIX: Negative count is an error
+    {error, {invalid_atom_count, parsed, length(Acc)}}.
 
 parse_imports(_Rest, 0, Acc) ->
     lists:reverse(Acc);
@@ -441,34 +458,53 @@ parse_literal_list(_, _, Acc) ->
 %% ============================================================================
 
 build_result(Chunks) ->
+    %% FINDING R43-9 FIX: Check if atoms parsing returned error
     Atoms = case maps:get('AtU8', Chunks, undefined) of
-        undefined -> maps:get('Atom', Chunks, []);
+        undefined ->
+            case maps:get('Atom', Chunks, []) of
+                {error, AtomErr} -> {error, AtomErr};
+                A -> A
+            end;
+        {error, AtU8Err} -> {error, AtU8Err};
         A -> A
     end,
 
-    Exports = maps:get('ExpT', Chunks, []),
-    Imports = maps:get('ImpT', Chunks, []),
-    Literals = maps:get('LitT', Chunks, []),
-    Strings = maps:get('StrT', Chunks, <<>>),
-    Funs = maps:get('FunT', Chunks, []),
+    case Atoms of
+        {error, AtomReason} ->
+            {error, AtomReason};
+        _ ->
+            Exports = maps:get('ExpT', Chunks, []),
+            Imports = maps:get('ImpT', Chunks, []),
+            Literals = maps:get('LitT', Chunks, []),
+            Strings = maps:get('StrT', Chunks, <<>>),
+            Funs = maps:get('FunT', Chunks, []),
 
-    CodeChunk = maps:get('Code', Chunks, #{}),
-    %% FINDING 7 FIX: Validate CodeChunk is a map before accessing
-    case is_map(CodeChunk) of
-        true ->
-            CodeBinary = maps:get(code, CodeChunk, <<>>),
-            {ok, #{
-                atoms => Atoms,
-                exports => Exports,
-                imports => Imports,
-                code => CodeBinary,
-                code_info => maps:remove(code, CodeChunk),
-                literals => Literals,
-                strings => Strings,
-                funs => Funs
-            }};
-        false ->
-            {error, {invalid_code_chunk_format, CodeChunk}}
+            %% FINDING R43-9 FIX: Check other tables for errors
+            case {Exports, Imports, Literals, Funs} of
+                {{error, ExpErr}, _, _, _} -> {error, ExpErr};
+                {_, {error, ImpErr}, _, _} -> {error, ImpErr};
+                {_, _, {error, LitErr}, _} -> {error, LitErr};
+                {_, _, _, {error, FunErr}} -> {error, FunErr};
+                _ ->
+                    CodeChunk = maps:get('Code', Chunks, #{}),
+                    %% FINDING 7 FIX: Validate CodeChunk is a map before accessing
+                    case is_map(CodeChunk) of
+                        true ->
+                            CodeBinary = maps:get(code, CodeChunk, <<>>),
+                            {ok, #{
+                                atoms => Atoms,
+                                exports => Exports,
+                                imports => Imports,
+                                code => CodeBinary,
+                                code_info => maps:remove(code, CodeChunk),
+                                literals => Literals,
+                                strings => Strings,
+                                funs => Funs
+                            }};
+                        false ->
+                            {error, {invalid_code_chunk_format, CodeChunk}}
+                    end
+            end
     end.
 
 %% ============================================================================

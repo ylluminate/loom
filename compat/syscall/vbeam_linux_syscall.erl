@@ -42,9 +42,17 @@ dispatch(SyscallNr, Args) when is_integer(SyscallNr), is_list(Args) ->
         %% CODEX R37 FINDING #4 FIX: function_clause means bad args, not unimplemented
         error:function_clause -> {error, ?EINVAL};
         error:badarg -> {error, ?EINVAL};
-        error:{invalid_args, _} -> {error, ?EINVAL}
-        %% Let exit/throw/other errors propagate
-        %% ENOSYS is reserved for truly unimplemented syscalls (default case in dispatch_impl)
+        error:{invalid_args, _} -> {error, ?EINVAL};
+        %% FINDING R43-8 FIX: Catch all exception classes to prevent service crash
+        error:Reason ->
+            logger:warning("[syscall] Error in syscall ~p: ~p", [SyscallNr, Reason]),
+            {error, ?EINVAL};
+        exit:Reason ->
+            logger:warning("[syscall] Exit in syscall ~p: ~p", [SyscallNr, Reason]),
+            {error, ?EINVAL};
+        throw:Reason ->
+            logger:warning("[syscall] Throw in syscall ~p: ~p", [SyscallNr, Reason]),
+            {error, ?EINVAL}
     end;
 %% FINDING 11 FIX: Fallback clause for malformed dispatch calls
 dispatch(_, _) ->

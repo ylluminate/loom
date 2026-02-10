@@ -18,16 +18,21 @@
 -spec lower_function(map(), term()) -> {[term()], term()}.
 lower_function(#{name := Name, body := Body, arity := _Arity,
                  spill_slots := SpillSlots,
-                 used_callee_saved := UsedCalleeSaved} = _Fn, LinkState) ->
+                 used_callee_saved := UsedCalleeSaved} = Fn, LinkState) ->
     %% CRITICAL FIX (Round 27, Finding 4): Use the used_callee_saved field computed
     %% by the register allocator, instead of recomputing with extract_regs/1.
     %% The extract_regs function is incomplete (misses instruction variants), causing
     %% some callee-saved registers to not be saved/restored in prologue/epilogue.
     %% The regalloc already computed this correctly from the allocated body.
     FrameSize = compute_frame_size(SpillSlots, UsedCalleeSaved),
+    %% CRITICAL FIX (Finding 3): Extract output format from context
+    Format = case maps:find(ctx, Fn) of
+        {ok, #{format := F}} -> F;
+        _ -> elf64  %% default to Linux convention
+    end,
     Prologue = emit_prologue(FrameSize, UsedCalleeSaved),
-    %% Thread UsedCalleeSaved through body lowering for ret instruction
-    BodyParts = lower_body(Body, Name, UsedCalleeSaved),
+    %% Thread Format and UsedCalleeSaved through body lowering
+    BodyParts = lower_body(Body, Name, Format, UsedCalleeSaved),
     %% Don't emit epilogue here — ret instructions in body handle it
     Parts = Prologue ++ BodyParts,
     {Parts, LinkState}.
@@ -100,31 +105,31 @@ emit_epilogue(_FrameSize) ->
      ?ENC:encode_ret()].
 
 %% Lower the body instructions.
-lower_body([], _FnName, _UsedCalleeSaved) -> [];
-lower_body([Inst | Rest], FnName, UsedCalleeSaved) ->
-    Parts = lower_instruction(Inst, FnName, UsedCalleeSaved),
-    Parts ++ lower_body(Rest, FnName, UsedCalleeSaved).
+lower_body([], _FnName, _Format, _UsedCalleeSaved) -> [];
+lower_body([Inst | Rest], FnName, Format, UsedCalleeSaved) ->
+    Parts = lower_instruction(Inst, FnName, Format, UsedCalleeSaved),
+    Parts ++ lower_body(Rest, FnName, Format, UsedCalleeSaved).
 
 %% Lower a single IR instruction to code parts.
 
 %% Labels
-lower_instruction({label, Name}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({label, Name}, _FnName, _Format, _UsedCalleeSaved) ->
     [{label, Name}];
 
 %% Comments (no code emitted)
-lower_instruction({comment, _}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({comment, _}, _FnName, _Format, _UsedCalleeSaved) ->
     [];
 
 %% NOP
-lower_instruction(nop, _FnName, _UsedCalleeSaved) ->
+lower_instruction(nop, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_nop()];
 
 %% MOV register to register
-lower_instruction({mov, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mov, {preg, Dst}, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_mov_rr(Dst, Src)];
 
 %% MOV immediate to register
-lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _UsedCalleeSaved) when is_integer(Imm) ->
+lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _Format, _UsedCalleeSaved) when is_integer(Imm) ->
     if Imm >= -2147483648, Imm =< 2147483647 ->
         [?ENC:encode_mov_imm32(Dst, Imm)];
        true ->
@@ -132,27 +137,27 @@ lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _UsedCalleeSaved) when i
     end;
 
 %% MOV with stack operands (spilled registers)
-lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, UsedCalleeSaved) ->
+lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _Format, UsedCalleeSaved) ->
     %% Store to stack: MOV [rbp - offset], Src
     %% FIXED: Offset must account for pushed callee-saved registers
     Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_store(rbp, Offset, Src)];
-lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, UsedCalleeSaved) ->
+lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _Format, UsedCalleeSaved) ->
     %% Load from stack: MOV Dst, [rbp - offset]
     %% FIXED: Offset must account for pushed callee-saved registers
     Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_load(Dst, rbp, Offset)];
 
 %% STORE_SPILL: Store parameter to stack (from parameter prologue)
-lower_instruction({store_spill, {preg, Src}, {stack, Slot}}, _FnName, UsedCalleeSaved) ->
+lower_instruction({store_spill, {preg, Src}, {stack, Slot}}, _FnName, _Format, UsedCalleeSaved) ->
     %% Store to stack: MOV [rbp - offset], Src
     Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_store(rbp, Offset, Src)];
 
 %% LOAD from memory
-lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Base, Off)];
-lower_instruction({load, {preg, Dst}, {stack, Slot}, Off}, _FnName, UsedCalleeSaved) ->
+lower_instruction({load, {preg, Dst}, {stack, Slot}, Off}, _FnName, _Format, UsedCalleeSaved) ->
     %% Load base from stack first, then load from it
     %% Offset must account for pushed callee-saved registers
     BaseOff = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
@@ -160,7 +165,7 @@ lower_instruction({load, {preg, Dst}, {stack, Slot}, Off}, _FnName, UsedCalleeSa
      ?ENC:encode_mov_mem_load(Dst, Dst, Off)];
 
 %% LOAD_BYTE from memory (zero-extends byte to 64-bit)
-lower_instruction({load_byte, {preg, Dst}, {preg, Base}, Off}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({load_byte, {preg, Dst}, {preg, Base}, Off}, _FnName, _Format, _UsedCalleeSaved) ->
     %% MOVZX r64, byte [Base + Off]: REX.W 0F B6 /r
     Rex = ?ENC:rex(1, ?ENC:reg_hi(Dst), 0, ?ENC:reg_hi(Base)),
     DstLo = ?ENC:reg_lo(Dst),
@@ -190,11 +195,11 @@ lower_instruction({load_byte, {preg, Dst}, {preg, Base}, Off}, _FnName, _UsedCal
     end;
 
 %% STORE to memory
-lower_instruction({store, {preg, Base}, Off, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({store, {preg, Base}, Off, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_store(Base, Off, Src)];
 
 %% STORE_BYTE to memory
-lower_instruction({store_byte, {preg, Base}, Off, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({store_byte, {preg, Base}, Off, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     Rex = 16#40 bor (?ENC:reg_hi(Src) bsl 2) bor ?ENC:reg_hi(Base),
     SrcLo = ?ENC:reg_lo(Src),
     BaseLo = ?ENC:reg_lo(Base),
@@ -230,7 +235,7 @@ lower_instruction({store_byte, {preg, Base}, Off, {preg, Src}}, _FnName, _UsedCa
     end;
 
 %% ADD
-lower_instruction({add, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({add, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     if Dst =:= A ->
         [?ENC:encode_add_rr(Dst, B)];
        Dst =:= B ->
@@ -239,7 +244,7 @@ lower_instruction({add, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
         [?ENC:encode_mov_rr(Dst, A),
          ?ENC:encode_add_rr(Dst, B)]
     end;
-lower_instruction({add, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({add, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 6): encode_add_imm uses imm32 (sign-extended).
     %% If Imm is outside [-2^31, 2^31-1], use mov_imm64 to scratch and add_rr.
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
@@ -252,10 +257,10 @@ lower_instruction({add, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalle
     end;
 
 %% SUB
-lower_instruction({sub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({sub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_sub_rr(Dst, B)];
-lower_instruction({sub, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({sub, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 6): encode_sub_imm uses imm32 (sign-extended).
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     case Imm >= -16#80000000 andalso Imm =< 16#7FFFFFFF of
@@ -267,12 +272,12 @@ lower_instruction({sub, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalle
     end;
 
 %% MUL (IMUL r64, r64)
-lower_instruction({mul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_imul_rr(Dst, B)];
 
 %% SDIV (uses rdx:rax / src -> rax=quot, rdx=rem)
-lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 4): When A == r11 and B needs saving to r11,
     %% move A to rax FIRST to prevent clobbering.
     SafeB = if B =:= rax orelse B =:= rdx -> r11; true -> B end,
@@ -299,7 +304,7 @@ lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalle
     MovDst;
 
 %% SREM (remainder is in rdx after idiv)
-lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 4): When A == r11 and B needs saving to r11,
     %% move A to rax FIRST to prevent clobbering.
     SafeB = if B =:= rax orelse B =:= rdx -> r11; true -> B end,
@@ -326,22 +331,22 @@ lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalle
     MovDst;
 
 %% AND
-lower_instruction({and_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({and_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_and_rr(Dst, B)];
 
 %% OR
-lower_instruction({or_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({or_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_or_rr(Dst, B)];
 
 %% XOR
-lower_instruction({xor_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({xor_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_xor_rr(Dst, B)];
 
 %% SHL (shift left — shift amount must be in CL register)
-lower_instruction({shl, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({shl, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% FIXED: When Dst=rcx, moving count to rcx overwrites the value to shift.
     %% Use r11 as scratch: save A to scratch, move B to rcx, shift scratch, move to Dst.
     if Dst =:= rcx, B =/= rcx ->
@@ -363,7 +368,7 @@ lower_instruction({shl, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
     end;
 
 %% SHR (logical shift right)
-lower_instruction({shr, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({shr, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% FIXED: When Dst=rcx, moving count to rcx overwrites the value to shift.
     if Dst =:= rcx, B =/= rcx ->
         [?ENC:encode_mov_rr(r11, A),
@@ -382,7 +387,7 @@ lower_instruction({shr, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
     end;
 
 %% SAR (arithmetic shift right)
-lower_instruction({sar, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({sar, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% FIXED: When Dst=rcx, moving count to rcx overwrites the value to shift.
     if Dst =:= rcx, B =/= rcx ->
         [?ENC:encode_mov_rr(r11, A),
@@ -401,19 +406,19 @@ lower_instruction({sar, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
     end;
 
 %% NEG
-lower_instruction({neg, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({neg, {preg, Dst}, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= Src -> [?ENC:encode_mov_rr(Dst, Src)]; true -> [] end,
     Parts0 ++ [?ENC:encode_neg(Dst)];
 
 %% NOT
-lower_instruction({not_, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({not_, {preg, Dst}, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= Src -> [?ENC:encode_mov_rr(Dst, Src)]; true -> [] end,
     Parts0 ++ [?ENC:encode_not(Dst)];
 
 %% CMP
-lower_instruction({cmp, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({cmp, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_cmp_rr(A, B)];
-lower_instruction({cmp, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({cmp, {preg, A}, {imm, Imm}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 6): encode_cmp_imm uses imm32 (sign-extended).
     case Imm >= -16#80000000 andalso Imm =< 16#7FFFFFFF of
         true ->
@@ -424,26 +429,26 @@ lower_instruction({cmp, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
     end;
 
 %% JMP (unconditional)
-lower_instruction({jmp, Label}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({jmp, Label}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_jmp_rel32(0),  %% placeholder offset
      {reloc, rel32, Label, -4}]; %% reloc to patch
 
 %% JCC (conditional)
-lower_instruction({jcc, Cond, Label}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({jcc, Cond, Label}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_jcc_rel32(Cond, 0),  %% placeholder
      {reloc, rel32, Label, -4}];
 
 %% CALL by symbol
-lower_instruction({call, {sym, Name}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({call, {sym, Name}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_call_rel32(0),  %% placeholder
      {reloc, rel32, Name, -4}];
 
 %% CALL indirect through register
-lower_instruction({call_indirect, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({call_indirect, {preg, Reg}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_call_reg(Reg)];
 
 %% RET
-lower_instruction(ret, _FnName, UsedCalleeSaved) ->
+lower_instruction(ret, _FnName, _Format, UsedCalleeSaved) ->
     %% CRITICAL FIX (Round 35, Finding 1): Always restore rsp from rbp.
     %% Prologue does: push rbp; mov rbp, rsp; [push callee-saved]; [sub rsp, FrameSize]
     %% Epilogue must undo this. Even when UsedCalleeSaved=[] but FrameSize>0,
@@ -467,23 +472,23 @@ lower_instruction(ret, _FnName, UsedCalleeSaved) ->
     end;
 
 %% PUSH
-lower_instruction({push, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({push, {preg, Reg}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_push(Reg)];
-lower_instruction({push, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({push, {imm, Imm}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% x86_64 PUSH imm32: 68 + imm32 (sign-extended to 64-bit)
     [?ENC:encode_push_imm32(Imm)];
 
 %% POP
-lower_instruction({pop, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({pop, {preg, Reg}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_pop(Reg)];
 
 %% LEA (load effective address, RIP-relative for data references)
-lower_instruction({lea, {preg, Dst}, {data_ref, Name}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({lea, {preg, Dst}, {data_ref, Name}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_lea_rip_rel(Dst, 0),  %% placeholder
      {reloc, rel32, Name, -4}];
 
 %% SYSCALL
-lower_instruction(syscall, _FnName, _UsedCalleeSaved) ->
+lower_instruction(syscall, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_syscall()];
 
 %%====================================================================
@@ -492,7 +497,7 @@ lower_instruction(syscall, _FnName, _UsedCalleeSaved) ->
 
 %% STRING_LIT: Load string literal address and build fat pointer.
 %% Allocates 16 bytes on heap: {ptr, len}
-lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}, Len}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}, Len}, _FnName, _Format, _UsedCalleeSaved) ->
     AllocCode = vbeam_native_alloc:emit_alloc(x86_64, Dst, 16),
     %% LEA rax, [rip + Name]  (load data address)
     LeaCode = [?ENC:encode_lea_rip_rel(rax, 0),
@@ -504,16 +509,16 @@ lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}, Len}, _FnName, _Us
     lists:flatten([AllocCode, LeaCode, StoreCode]);
 
 %% STRING_LIT (2-arg form): just LEA
-lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({string_lit, {preg, Dst}, {data_ref, Name}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_lea_rip_rel(Dst, 0),
      {reloc, rel32, Name, -4}];
 
 %% STRING_LEN: Load length from fat pointer.
-lower_instruction({string_len, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({string_len, {preg, Dst}, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Src, 8)];
 
 %% STRING_CMP: Compare two strings byte-by-byte.
-lower_instruction({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__scmp_loop_", Uid/binary>>,
     EqLbl = <<"__scmp_eq_", Uid/binary>>,
@@ -581,7 +586,7 @@ lower_instruction({string_cmp, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Use
     ]);
 
 %% STRING_CONCAT: Concatenate two strings.
-lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     CopyALbl = <<"__scat_cpA_", Uid/binary>>,
     CopyADone = <<"__scat_cpAd_", Uid/binary>>,
@@ -651,9 +656,14 @@ lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _
 %% PRINT_STR: Print string via write syscall.
 %% Saves all caller-visible registers that might hold user values.
 %% SYSCALL clobbers rcx and r11; we save those too.
-%% LIMITATION: Hardcoded to Linux syscalls (sys_write=1). macOS uses 0x2000004.
-%% TODO: Thread format through lowering context to use platform-correct syscall numbers.
-lower_instruction({print_str, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+%% CRITICAL FIX (Finding 3): Select syscall numbers based on output format.
+lower_instruction({print_str, {preg, Src}}, _FnName, Format, _UsedCalleeSaved) ->
+    %% Linux: write=1, macOS: write=0x2000004
+    SysWrite = case Format of
+        elf64 -> 1;
+        macho -> 16#2000004;
+        pe -> 1  %% UEFI uses Linux-like syscall convention
+    end,
     lists:flatten([
         %% Save registers (SYSCALL clobbers rcx, r11 in addition to args)
         ?ENC:encode_push(rdi),
@@ -667,7 +677,7 @@ lower_instruction({print_str, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_mov_mem_load(r10, Src, 0),        %% r10 = buf (ptr)
         ?ENC:encode_mov_mem_load(r8, Src, 8),         %% r8 = len
         %% write(1, buf, len)
-        ?ENC:encode_mov_imm64(rax, 1),               %% sys_write (Linux only - macOS would be 0x2000004)
+        ?ENC:encode_mov_imm64(rax, SysWrite),        %% sys_write (format-aware)
         ?ENC:encode_mov_imm64(rdi, 1),               %% fd = stdout
         ?ENC:encode_mov_rr(rsi, r10),                 %% buf
         ?ENC:encode_mov_rr(rdx, r8),                  %% len
@@ -687,7 +697,7 @@ lower_instruction({print_str, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
 %%====================================================================
 
 %% ARRAY_NEW
-lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _FnName, _Format, _UsedCalleeSaved) ->
     BufSize = ElemSize * InitCap,
     lists:flatten([
         vbeam_native_alloc:emit_alloc(x86_64, rax, BufSize), %% elem buffer in rax
@@ -703,12 +713,18 @@ lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _Fn
 
 %% ARRAY_GET (register index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemSize}},
-                  _FnName, _UsedCalleeSaved) ->
+                  _FnName, Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 2): Enforce 64-bit element size for bare-metal OS.
     %% All values are tagged 64-bit words. Smaller sizes cause OOB reads/writes.
     case ElemSize of
         8 -> ok;
         _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
+    %% CRITICAL FIX (Finding 3): Format-aware exit syscall
+    SysExit = case Format of
+        elf64 -> 60;
+        macho -> 16#2000001;
+        pe -> 60
     end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_ok_", Uid/binary>>,
@@ -719,9 +735,8 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
         ?ENC:encode_jcc_rel32(ltu, 0),                       %% jump if unsigned-less-than (idx < len)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
-        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
+        ?ENC:encode_mov_imm64(rax, SysExit),                 %% sys_exit (format-aware)
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -737,11 +752,17 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
 
 %% ARRAY_GET (immediate index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSize}},
-                  _FnName, _UsedCalleeSaved) ->
+                  _FnName, Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
     case ElemSize of
         8 -> ok;
         _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
+    %% CRITICAL FIX (Finding 3): Format-aware exit syscall
+    SysExit = case Format of
+        elf64 -> 60;
+        macho -> 16#2000001;
+        pe -> 60
     end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_imm_ok_", Uid/binary>>,
@@ -767,7 +788,7 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 
 %% ARRAY_SET (immediate index)
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName, _UsedCalleeSaved) ->
+                  _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
     case ElemSize of
         8 -> ok;
@@ -797,7 +818,7 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 
 %% ARRAY_SET (register index)
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName, _UsedCalleeSaved) ->
+                  _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
     case ElemSize of
         8 -> ok;
@@ -829,12 +850,12 @@ lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemS
     ]);
 
 %% ARRAY_LEN
-lower_instruction({array_len, {preg, Dst}, {preg, Arr}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({array_len, {preg, Dst}, {preg, Arr}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Arr, 8)];
 
 %% ARRAY_APPEND
 lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, ElemSize}},
-                  _FnName, _UsedCalleeSaved) ->
+                  _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 1): Enforce 64-bit element size
     case ElemSize of
         8 -> ok;
@@ -925,20 +946,20 @@ lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, El
 %% Phase 6c: Struct instructions
 %%====================================================================
 
-lower_instruction({struct_new, {preg, Dst}, {imm, Size}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({struct_new, {preg, Dst}, {imm, Size}}, _FnName, _Format, _UsedCalleeSaved) ->
     vbeam_native_alloc:emit_alloc(x86_64, Dst, Size);
 
-lower_instruction({field_get, {preg, Dst}, {preg, Struct}, {imm, Offset}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({field_get, {preg, Dst}, {preg, Struct}, {imm, Offset}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Struct, Offset)];
 
-lower_instruction({field_set, {preg, Struct}, {imm, Offset}, {preg, Val}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({field_set, {preg, Struct}, {imm, Offset}, {preg, Val}}, _FnName, _Format, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_store(Struct, Offset, Val)];
 
 %%====================================================================
 %% Phase 6d: Map instructions
 %%====================================================================
 
-lower_instruction({map_new, {preg, Dst}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({map_new, {preg, Dst}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 3): Increased from 8 to 64 to delay capacity overflow.
     %% No reallocation path exists yet - UD2 trap at overflow is safety net.
     InitCap = 64,
@@ -955,7 +976,7 @@ lower_instruction({map_new, {preg, Dst}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_mov_mem_store(Dst, 16, rcx)
     ]);
 
-lower_instruction({map_get, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({map_get, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, _Format, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__mg_loop_", Uid/binary>>,
     FoundLbl = <<"__mg_found_", Uid/binary>>,
@@ -998,12 +1019,14 @@ lower_instruction({map_get, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, _Us
     ]);
 
 lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
-                  _FnName, _UsedCalleeSaved) ->
+                  _FnName, _Format, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__mp_loop_", Uid/binary>>,
     FoundLbl = <<"__mp_found_", Uid/binary>>,
     AppendLbl = <<"__mp_append_", Uid/binary>>,
     CapFullLbl = <<"__mp_capfull_", Uid/binary>>,
+    CopyLoopLbl = <<"__mp_copy_", Uid/binary>>,
+    CopyDoneLbl = <<"__mp_cpdn_", Uid/binary>>,
     DoneLbl = <<"__mp_done_", Uid/binary>>,
     lists:flatten([
         ?ENC:encode_mov_mem_load(rsi, Map, 0),   %% entries ptr
@@ -1037,11 +1060,12 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         {reloc, rel32, DoneLbl, -4},
 
         {label, AppendLbl},
-        %% Bounds check: if len >= cap, fail (growth would go here)
+        %% Bounds check: if len >= cap, grow the map
         ?ENC:encode_cmp_rr(rdx, rcx),
         ?ENC:encode_jcc_rel32(ge, 0),
         {reloc, rel32, CapFullLbl, -4},
 
+        %% Space available: append entry
         ?ENC:encode_mov_imm64(r8, 16),
         ?ENC:encode_mov_rr(r9, rdx),
         ?ENC:encode_imul_rr(r9, r8),
@@ -1055,18 +1079,66 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         {reloc, rel32, DoneLbl, -4},
 
         {label, CapFullLbl},
-        %% CRITICAL FIX #10 + Finding 3: Map capacity exhausted - trap.
-        %% InitCap bumped to 64 (from 8) to delay overflow, but no reallocation path exists.
-        %% UD2 traps immediately rather than silently corrupting data.
-        %% TODO: implement map growth/reallocation when capacity is reached.
-        <<16#0F:8, 16#0B:8>>,  %% UD2 opcode
-        %% (execution never reaches here after UD2 trap)
+        %% CRITICAL FIX (Finding 5): Implement map growth
+        %% Save Key/Val/Map (they might be clobbered by alloc)
+        ?ENC:encode_push(Key),
+        ?ENC:encode_push(Val),
+        ?ENC:encode_push(Map),
+        %% NewCap = OldCap * 2
+        ?ENC:encode_mov_rr(r13, rcx),
+        ?ENC:encode_shl_imm(r13, 1),  %% r13 = newcap
+        %% Allocate new buffer: newcap * 16 bytes
+        ?ENC:encode_mov_rr(r12, r13),
+        ?ENC:encode_shl_imm(r12, 4),  %% r12 = newcap * 16
+        vbeam_native_alloc:emit_alloc(x86_64, r14, r12),  %% r14 = new buffer ptr
+        %% Restore Map/Val/Key
+        ?ENC:encode_pop(Map),
+        ?ENC:encode_pop(Val),
+        ?ENC:encode_pop(Key),
+        %% Reload rsi (old ptr), rdx (len), rcx (old cap)
+        ?ENC:encode_mov_mem_load(rsi, Map, 0),
+        ?ENC:encode_mov_mem_load(rdx, Map, 8),
+        %% Copy old entries to new buffer
+        ?ENC:encode_mov_imm64(rdi, 0),  %% copy index
+        {label, CopyLoopLbl},
+        ?ENC:encode_cmp_rr(rdi, rdx),
+        ?ENC:encode_jcc_rel32(ge, 0),
+        {reloc, rel32, CopyDoneLbl, -4},
+        %% Copy entry[i]: 16 bytes
+        ?ENC:encode_mov_imm64(r8, 16),
+        ?ENC:encode_mov_rr(r9, rdi),
+        ?ENC:encode_imul_rr(r9, r8),
+        ?ENC:encode_mov_rr(r10, rsi),
+        ?ENC:encode_add_rr(r10, r9),   %% r10 = &old[i]
+        ?ENC:encode_mov_rr(r11, r14),
+        ?ENC:encode_add_rr(r11, r9),   %% r11 = &new[i]
+        ?ENC:encode_mov_mem_load(rax, r10, 0),
+        ?ENC:encode_mov_mem_store(r11, 0, rax),
+        ?ENC:encode_mov_mem_load(rax, r10, 8),
+        ?ENC:encode_mov_mem_store(r11, 8, rax),
+        ?ENC:encode_add_imm(rdi, 1),
+        ?ENC:encode_jmp_rel32(0),
+        {reloc, rel32, CopyLoopLbl, -4},
+        {label, CopyDoneLbl},
+        %% Update map header: ptr=r14, len=rdx, cap=r13
+        ?ENC:encode_mov_mem_store(Map, 0, r14),
+        ?ENC:encode_mov_mem_store(Map, 16, r13),
+        %% Now append the new entry
+        ?ENC:encode_mov_imm64(r8, 16),
+        ?ENC:encode_mov_rr(r9, rdx),
+        ?ENC:encode_imul_rr(r9, r8),
+        ?ENC:encode_mov_rr(r10, r14),
+        ?ENC:encode_add_rr(r10, r9),
+        ?ENC:encode_mov_mem_store(r10, 0, Key),
+        ?ENC:encode_mov_mem_store(r10, 8, Val),
+        ?ENC:encode_add_imm(rdx, 1),
+        ?ENC:encode_mov_mem_store(Map, 8, rdx),
 
         {label, DoneLbl},
         ?ENC:encode_mov_rr(Dst, Map)
     ]);
 
-lower_instruction({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, _Format, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     LoopLbl = <<"__md_loop_", Uid/binary>>,
     FoundLbl = <<"__md_found_", Uid/binary>>,
@@ -1131,7 +1203,7 @@ lower_instruction({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName, 
 %% Phase 6e: Float instructions (placeholder)
 %%====================================================================
 
-lower_instruction({int_to_float, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({int_to_float, {preg, Dst}, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% CVTSI2SD xmm0, Src; MOVQ Dst, xmm0
     %% For now, emit placeholder NOPs (TODO: proper FPU encoding)
     _SrcCode = ?ENC:reg_code(Src),
@@ -1146,7 +1218,7 @@ lower_instruction({int_to_float, {preg, Dst}, {preg, Src}}, _FnName, _UsedCallee
     Movq = <<16#66:8, Rex2:8, 16#0F:8, 16#7E:8, ModRM2:8>>,
     [Cvt, Movq];
 
-lower_instruction({float_to_int, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({float_to_int, {preg, Dst}, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     %% MOVQ xmm0, Src; CVTTSD2SI Dst, xmm0
     Rex1 = ?ENC:rex(1, 0, 0, ?ENC:reg_hi(Src)),
     ModRM1 = ?ENC:modrm(2#11, 0, ?ENC:reg_lo(Src)),
@@ -1161,7 +1233,7 @@ lower_instruction({float_to_int, {preg, Dst}, {preg, Src}}, _FnName, _UsedCallee
 %%====================================================================
 
 lower_instruction({method_call, {preg, Dst}, ReceiverType, MethodName, Args},
-                  _FnName, UsedCalleeSaved) when is_binary(ReceiverType),
+                  _FnName, _Format, UsedCalleeSaved) when is_binary(ReceiverType),
                                 is_binary(MethodName),
                                 is_list(Args) ->
     %% FIXED BUG #8: Guard against >6 arguments (stack args not yet supported)
@@ -1188,7 +1260,7 @@ lower_instruction({method_call, {preg, Dst}, ReceiverType, MethodName, Args},
 
 %% INT_TO_STR: Convert integer to string (fat pointer).
 %% Uses a stack buffer for digit extraction, then copies to heap.
-lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _Format, _UsedCalleeSaved) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     NonZeroLbl = <<"__its_nz_", Uid/binary>>,
     PositiveLbl = <<"__its_pos_", Uid/binary>>,
@@ -1335,7 +1407,7 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
     ]);
 
 %% FLOAT_TO_STR: Simplified — convert float to int, then int to string.
-lower_instruction({float_to_str, {preg, Dst}, {preg, Src}}, FnName, _UsedCalleeSaved) ->
+lower_instruction({float_to_str, {preg, Dst}, {preg, Src}}, FnName, Format, _UsedCalleeSaved) ->
     %% MOVQ xmm0, Src; CVTTSD2SI r10, xmm0; then int_to_str(Dst, r10)
     Rex1 = ?ENC:rex(1, 0, 0, ?ENC:reg_hi(Src)),
     ModRM1 = ?ENC:modrm(2#11, 0, ?ENC:reg_lo(Src)),
@@ -1343,30 +1415,30 @@ lower_instruction({float_to_str, {preg, Dst}, {preg, Src}}, FnName, _UsedCalleeS
     Rex2 = ?ENC:rex(1, ?ENC:reg_hi(r10), 0, 0),
     ModRM2 = ?ENC:modrm(2#11, ?ENC:reg_lo(r10), 0),
     Cvt = <<16#F2:8, Rex2:8, 16#0F:8, 16#2C:8, ModRM2:8>>,
-    [Movq, Cvt] ++ lower_instruction({int_to_str, {preg, Dst}, {preg, r10}}, FnName, _UsedCalleeSaved);
+    [Movq, Cvt] ++ lower_instruction({int_to_str, {preg, Dst}, {preg, r10}}, FnName, Format, _UsedCalleeSaved);
 
 %%====================================================================
 %% Float arithmetic x86_64
 %%====================================================================
 
 %% FADD: MOVQ xmm0, A; MOVQ xmm1, B; ADDSD xmm0, xmm1; MOVQ Dst, xmm0
-lower_instruction({fadd, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({fadd, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#58:8>>);
 
 %% FSUB
-lower_instruction({fsub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({fsub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#5C:8>>);
 
 %% FMUL
-lower_instruction({fmul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({fmul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#59:8>>);
 
 %% FDIV
-lower_instruction({fdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({fdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _Format, _UsedCalleeSaved) ->
     emit_float_binop_x86(Dst, A, B, <<16#F2:8, 16#0F:8, 16#5E:8>>);
 
 %% RAW bytes (inline asm)
-lower_instruction({raw, Bytes}, _FnName, _UsedCalleeSaved) when is_binary(Bytes) ->
+lower_instruction({raw, Bytes}, _FnName, _Format, _UsedCalleeSaved) when is_binary(Bytes) ->
     [Bytes];
 
 %% PRINT_INT — expand to full integer-to-stdout routine for x86_64.
@@ -1381,7 +1453,13 @@ lower_instruction({raw, Bytes}, _FnName, _UsedCalleeSaved) when is_binary(Bytes)
 %%   rbx = value being printed (preserved callee-saved, save/restore)
 %%   r12 = buffer position index (preserved callee-saved, save/restore)
 %%   r13 = temp (preserved callee-saved, save/restore)
-lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({print_int, {preg, Reg}}, _FnName, Format, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 3): Format-aware syscall numbers
+    SysWrite = case Format of
+        elf64 -> 1;
+        macho -> 16#2000004;
+        pe -> 1
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     NonZeroLbl = <<"__pi_nz_", Uid/binary>>,
     PositiveLbl = <<"__pi_pos_", Uid/binary>>,
@@ -1441,9 +1519,8 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         {reloc, rel32, PositiveLbl, -4},
 
         %% Negative: write '-' sign to stdout
-        %% LIMITATION: Hardcoded to Linux syscalls (sys_write=1). macOS uses 0x2000004.
         encode_mov_byte_to_stack(0, $-),  %% store '-' at rsp+0
-        ?ENC:encode_mov_imm64(rax, 1),    %% sys_write (Linux only - macOS would be 0x2000004)
+        ?ENC:encode_mov_imm64(rax, SysWrite),  %% sys_write (format-aware)
         ?ENC:encode_mov_imm64(rdi, 1),    %% fd = stdout
         ?ENC:encode_mov_rr(rsi, rsp),      %% buf = rsp+0
         ?ENC:encode_mov_imm64(rdx, 1),    %% len = 1
@@ -1502,7 +1579,7 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_add_rr(rsi, r12),          %% rsi = rsp + r12 (buf start)
         ?ENC:encode_mov_imm64(rdx, 128),
         ?ENC:encode_sub_rr(rdx, r12),          %% rdx = 128 - r12 (length)
-        ?ENC:encode_mov_imm64(rax, 1),         %% sys_write
+        ?ENC:encode_mov_imm64(rax, SysWrite),  %% sys_write (format-aware)
         ?ENC:encode_mov_imm64(rdi, 1),         %% fd = stdout
         ?ENC:encode_syscall(),
 
@@ -1526,12 +1603,12 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
 
 %% CRITICAL FIX (Finding 2): print_float not yet implemented.
 %% Emit clear error rather than crashing assembly with raw IR tuples.
-lower_instruction({print_float, {preg, _Reg}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({print_float, {preg, _Reg}}, _FnName, _Format, _UsedCalleeSaved) ->
     error({print_float_not_yet_implemented,
            "print_float requires float_to_str lowering which is not yet complete"});
 
 %% Catch-all for unhandled instructions
-lower_instruction(Inst, _FnName, _UsedCalleeSaved) ->
+lower_instruction(Inst, _FnName, _Format, _UsedCalleeSaved) ->
     io:format(standard_error, "ERROR: unhandled x86_64 instruction: ~p~n", [Inst]),
     %% Emit ud2 (illegal instruction trap) so it crashes predictably
     [<<16#0F:8, 16#0B:8>>].

@@ -111,7 +111,8 @@ ring_size(#{head := Head, tail := Tail}) ->
     ring_buffer :: map(),
     handlers :: #{non_neg_integer() => pid()},
     monitors :: #{reference() => non_neg_integer()},  % monitor_ref => irq_num
-    pending_counts :: #{non_neg_integer() => non_neg_integer()}  % irq_num => pending_count
+    pending_counts :: #{non_neg_integer() => non_neg_integer()},  % irq_num => pending_count
+    tokens :: #{non_neg_integer() => reference() | undefined}  % FINDING R43-6: irq_num => capability_token
 }).
 
 -define(MAX_PENDING_PER_IRQ, 1000).
@@ -125,11 +126,16 @@ ring_size(#{head := Head, tail := Tail}) ->
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Register a PID to handle IRQ N.
-%% Only one handler per IRQ number.
+%% @doc Register a PID to handle IRQ N (2-arg version - no token).
 -spec register_handler(non_neg_integer(), pid()) -> ok.
 register_handler(IrqNum, Pid) when is_integer(IrqNum), IrqNum >= 0, IrqNum =< 255, is_pid(Pid) ->
     gen_server:call(?MODULE, {register_handler, IrqNum, Pid}).
+
+%% @doc Register a PID to handle IRQ N (3-arg version - with token for authenticated delivery).
+%% FINDING R43-6 FIX: Accept capability token for authenticated delivery
+-spec register_handler(non_neg_integer(), pid(), reference()) -> ok.
+register_handler(IrqNum, Pid, Token) when is_integer(IrqNum), IrqNum >= 0, IrqNum =< 255, is_pid(Pid), is_reference(Token) ->
+    gen_server:call(?MODULE, {register_handler, IrqNum, Pid, Token}).
 
 %% @doc Unregister handler for IRQ N.
 -spec unregister_handler(non_neg_integer()) -> ok.
@@ -263,7 +269,7 @@ isr_ring_buffer_write(IrqNum) ->
 
 init([]) ->
     RingBuffer = ring_new(?DEFAULT_RING_SIZE),
-    {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}, pending_counts = #{}}}.
+    {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}, pending_counts = #{}, tokens = #{}}}.
 
 handle_call({register_handler, IrqNum, Pid}, From, #state{handlers = Handlers, monitors = Monitors} = State) ->
     %% FINDING 5 FIX: Authorization check — caller must register itself (CallerPid =:= Pid)
@@ -271,7 +277,17 @@ handle_call({register_handler, IrqNum, Pid}, From, #state{handlers = Handlers, m
     {CallerPid, _Tag} = From,
     case CallerPid =:= Pid of
         true ->
-            register_handler_impl(IrqNum, Pid, Handlers, Monitors, State);
+            register_handler_impl(IrqNum, Pid, undefined, Handlers, Monitors, State);
+        false ->
+            {reply, {error, unauthorized_pid_mismatch}, State}
+    end;
+
+%% FINDING R43-6 FIX: Accept token for authenticated IRQ delivery
+handle_call({register_handler, IrqNum, Pid, Token}, From, #state{handlers = Handlers, monitors = Monitors} = State) ->
+    {CallerPid, _Tag} = From,
+    case CallerPid =:= Pid of
+        true ->
+            register_handler_impl(IrqNum, Pid, Token, Handlers, Monitors, State);
         false ->
             {reply, {error, unauthorized_pid_mismatch}, State}
     end;
@@ -313,10 +329,11 @@ handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Hand
 handle_call(get_handlers, _From, #state{handlers = Handlers} = State) ->
     {reply, Handlers, State};
 
-handle_call(tick, _From, #state{ring_buffer = RingBuf, handlers = Handlers, pending_counts = PendingCounts} = State) ->
+handle_call(tick, _From, #state{ring_buffer = RingBuf, handlers = Handlers, pending_counts = PendingCounts, tokens = Tokens} = State) ->
     {Events, NewRingBuf} = ring_pop_all(RingBuf),
 
     %% FINDING 8 FIX: Deliver with bounded mailbox tracking
+    %% FINDING R43-6 FIX: Include capability token in IRQ delivery if registered
     {DeliveredCount, DroppedCount, NewPendingCounts} = lists:foldl(
         fun({IrqNum, Timestamp}, {DeliveredAcc, DroppedAcc, PendingAcc}) ->
             case maps:get(IrqNum, Handlers, undefined) of
@@ -328,7 +345,13 @@ handle_call(tick, _From, #state{ring_buffer = RingBuf, handlers = Handlers, pend
                     CurrentPending = maps:get(IrqNum, PendingAcc, 0),
                     case is_process_alive(Pid) andalso (CurrentPending < ?MAX_PENDING_PER_IRQ) of
                         true ->
-                            Pid ! {irq, IrqNum, Timestamp},
+                            %% Send with token if registered, else legacy 3-tuple
+                            case maps:get(IrqNum, Tokens, undefined) of
+                                undefined ->
+                                    Pid ! {irq, IrqNum, Timestamp};
+                                Token ->
+                                    Pid ! {irq, IrqNum, Timestamp, Token}
+                            end,
                             {DeliveredAcc + 1, DroppedAcc, PendingAcc#{IrqNum => CurrentPending + 1}};
                         false ->
                             %% Handler dead or mailbox full, drop event
@@ -402,11 +425,12 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% BUG 10 FIX: Helper function for actual registration logic
-register_handler_impl(IrqNum, Pid, Handlers, Monitors, State) ->
+%% FINDING R43-6 FIX: Accept optional token parameter
+register_handler_impl(IrqNum, Pid, Token, Handlers, Monitors, State) ->
     %% Check if an existing handler is registered for this IRQ
-    {CleanedMonitors, CleanedHandlers} = case maps:get(IrqNum, Handlers, undefined) of
+    {CleanedMonitors, CleanedHandlers, CleanedTokens} = case maps:get(IrqNum, Handlers, undefined) of
         undefined ->
-            {Monitors, Handlers};
+            {Monitors, Handlers, State#state.tokens};
         _OldPid ->
             %% Find and demonitor the old handler's monitor ref
             OldMonitorRef = maps:fold(fun(Ref, Irq, Acc) ->
@@ -417,10 +441,10 @@ register_handler_impl(IrqNum, Pid, Handlers, Monitors, State) ->
             end, undefined, Monitors),
             case OldMonitorRef of
                 undefined ->
-                    {Monitors, Handlers};
+                    {Monitors, Handlers, State#state.tokens};
                 Ref ->
                     demonitor(Ref, [flush]),
-                    {maps:remove(Ref, Monitors), maps:remove(IrqNum, Handlers)}
+                    {maps:remove(Ref, Monitors), maps:remove(IrqNum, Handlers), maps:remove(IrqNum, State#state.tokens)}
             end
     end,
 
@@ -431,5 +455,10 @@ register_handler_impl(IrqNum, Pid, Handlers, Monitors, State) ->
     %% FINDING 5 FIX: Reset pending count when replacing handler
     PendingCounts = State#state.pending_counts,
     NewPendingCounts = maps:put(IrqNum, 0, PendingCounts),
-    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts}}.
+    %% FINDING R43-6 FIX: Store token if provided
+    NewTokens = case Token of
+        undefined -> CleanedTokens;
+        _ -> CleanedTokens#{IrqNum => Token}
+    end,
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts, tokens = NewTokens}}.
 

@@ -359,6 +359,11 @@ is_call_instruction({print_float, _}) -> true;
 is_call_instruction({int_to_str, _, _}) -> true;
 %% CRITICAL FIX (Finding 4): float_to_str expands to int_to_str which clobbers caller-saved regs
 is_call_instruction({float_to_str, _, _}) -> true;
+%% CRITICAL FIX (Finding 2): Pseudo-ops that expand to long sequences clobbering caller-saved regs
+is_call_instruction({string_concat, _, _, _}) -> true;
+is_call_instruction({string_cmp, _, _, _}) -> true;
+is_call_instruction({array_append, _, _, _}) -> true;
+is_call_instruction({array_append, _, _, _, _}) -> true;
 is_call_instruction(_) -> false.
 
 %% Check if a vreg's live interval spans any call position.
@@ -701,6 +706,8 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
         %% Common opcodes that have no vreg defs (calls, branches, prints, etc.)
         {call, _, _} -> {extract_vregs_from_tuple(Inst), []};
         {call, _, _, _} -> {extract_vregs_from_tuple(Inst), []};
+        %% CRITICAL FIX (Finding 1): call_indirect target is a USE, no defs
+        {call_indirect, Target} -> {[Target], []};
         {ret, _} -> {extract_vregs_from_tuple(Inst), []};
         {jmp, _} -> {[], []};
         {jcc, _, _, _} -> {extract_vregs_from_tuple(Inst), []};

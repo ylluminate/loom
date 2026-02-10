@@ -269,6 +269,14 @@ init(Config) ->
     %% Codex R34 Finding #2: Generate unforgeable capability token for IRQ authentication
     IrqCapabilityToken = make_ref(),
 
+    %% FINDING R43-6 FIX: Register as IRQ 32 handler with the bridge, passing token
+    case IrqBridgePid of
+        undefined ->
+            ok;  % IRQ bridge not started yet - will register later
+        _ ->
+            vbeam_irq_bridge:register_handler(?IRQ_TIMER, self(), IrqCapabilityToken)
+    end,
+
     State = #state{
         config = Config,
         processes = #{?IDLE_PID => IdleProcess},
