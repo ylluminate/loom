@@ -595,16 +595,18 @@ lower_instruction({print_str, {preg, Src}}, _FnName, _FS, Fmt, _UC) ->
         _     -> {x8, 64, 0}
     end,
     lists:flatten([
-        %% Save registers we'll clobber (x0, x1, x2, x19, x20)
-        %% Stack frame: 48 bytes (16-aligned)
+        %% Save registers we'll clobber (x0, x1, x2, x8, x19, x20)
+        %% Stack frame: 56 bytes (16-aligned to 64)
         %%   [sp+0..15]  = x19, x20 (via STP)
         %%   [sp+16]     = x0
         %%   [sp+24]     = x1
         %%   [sp+32]     = x2
-        ?ENC:encode_stp_pre(x19, x20, sp, -48),
+        %%   [sp+40]     = SysNumReg (x8 or x16)
+        ?ENC:encode_stp_pre(x19, x20, sp, -64),
         ?ENC:encode_str(x0, sp, 16),
         ?ENC:encode_str(x1, sp, 24),
         ?ENC:encode_str(x2, sp, 32),
+        ?ENC:encode_str(SysNumReg, sp, 40),
 
         %% Load string data into temps first (Src could be x0, x1, or x2!)
         ?ENC:encode_ldr(x19, Src, 0),  %% x19 = buf (ptr)
@@ -616,10 +618,11 @@ lower_instruction({print_str, {preg, Src}}, _FnName, _FS, Fmt, _UC) ->
         ?ENC:encode_svc(SvcImm),
 
         %% Restore
+        ?ENC:encode_ldr(SysNumReg, sp, 40),
         ?ENC:encode_ldr(x2, sp, 32),
-        ?ENC:encode_ldr(x0, sp, 16),
         ?ENC:encode_ldr(x1, sp, 24),
-        ?ENC:encode_ldp_post(x19, x20, sp, 48)
+        ?ENC:encode_ldr(x0, sp, 16),
+        ?ENC:encode_ldp_post(x19, x20, sp, 64)
     ]);
 
 %%====================================================================
@@ -942,10 +945,49 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         {reloc, arm64_branch26, DoneLbl, -4},
 
         {label, CapFullLbl},
-        %% FIXME: Map capacity exhausted - should grow/reallocate here
-        %% TODO: implement map growth when capacity is reached
-        %% For now: trap via supervisor call - capacity-full is hard limit
-        ?ENC:encode_svc(16#FFFF),                      %% trap: map capacity full
+        %% Map capacity exhausted - grow and reallocate
+        %% Double capacity, allocate new buffer, copy entries
+        ?ENC:encode_add_rrr(x11, x11, x11),            %% new_cap = cap * 2
+        ?ENC:encode_mov_imm64(x13, 16),
+        ?ENC:encode_mul(x14, x11, x13),                %% new_size = new_cap * 16
+        %% Allocate new buffer
+        ?ENC:encode_mov_rr(x12, x28),                  %% x12 = new_buf
+        ?ENC:encode_add_imm(x15, x14, 7),
+        ?ENC:encode_mov_imm64(x17, -8),
+        ?ENC:encode_and_rrr(x15, x15, x17),
+        ?ENC:encode_add_rrr(x28, x28, x15),            %% bump heap
+        %% Copy old entries byte-by-byte
+        ?ENC:encode_mov_imm64(x13, 16),
+        ?ENC:encode_mul(x15, x10, x13),                %% old_size = len * 16 bytes
+        ?ENC:encode_mov_imm64(x14, 0),                 %% copy index
+        %% Copy loop
+        {label, <<"__mp_cpy_", Uid/binary>>},
+        ?ENC:encode_cmp_rr(x14, x15),
+        ?ENC:encode_b_cond(ge, 0),
+        {reloc, arm64_cond_branch19, <<"__mp_cpyd_", Uid/binary>>, -4},
+        ?ENC:encode_add_rrr(x16, x9, x14),
+        ?ENC:encode_ldrb(x16, x16, 0),
+        ?ENC:encode_add_rrr(x17, x12, x14),
+        ?ENC:encode_strb(x16, x17, 0),
+        ?ENC:encode_add_imm(x14, x14, 1),
+        ?ENC:encode_b(0),
+        {reloc, arm64_branch26, <<"__mp_cpy_", Uid/binary>>, -4},
+        {label, <<"__mp_cpyd_", Uid/binary>>},
+        %% Update map header with new buffer
+        ?ENC:encode_mov_rr(x9, x12),                   %% ptr = new_buf
+        ?ENC:encode_str(x12, Map, 0),                  %% map.ptr = new_buf
+        ?ENC:encode_str(x11, Map, 16),                 %% map.cap = new_cap
+        %% Fall through to store entry in new buffer
+
+        %% Store new entry at end (common path after growth)
+        {label, <<"__mp_store_", Uid/binary>>},
+        ?ENC:encode_mov_imm64(x13, 16),
+        ?ENC:encode_mul(x13, x10, x13),                %% offset = len * 16
+        ?ENC:encode_add_rrr(x14, x9, x13),             %% entry addr in (possibly new) buf
+        ?ENC:encode_str(Key, x14, 0),                  %% entry.key = Key
+        ?ENC:encode_str(Val, x14, 8),                  %% entry.value = Val
+        ?ENC:encode_add_imm(x10, x10, 1),
+        ?ENC:encode_str(x10, Map, 8),                  %% len++
 
         {label, DoneLbl},
         ?ENC:encode_mov_rr(Dst, Map)                   %% return same map
@@ -1351,25 +1393,95 @@ build_arg_moves_arm64([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
 build_arg_moves_arm64(_, []) -> [].
 
 break_cycles_and_emit_arm64(Moves, NumCalleeSaved) ->
-    %% Detect cycles: if a destination is used as a source later
-    Dsts = [Dst || {Dst, _} <- Moves],
-    Srcs = [{Src, Dst} || {Dst, {preg, Src}} <- Moves],
-    Cycles = [{Src, Dst} || {Src, Dst} <- Srcs, lists:member(Src, Dsts)],
-    case Cycles of
+    %% Full cycle decomposition: find strongly connected components
+    %% Build adjacency map for cycle detection
+    AdjMap = lists:foldl(fun({Dst, {preg, Src}}, Acc) ->
+        maps:put(Dst, Src, Acc);
+    (_, Acc) -> Acc end, #{}, Moves),
+
+    %% Find all cycles
+    AllCycles = find_all_cycles(AdjMap),
+
+    case AllCycles of
         [] ->
             %% No cycles — emit directly
             [emit_move_arm64(Dst, Src, NumCalleeSaved) || {Dst, Src} <- Moves];
         _ ->
-            %% Break cycle: use x16 as temp for first conflicting move
-            [{FirstSrc, FirstDst} | _] = Cycles,
-            %% Save first source to x16
-            PreMoves = [?ENC:encode_mov_rr(x16, FirstSrc)],
-            %% Emit other moves (excluding the one we saved)
-            OtherMoves = [emit_move_arm64(Dst, Src, NumCalleeSaved) || {Dst, Src} <- Moves, Dst =/= FirstDst],
-            %% Restore from x16 to first destination
-            PostMoves = [?ENC:encode_mov_rr(FirstDst, x16)],
-            PreMoves ++ OtherMoves ++ PostMoves
+            %% Break each cycle independently using x16 as temp
+            %% Process moves, breaking cycles as we go
+            break_each_cycle(Moves, AllCycles, NumCalleeSaved)
     end.
+
+%% Find all register cycles in the move graph
+find_all_cycles(AdjMap) ->
+    Nodes = maps:keys(AdjMap),
+    find_cycles_from_nodes(Nodes, AdjMap, []).
+
+find_cycles_from_nodes([], _AdjMap, Acc) -> Acc;
+find_cycles_from_nodes([Node | Rest], AdjMap, Acc) ->
+    case find_cycle_from(Node, AdjMap, [Node]) of
+        false -> find_cycles_from_nodes(Rest, AdjMap, Acc);
+        Cycle -> find_cycles_from_nodes(Rest, AdjMap, [Cycle | Acc])
+    end.
+
+find_cycle_from(Node, AdjMap, Path) ->
+    case maps:find(Node, AdjMap) of
+        error -> false;
+        {ok, Next} ->
+            case lists:member(Next, Path) of
+                true ->
+                    %% Found cycle
+                    extract_cycle(Next, Path);
+                false ->
+                    find_cycle_from(Next, AdjMap, [Next | Path])
+            end
+    end.
+
+extract_cycle(Node, Path) ->
+    extract_cycle(Node, Path, []).
+extract_cycle(Node, [Node | _Rest], Acc) ->
+    [Node | Acc];
+extract_cycle(Node, [H | Rest], Acc) ->
+    extract_cycle(Node, Rest, [H | Acc]).
+
+%% Break each cycle by saving first element to x16, emitting moves, then restoring
+break_each_cycle(Moves, Cycles, NumCalleeSaved) ->
+    %% For each cycle, break it by saving first reg to x16
+    CycleSet = lists:flatten(Cycles),
+    {CyclicMoves, AcyclicMoves} = lists:partition(
+        fun({Dst, _}) -> lists:member(Dst, CycleSet) end, Moves),
+
+    %% Emit acyclic moves first
+    AcyclicCode = [emit_move_arm64(Dst, Src, NumCalleeSaved)
+                   || {Dst, Src} <- AcyclicMoves],
+
+    %% Break each cycle independently
+    CyclicCode = lists:flatmap(fun(Cycle) ->
+        break_single_cycle(Cycle, CyclicMoves, NumCalleeSaved)
+    end, Cycles),
+
+    AcyclicCode ++ CyclicCode.
+
+break_single_cycle([First | _] = Cycle, AllMoves, NumCalleeSaved) ->
+    %% Save first register to x16
+    SaveCode = [?ENC:encode_mov_rr(x16, First)],
+
+    %% Emit moves for this cycle (except the closing move)
+    CycleMoves = [{Dst, Src} || {Dst, Src} <- AllMoves,
+                                 lists:member(Dst, Cycle)],
+
+    %% Find the move that closes the cycle (dest = First)
+    {_ClosingMove, OtherMoves} = lists:partition(
+        fun({Dst, _}) -> Dst =:= First end, CycleMoves),
+
+    %% Emit other moves
+    OtherCode = [emit_move_arm64(Dst, Src, NumCalleeSaved)
+                 || {Dst, Src} <- OtherMoves],
+
+    %% Close cycle by moving x16 to first destination
+    CloseCode = [?ENC:encode_mov_rr(First, x16)],
+
+    SaveCode ++ OtherCode ++ CloseCode.
 
 emit_move_arm64(ArgReg, {preg, Reg}, _NumCalleeSaved) ->
     ?ENC:encode_mov_rr(ArgReg, Reg);

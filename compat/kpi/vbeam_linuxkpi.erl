@@ -22,7 +22,7 @@
     request_irq/5, free_irq/2, enable_irq/1, disable_irq/1,
 
     %% Workqueues/Timers
-    schedule_work/1, queue_work/2, mod_timer/2, del_timer/1,
+    schedule_work/1, queue_work/2, mod_timer/2, del_timer/1, timer_fired/1,
 
     %% DMA
     dma_map_single/4, dma_unmap_single/4, dma_set_mask/2,
@@ -30,8 +30,28 @@
     %% Network Subsystem
     alloc_etherdev/1, register_netdev/1, unregister_netdev/1,
     netif_start_queue/1, netif_stop_queue/1, netif_wake_queue/1,
-    netif_rx/1, napi_schedule/1, napi_complete/1
+    netif_rx/1, napi_schedule/1, napi_complete/1,
+
+    %% Internal initialization
+    init/0
 ]).
+
+%% Timer tracking table
+-define(TIMER_TABLE, vbeam_linuxkpi_timers).
+
+%% ==================================================================
+%% Initialization
+%% ==================================================================
+
+%% @doc Initialize LinuxKPI subsystem (ETS tables, etc.)
+init() ->
+    case ets:whereis(?TIMER_TABLE) of
+        undefined ->
+            ets:new(?TIMER_TABLE, [named_table, public, set]);
+        _ ->
+            ok
+    end,
+    ok.
 
 %% ==================================================================
 %% Memory Management
@@ -80,9 +100,13 @@ kzalloc(Size, Flags) ->
 dma_alloc_coherent(_Dev, Size, _DmaHandle, _Flags) ->
     log_kapi_call(dma_alloc_coherent, [_Dev, Size, _DmaHandle, _Flags]),
     %% TODO: Coordinate with vbeam_dma to get pinned physical memory
-    {ok, Ptr, _Memory} = kmalloc(Size, 0),
-    DmaAddr = 16#F000_0000 + erlang:phash2(Ptr, 16#0FFF_FFFF),
-    {ok, Ptr, DmaAddr}.
+    case kmalloc(Size, 0) of
+        {ok, Ptr, _Memory} ->
+            DmaAddr = 16#F000_0000 + erlang:phash2(Ptr, 16#0FFF_FFFF),
+            {ok, Ptr, DmaAddr};
+        {error, _} = Error ->
+            Error
+    end.
 
 %% @doc Free DMA-coherent memory
 dma_free_coherent(_Dev, _Size, Ptr) ->
@@ -275,18 +299,28 @@ queue_work(Queue, Work) ->
 
 %% @doc Modify timer expiration
 %% Real implementation: erlang:send_after
+%% NOTE: Caller must remove timer ref when handling {timer_expired, Timer} message
+%% by calling remove_timer_ref(Timer) to prevent ref leak
 mod_timer(Timer, ExpiresJiffies) ->
     log_kapi_call(mod_timer, [Timer, ExpiresJiffies]),
-    %% BUG 7 FIX: Cancel old timer if exists, store new timer ref
-    case get_timer_ref(Timer) of
-        undefined -> ok;
-        OldTRef -> erlang:cancel_timer(OldTRef)
-    end,
-    %% Jiffies conversion: 1 jiffy = 1ms on most systems
-    TimeoutMs = ExpiresJiffies,
-    TRef = erlang:send_after(TimeoutMs, self(), {timer_expired, Timer}),
-    store_timer_ref(Timer, TRef),
-    0. %% Success
+    %% BUG 7 FIX: Validate timeout range (0 to 24h)
+    MaxTimeout = 86400000, % 24 hours in ms
+    case is_integer(ExpiresJiffies) andalso ExpiresJiffies >= 0 andalso ExpiresJiffies =< MaxTimeout of
+        true ->
+            %% Cancel old timer if exists
+            case get_timer_ref(Timer) of
+                undefined -> ok;
+                OldTRef -> erlang:cancel_timer(OldTRef)
+            end,
+            %% Jiffies conversion: 1 jiffy = 1ms on most systems
+            TimeoutMs = ExpiresJiffies,
+            Self = self(),
+            TRef = erlang:send_after(TimeoutMs, Self, {timer_expired, Timer}),
+            store_timer_ref(Timer, TRef),
+            0; %% Success
+        false ->
+            -1 %% Invalid timeout
+    end.
 
 %% @doc Delete timer
 del_timer(Timer) ->
@@ -300,6 +334,12 @@ del_timer(Timer) ->
             remove_timer_ref(Timer),
             1 %% Was active, now cancelled
     end.
+
+%% @doc Clean up timer ref after timer fires (call when handling {timer_expired, Timer})
+%% This prevents timer ref leaks from one-shot timers
+timer_fired(Timer) ->
+    remove_timer_ref(Timer),
+    ok.
 
 %% ==================================================================
 %% DMA
@@ -390,33 +430,31 @@ napi_complete(Napi) ->
 
 %% @doc Log kernel API call for debugging
 
-%% Timer reference storage (persistent_term for simplicity)
-%% In production, use ETS or process dictionary for per-process timers
--define(TIMER_STORAGE_KEY, {vbeam_linuxkpi, active_timers}).
-
+%% Timer reference storage using ETS (atomic, thread-safe)
 init_timer_storage() ->
-    case persistent_term:get(?TIMER_STORAGE_KEY, undefined) of
+    case ets:whereis(?TIMER_TABLE) of
         undefined ->
-            persistent_term:put(?TIMER_STORAGE_KEY, #{});
+            init();
         _ ->
             ok
     end.
 
 store_timer_ref(Timer, TRef) ->
     init_timer_storage(),
-    Timers = persistent_term:get(?TIMER_STORAGE_KEY, #{}),
-    persistent_term:put(?TIMER_STORAGE_KEY, Timers#{Timer => TRef}).
+    ets:insert(?TIMER_TABLE, {Timer, TRef}),
+    ok.
 
 get_timer_ref(Timer) ->
     init_timer_storage(),
-    Timers = persistent_term:get(?TIMER_STORAGE_KEY, #{}),
-    maps:get(Timer, Timers, undefined).
+    case ets:lookup(?TIMER_TABLE, Timer) of
+        [{Timer, TRef}] -> TRef;
+        [] -> undefined
+    end.
 
 remove_timer_ref(Timer) ->
     init_timer_storage(),
-    Timers = persistent_term:get(?TIMER_STORAGE_KEY, #{}),
-    persistent_term:put(?TIMER_STORAGE_KEY, maps:remove(Timer, Timers)).
-
+    ets:delete(?TIMER_TABLE, Timer),
+    ok.
 
 log_kapi_call(Function, Args) ->
     %% Use debug level to avoid spam, can enable selectively

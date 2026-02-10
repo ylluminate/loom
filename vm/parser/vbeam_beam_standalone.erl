@@ -160,23 +160,23 @@ parse_chunk_data('FunT', Data) ->
     end;
 
 parse_chunk_data('LitT', Data) ->
-    %% SECURITY: Limit decompressed size to 64MB to prevent memory exhaustion
+    %% SECURITY: Use bounded streaming decompression to prevent zip bomb DoS
     case Data of
         <<UncompressedSize:32, Compressed/binary>> when UncompressedSize =< ?MAX_LITT_SIZE ->
-            %% Try zlib decompression first (standard OTP BEAM files)
-            case catch zlib:uncompress(Compressed) of
-                Uncompressed when is_binary(Uncompressed) ->
+            %% Try zlib decompression with hard size limit
+            case decompress_bounded(Compressed, ?MAX_LITT_SIZE) of
+                {ok, Uncompressed} ->
                     %% Verify decompressed size matches declared size
-                    case byte_size(Uncompressed) of
-                        UncompressedSize ->
-                            parse_literals(Uncompressed);
-                        _ActualSize when UncompressedSize =:= 0 ->
+                    case {UncompressedSize, byte_size(Uncompressed)} of
+                        {0, _} ->
                             %% Size 0 means not compressed or size not declared
                             parse_literals(Uncompressed);
-                        ActualSize ->
-                            {error, {litt_size_mismatch, declared, UncompressedSize, actual, ActualSize}}
+                        {Size, Size} ->
+                            parse_literals(Uncompressed);
+                        {Declared, Actual} ->
+                            {error, {litt_size_mismatch, declared, Declared, actual, Actual}}
                     end;
-                _ ->
+                {error, _Reason} ->
                     %% Decompression failed — data may be uncompressed
                     %% (V compiler and some tools write uncompressed LitT)
                     case UncompressedSize of
@@ -230,6 +230,49 @@ parse_chunk_data('Line', Data) ->
 
 parse_chunk_data(_Other, Data) ->
     Data.
+
+%% ============================================================================
+%% Security: Bounded Decompression
+%% ============================================================================
+
+%% SECURITY: Bounded streaming decompression (prevents zip bomb DoS)
+%% Decompresses data with hard output size cap, aborts if exceeded
+decompress_bounded(Compressed, MaxSize) ->
+    Z = zlib:open(),
+    try
+        zlib:inflateInit(Z),
+        decompress_chunks(Z, Compressed, MaxSize, <<>>)
+    catch
+        _:Reason ->
+            {error, Reason}
+    after
+        zlib:close(Z)
+    end.
+
+%% Inflate in chunks, abort if total output exceeds MaxSize
+decompress_chunks(Z, <<>>, _MaxSize, Acc) ->
+    %% End of input, flush remaining
+    case zlib:inflate(Z, <<>>) of
+        [] ->
+            {ok, Acc};
+        Chunks ->
+            Final = iolist_to_binary([Acc | Chunks]),
+            {ok, Final}
+    end;
+decompress_chunks(Z, Data, MaxSize, Acc) ->
+    %% Process in 8KB chunks
+    ChunkSize = min(8192, byte_size(Data)),
+    <<Chunk:ChunkSize/binary, Rest/binary>> = Data,
+    case zlib:inflate(Z, Chunk) of
+        Decompressed ->
+            NewAcc = iolist_to_binary([Acc | Decompressed]),
+            case byte_size(NewAcc) > MaxSize of
+                true ->
+                    {error, {output_exceeds_limit, MaxSize}};
+                false ->
+                    decompress_chunks(Z, Rest, MaxSize, NewAcc)
+            end
+    end.
 
 %% ============================================================================
 %% Table Parsers

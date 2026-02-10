@@ -73,6 +73,7 @@
 
     %% Stack
     encode_push/1,
+    encode_push_imm32/1,
     encode_pop/1,
 
     %% Special
@@ -565,6 +566,12 @@ encode_pop(Reg) ->
         false ->
             <<Opcode:8>>
     end.
+
+%% @doc PUSH imm32
+%%      Encoding: 68 id (push imm32, sign-extended to 64-bit on stack)
+-spec encode_push_imm32(integer()) -> binary().
+encode_push_imm32(Imm) when Imm >= -16#80000000, Imm =< 16#7FFFFFFF ->
+    <<16#68:8, Imm:32/signed-little>>.
 
 %%====================================================================
 %% Special instructions

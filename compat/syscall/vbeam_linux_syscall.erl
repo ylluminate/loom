@@ -33,9 +33,8 @@ dispatch(SyscallNr, Args) when is_integer(SyscallNr), is_list(Args) ->
     try
         dispatch_impl(SyscallNr, Args)
     catch
-        error:function_clause ->
-            {error, ?EINVAL};
-        error:badarg ->
+        _:_ ->
+            %% Catch all errors to isolate handler failures
             {error, ?EINVAL}
     end.
 
@@ -272,9 +271,9 @@ stub_syscall(SyscallNr, Args) ->
         end
     catch
         error:badarg ->
-            %% Table doesn't exist - initialize and retry
-            init(),
-            stub_syscall(SyscallNr, Args)
+            %% Table doesn't exist - initialize once, don't retry recursively
+            %% Just return error to prevent stack exhaustion on protected ETS failure
+            init()
     end,
     {error, ?ENOSYS}.
 

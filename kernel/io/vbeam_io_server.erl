@@ -213,10 +213,25 @@ handle_io_request(_Request, State) ->
 -spec encode_chars(unicode | latin1, iodata()) -> binary().
 
 %% BUG 9 FIX: Whitelist for safe MFA calls
-%% Only allow erlang:* and io_lib:* functions
-is_safe_mfa(erlang, _Fun, _Args) -> true;
-is_safe_mfa(io_lib, _Fun, _Args) -> true;
-is_safe_mfa(_Mod, _Fun, _Args) -> false.
+%% Only allow specific safe formatting functions from erlang and io_lib modules
+is_safe_mfa(erlang, Fun, _Args) when Fun =:= integer_to_list;
+                                      Fun =:= integer_to_binary;
+                                      Fun =:= float_to_list;
+                                      Fun =:= float_to_binary;
+                                      Fun =:= atom_to_list;
+                                      Fun =:= atom_to_binary;
+                                      Fun =:= list_to_binary;
+                                      Fun =:= iolist_to_binary;
+                                      Fun =:= binary_to_list ->
+    true;
+is_safe_mfa(io_lib, Fun, _Args) when Fun =:= format;
+                                      Fun =:= fwrite;
+                                      Fun =:= write;
+                                      Fun =:= print;
+                                      Fun =:= nl ->
+    true;
+is_safe_mfa(_Mod, _Fun, _Args) ->
+    false.
 
 encode_chars(unicode, Chars) ->
     unicode:characters_to_binary(Chars);

@@ -295,11 +295,10 @@ translate_opcode_normalized({bs_put_string, _Len, _String}, Acc) ->
     %% Binary string operation - skip for now
     Acc;
 
-translate_opcode_normalized(UnknownOp, Acc) ->
-    %% FIX 1: Warn about unknown opcodes for debugging
-    io:format("WARNING: Unknown opcode shape (falling through to NOP): ~p~n", [UnknownOp]),
-    %% Unknown opcode - emit nop
-    <<Acc/binary, 16#90>>.  % nop
+translate_opcode_normalized(UnknownOp, _Acc) ->
+    %% SECURITY FIX: Fail closed on unknown opcodes instead of silently producing NOP
+    %% This prevents guest code from using undocumented/future opcodes to bypass translation
+    error({unknown_opcode, UnknownOp}).
 
 %% ============================================================================
 %% Move Translation

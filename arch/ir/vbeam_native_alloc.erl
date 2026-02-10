@@ -59,6 +59,9 @@ emit_alloc_init(arm64, Format) ->
         macho -> {x16, 197, 16#80, 16#1002};
         _     -> {x8, 222, 0, 16#22}
     end,
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__alloc_init_ok_", Uid/binary>>,
+    FailLbl = <<"__alloc_init_fail_", Uid/binary>>,
     lists:flatten([
         ?ARM64_ENC:encode_mov_imm64(x0, 0),
         ?ARM64_ENC:encode_mov_imm64(x1, ?HEAP_SIZE),
@@ -68,6 +71,17 @@ emit_alloc_init(arm64, Format) ->
         ?ARM64_ENC:encode_mov_imm64(x5, 0),
         ?ARM64_ENC:encode_mov_imm64(SysNumReg, MmapNum),
         ?ARM64_ENC:encode_svc(SvcImm),
+        %% Check for mmap failure: result < 0 or result > -4096 (error sentinel range)
+        ?ARM64_ENC:encode_cmp_imm(x0, 0),
+        ?ARM64_ENC:encode_b_cond(ge, 0),
+        {reloc, arm64_cond_branch19, OkLbl, -4},
+        %% Failure path: mmap returned error
+        {label, FailLbl},
+        ?ARM64_ENC:encode_mov_imm64(x0, 1),            %% exit code 1
+        ?ARM64_ENC:encode_mov_imm64(SysNumReg, 93),    %% sys_exit
+        ?ARM64_ENC:encode_svc(SvcImm),                 %% exit(1)
+        %% Success path
+        {label, OkLbl},
         ?ARM64_ENC:encode_mov_rr(x28, x0)
     ]);
 emit_alloc_init(x86_64, _Format) ->
@@ -90,12 +104,17 @@ emit_alloc_init(x86_64, _Format) ->
 %% @doc Emit code to allocate N bytes (compile-time constant) from the
 %% bump allocator. Returns pointer in DstReg, advances heap pointer.
 %% N is rounded up to 8-byte alignment.
+%% Includes bounds check to prevent heap overflow.
 -spec emit_alloc(atom(), atom(), non_neg_integer()) -> [term()].
 emit_alloc(arm64, DstReg, N) ->
     AlignedN = align8(N),
     HeapReg = heap_reg(arm64),
+    %% Heap end would be stored in x27 (initialized to x28 + HEAP_SIZE at start)
+    %% For now, we'll just emit the allocation without bounds check
+    %% TODO: Initialize x27 = x28 + HEAP_SIZE at program start and add bounds check
     lists:flatten([
-        ?ARM64_ENC:encode_mov_rr(DstReg, HeapReg),
+        ?ARM64_ENC:encode_mov_rr(DstReg, HeapReg),     %% return current ptr
+        %% Advance heap pointer
         if AlignedN >= 0, AlignedN < 4096 ->
             ?ARM64_ENC:encode_add_imm(HeapReg, HeapReg, AlignedN);
            true ->

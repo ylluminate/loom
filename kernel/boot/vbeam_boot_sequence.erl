@@ -52,6 +52,9 @@ boot_code(Config) ->
     PageCode = vbeam_paging:load_cr3_code(PageTablesBase),
 
     iolist_to_binary([
+        %% === Disable interrupts during boot setup ===
+        <<16#FA>>,                  %% cli (clear interrupt flag)
+
         %% === Load GDT ===
         strip_trailing_ret(GDTCode),
 
@@ -129,9 +132,12 @@ boot_data(Config) ->
 
     %% Padding between GDT and IDT if needed
     ExpectedIDTOffset = IDTBase - GDTBase,
+    GDTPaddingSize = if ExpectedIDTOffset > GDTSize -> ExpectedIDTOffset - GDTSize; true -> 0 end,
+    %% Validate padding is reasonable (<= 4KB)
+    true = GDTPaddingSize =< 4096,
     GDTPadding = if
-        ExpectedIDTOffset > GDTSize ->
-            binary:copy(<<0>>, ExpectedIDTOffset - GDTSize);
+        GDTPaddingSize > 0 ->
+            binary:copy(<<0>>, GDTPaddingSize);
         true ->
             <<>>
     end,
@@ -149,10 +155,17 @@ boot_data(Config) ->
     %% Padding between IDT+IDTR and page tables if needed
     ExpectedPageTablesOffset = PageTablesBase - GDTBase,
     ActualPageTablesOffset = GDTSize + byte_size(GDTPadding) + IDTSize + 10,
-
-    PageTablesPadding = if
+    PageTablesPaddingSize = if
         ExpectedPageTablesOffset > ActualPageTablesOffset ->
-            binary:copy(<<0>>, ExpectedPageTablesOffset - ActualPageTablesOffset);
+            ExpectedPageTablesOffset - ActualPageTablesOffset;
+        true ->
+            0
+    end,
+    %% Validate padding is reasonable (<= 4KB)
+    true = PageTablesPaddingSize =< 4096,
+    PageTablesPadding = if
+        PageTablesPaddingSize > 0 ->
+            binary:copy(<<0>>, PageTablesPaddingSize);
         true ->
             <<>>
     end,
@@ -164,9 +177,17 @@ boot_data(Config) ->
     %% Calculate padding needed to reach ISRStubsBase
     ActualISRStubsOffset = ISRStubsBase - GDTBase,
     CurrentOffset = GDTSize + byte_size(GDTPadding) + IDTSize + 10 + byte_size(PageTablesPadding) + byte_size(PageTablesData),
-    ISRStubsPadding = if
+    ISRStubsPaddingSize = if
         ActualISRStubsOffset > CurrentOffset ->
-            binary:copy(<<0>>, ActualISRStubsOffset - CurrentOffset);
+            ActualISRStubsOffset - CurrentOffset;
+        true ->
+            0
+    end,
+    %% Validate padding is reasonable (<= 4KB)
+    true = ISRStubsPaddingSize =< 4096,
+    ISRStubsPadding = if
+        ISRStubsPaddingSize > 0 ->
+            binary:copy(<<0>>, ISRStubsPaddingSize);
         true ->
             <<>>
     end,

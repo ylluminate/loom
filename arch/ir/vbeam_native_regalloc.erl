@@ -293,8 +293,10 @@ find_call_positions(Body) ->
     [Pos || {Pos, Inst} <- Numbered, is_call_instruction(Inst)].
 
 %% Detect call-like instructions that clobber caller-saved registers.
+%% FIXED: Include method_call as a call-clobbering instruction.
 is_call_instruction({call, _}) -> true;
 is_call_instruction({call_indirect, _}) -> true;
+is_call_instruction({method_call, _, _}) -> true;
 is_call_instruction(_) -> false.
 
 %% Check if a vreg's live interval spans any call position.

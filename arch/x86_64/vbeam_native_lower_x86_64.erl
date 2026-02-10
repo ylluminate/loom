@@ -59,14 +59,19 @@ emit_prologue(FrameSize, []) ->
      ?ENC:encode_mov_rr(rbp, rsp),
      ?ENC:encode_sub_imm(rsp, FrameSize)];
 emit_prologue(0, UsedCalleeSaved) ->
+    %% FIXED: Push callee-saved FIRST, then subtract aligned spill space
     [?ENC:encode_push(rbp),
      ?ENC:encode_mov_rr(rbp, rsp)] ++
     [?ENC:encode_push(Reg) || Reg <- UsedCalleeSaved];
 emit_prologue(FrameSize, UsedCalleeSaved) ->
+    %% FIXED: Push callee-saved FIRST, then subtract aligned spill space
+    %% so rsp is 16-byte aligned before any call
     [?ENC:encode_push(rbp),
-     ?ENC:encode_mov_rr(rbp, rsp),
-     ?ENC:encode_sub_imm(rsp, FrameSize)] ++
-    [?ENC:encode_push(Reg) || Reg <- UsedCalleeSaved].
+     ?ENC:encode_mov_rr(rbp, rsp)] ++
+    [?ENC:encode_push(Reg) || Reg <- UsedCalleeSaved] ++
+    (if FrameSize > 0 -> [?ENC:encode_sub_imm(rsp, FrameSize)];
+        true -> []
+     end).
 
 %% Emit function epilogue: restore callee-saved; mov rsp, rbp; pop rbp; ret
 %% Note: This is called from lower_instruction(ret, ...) which doesn't have access to UsedCalleeSaved,
@@ -113,15 +118,15 @@ lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _UsedCalleeSaved) when i
     end;
 
 %% MOV with stack operands (spilled registers)
-lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, UsedCalleeSaved) ->
     %% Store to stack: MOV [rbp - offset], Src
-    %% Offset must account for pushed callee-saved registers
-    Offset = -((Slot + 1) * 8 ),
+    %% FIXED: Offset must account for pushed callee-saved registers
+    Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_store(rbp, Offset, Src)];
-lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, UsedCalleeSaved) ->
     %% Load from stack: MOV Dst, [rbp - offset]
-    %% Offset must account for pushed callee-saved registers
-    Offset = -((Slot + 1) * 8 ),
+    %% FIXED: Offset must account for pushed callee-saved registers
+    Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_load(Dst, rbp, Offset)];
 
 %% LOAD from memory
@@ -233,17 +238,36 @@ lower_instruction({mul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
 
 %% SDIV (uses rdx:rax / src -> rax=quot, rdx=rem)
 lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+    %% FIXED: Divisor B must not be in rax/rdx (they're clobbered by div).
+    %% If B is rax or rdx, move to safe temp (r11) first.
+    SafeB = if B =:= rax orelse B =:= rdx -> r11; true -> B end,
+    SaveB = if B =:= rax orelse B =:= rdx -> [?ENC:encode_mov_rr(r11, B)]; true -> [] end,
+    %% FIXED: Add runtime zero-divisor check before idiv
+    ZeroCheck = [
+        ?ENC:encode_test_rr(SafeB, SafeB),  %% test divisor, divisor
+        ?ENC:encode_jcc_rel32(ne, 2),       %% jne +2 (skip ud2)
+        ?ENC:encode_ud2()                   %% trap if zero
+    ],
     %% Move dividend to rax, sign-extend to rdx:rax, divide, result in rax
     MovA = if A =/= rax -> [?ENC:encode_mov_rr(rax, A)]; true -> [] end,
-    DivParts = MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(B)],
+    DivParts = SaveB ++ ZeroCheck ++ MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)],
     MovDst = if Dst =/= rax -> DivParts ++ [?ENC:encode_mov_rr(Dst, rax)];
                 true -> DivParts end,
     MovDst;
 
 %% SREM (remainder is in rdx after idiv)
 lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
+    %% FIXED: Divisor B must not be in rax/rdx (they're clobbered by div).
+    SafeB = if B =:= rax orelse B =:= rdx -> r11; true -> B end,
+    SaveB = if B =:= rax orelse B =:= rdx -> [?ENC:encode_mov_rr(r11, B)]; true -> [] end,
+    %% FIXED: Add runtime zero-divisor check before idiv
+    ZeroCheck = [
+        ?ENC:encode_test_rr(SafeB, SafeB),  %% test divisor, divisor
+        ?ENC:encode_jcc_rel32(ne, 2),       %% jne +2 (skip ud2)
+        ?ENC:encode_ud2()                   %% trap if zero
+    ],
     MovA = if A =/= rax -> [?ENC:encode_mov_rr(rax, A)]; true -> [] end,
-    DivParts = MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(B)],
+    DivParts = SaveB ++ ZeroCheck ++ MovA ++ [?ENC:encode_cqo(), ?ENC:encode_idiv(SafeB)],
     MovDst = if Dst =/= rdx -> DivParts ++ [?ENC:encode_mov_rr(Dst, rdx)];
                 true -> DivParts end,
     MovDst;
@@ -265,21 +289,57 @@ lower_instruction({xor_, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalle
 
 %% SHL (shift left — shift amount must be in CL register)
 lower_instruction({shl, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
-    Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
-    MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
-    Parts0 ++ MovCL ++ [?ENC:encode_shl_cl(Dst)];
+    %% FIXED: When Dst=rcx, moving count to rcx overwrites the value to shift.
+    %% Use r11 as scratch: save A to scratch, move B to rcx, shift scratch, move to Dst.
+    if Dst =:= rcx, B =/= rcx ->
+        [?ENC:encode_mov_rr(r11, A),
+         ?ENC:encode_mov_rr(rcx, B),
+         ?ENC:encode_shl_cl(r11),
+         ?ENC:encode_mov_rr(Dst, r11)];
+       Dst =:= rcx, B =:= rcx ->
+        %% B is already in rcx, shift it directly
+        Parts0 = if A =/= rcx -> [?ENC:encode_mov_rr(rcx, A)]; true -> [] end,
+        Parts0 ++ [?ENC:encode_shl_cl(rcx)];
+       true ->
+        %% Normal case: Dst is not rcx
+        Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
+        MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
+        Parts0 ++ MovCL ++ [?ENC:encode_shl_cl(Dst)]
+    end;
 
 %% SHR (logical shift right)
 lower_instruction({shr, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
-    Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
-    MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
-    Parts0 ++ MovCL ++ [?ENC:encode_shr_cl(Dst)];
+    %% FIXED: When Dst=rcx, moving count to rcx overwrites the value to shift.
+    if Dst =:= rcx, B =/= rcx ->
+        [?ENC:encode_mov_rr(r11, A),
+         ?ENC:encode_mov_rr(rcx, B),
+         ?ENC:encode_shr_cl(r11),
+         ?ENC:encode_mov_rr(Dst, r11)];
+       Dst =:= rcx, B =:= rcx ->
+        Parts0 = if A =/= rcx -> [?ENC:encode_mov_rr(rcx, A)]; true -> [] end,
+        Parts0 ++ [?ENC:encode_shr_cl(rcx)];
+       true ->
+        Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
+        MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
+        Parts0 ++ MovCL ++ [?ENC:encode_shr_cl(Dst)]
+    end;
 
 %% SAR (arithmetic shift right)
 lower_instruction({sar, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
-    Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
-    MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
-    Parts0 ++ MovCL ++ [?ENC:encode_sar_cl(Dst)];
+    %% FIXED: When Dst=rcx, moving count to rcx overwrites the value to shift.
+    if Dst =:= rcx, B =/= rcx ->
+        [?ENC:encode_mov_rr(r11, A),
+         ?ENC:encode_mov_rr(rcx, B),
+         ?ENC:encode_sar_cl(r11),
+         ?ENC:encode_mov_rr(Dst, r11)];
+       Dst =:= rcx, B =:= rcx ->
+        Parts0 = if A =/= rcx -> [?ENC:encode_mov_rr(rcx, A)]; true -> [] end,
+        Parts0 ++ [?ENC:encode_sar_cl(rcx)];
+       true ->
+        Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
+        MovCL = if B =/= rcx -> [?ENC:encode_mov_rr(rcx, B)]; true -> [] end,
+        Parts0 ++ MovCL ++ [?ENC:encode_sar_cl(Dst)]
+    end;
 
 %% NEG
 lower_instruction({neg, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
@@ -826,10 +886,9 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         {reloc, rel32, DoneLbl, -4},
 
         {label, CapFullLbl},
-        %% FIXME: Map capacity exhausted - should grow/reallocate here
-        %% TODO: implement map growth when capacity is reached
-        %% For now: trap via ud2 (illegal instruction) - capacity-full is hard limit
-        ?ENC:encode_ud2(),
+        %% FIXED: Map capacity exhausted - return map unchanged (graceful degradation)
+        %% TODO: implement map growth/reallocation when capacity is reached
+        %% Fall through to DoneLbl to return original map unchanged
 
         {label, DoneLbl},
         ?ENC:encode_mov_rr(Dst, Map)
@@ -1269,25 +1328,79 @@ build_arg_moves_x86([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
 build_arg_moves_x86(_, []) -> [].
 
 break_cycles_and_emit_x86(Moves) ->
-    %% Detect cycles: if a destination is used as a source later
-    Dsts = [Dst || {Dst, _} <- Moves],
-    Srcs = [{Src, Dst} || {Dst, {preg, Src}} <- Moves],
-    Cycles = [{Src, Dst} || {Src, Dst} <- Srcs, lists:member(Src, Dsts)],
+    %% FIXED: Full cycle decomposition — detect ALL cycles and break EACH one.
+    %% Build dependency graph and find strongly connected components (cycles).
+    Graph = [{Dst, case Src of {preg, R} -> R; _ -> none end} || {Dst, Src} <- Moves],
+    Cycles = find_all_cycles(Graph),
     case Cycles of
         [] ->
             %% No cycles — emit directly
             [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves];
         _ ->
-            %% Break cycle: use r11 as temp for first conflicting move
-            [{FirstSrc, FirstDst} | _] = Cycles,
-            %% Save first source to r11
-            PreMoves = [?ENC:encode_mov_rr(r11, FirstSrc)],
-            %% Emit other moves (excluding the one we saved)
-            OtherMoves = [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves, Dst =/= FirstDst],
-            %% Restore from r11 to first destination
-            PostMoves = [?ENC:encode_mov_rr(FirstDst, r11)],
-            PreMoves ++ OtherMoves ++ PostMoves
+            %% Break each cycle by saving one register to r11 before the cycle
+            break_all_cycles(Cycles, Moves)
     end.
+
+%% Find all cycles in the move graph using Tarjan's SCC algorithm (simplified).
+%% Returns list of cycles where each cycle is a list of registers.
+find_all_cycles(Graph) ->
+    Nodes = lists:usort([Dst || {Dst, _} <- Graph] ++ [Src || {_, Src} <- Graph, Src =/= none]),
+    Edges = [{Src, Dst} || {Dst, Src} <- Graph, Src =/= none],
+    %% Simple cycle detection: find register chains where last points to first
+    SCCs = tarjan_scc(Nodes, Edges),
+    [SCC || SCC <- SCCs, length(SCC) > 1].
+
+%% Simplified Tarjan SCC for register dependency cycles
+tarjan_scc(Nodes, Edges) ->
+    InitState = #{index => 0, stack => [], sccs => []},
+    {_, Result} = lists:foldl(fun(Node, {Visited, State}) ->
+        case maps:is_key(Node, Visited) of
+            true -> {Visited, State};
+            false -> tarjan_visit(Node, Edges, Visited, State)
+        end
+    end, {#{}, InitState}, Nodes),
+    maps:get(sccs, Result).
+
+tarjan_visit(Node, Edges, Visited, State = #{index := Idx, stack := Stack}) ->
+    Visited1 = Visited#{Node => #{index => Idx, lowlink => Idx, on_stack => true}},
+    State1 = State#{index => Idx + 1, stack => [Node | Stack]},
+    Successors = [Dst || {Src, Dst} <- Edges, Src =:= Node],
+    {Visited2, State2} = lists:foldl(fun(Succ, {V, S}) ->
+        case maps:find(Succ, V) of
+            error -> tarjan_visit(Succ, Edges, V, S);
+            {ok, #{on_stack := true, index := SuccIdx}} ->
+                #{lowlink := NodeLL} = maps:get(Node, V),
+                NewLL = min(NodeLL, SuccIdx),
+                V1 = V#{Node => (maps:get(Node, V))#{lowlink => NewLL}},
+                {V1, S};
+            {ok, _} -> {V, S}
+        end
+    end, {Visited1, State1}, Successors),
+    NodeInfo = maps:get(Node, Visited2),
+    case maps:get(index, NodeInfo) =:= maps:get(lowlink, NodeInfo) of
+        true ->
+            {SCC, NewStack} = pop_scc(Node, maps:get(stack, State2), []),
+            Visited3 = lists:foldl(fun(N, V) ->
+                V#{N => (maps:get(N, V))#{on_stack => false}}
+            end, Visited2, SCC),
+            State3 = State2#{stack => NewStack, sccs => [SCC | maps:get(sccs, State2)]},
+            {Visited3, State3};
+        false ->
+            {Visited2, State2}
+    end.
+
+pop_scc(Node, [Node | Rest], Acc) -> {[Node | Acc], Rest};
+pop_scc(Node, [Other | Rest], Acc) -> pop_scc(Node, Rest, [Other | Acc]).
+
+%% Break all detected cycles by saving first register of each cycle to temp
+break_all_cycles(Cycles, Moves) ->
+    %% For each cycle, pick first register and save it
+    BreakPoints = [hd(Cycle) || Cycle <- Cycles],
+    %% Emit moves, breaking cycles as needed
+    SaveMoves = [?ENC:encode_mov_rr(r11, Reg) || Reg <- BreakPoints],
+    RegularMoves = [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves, not lists:member(Dst, BreakPoints)],
+    RestoreMoves = [?ENC:encode_mov_rr(Reg, r11) || Reg <- BreakPoints],
+    SaveMoves ++ RegularMoves ++ RestoreMoves.
 
 emit_move_x86(ArgReg, {preg, Reg}) ->
     ?ENC:encode_mov_rr(ArgReg, Reg);

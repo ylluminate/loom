@@ -471,16 +471,23 @@ get_register(_Other, _Proc) ->
 set_register({x, N}, Value, #proc{x = X} = Proc) ->
     Proc#proc{x = X#{{x, N} => Value}};
 set_register({y, N}, Value, #proc{y = Y} = Proc) ->
-    Len = length(Y),
-    NewY = if
-        N < Len ->
-            lists:sublist(Y, N) ++ [Value] ++ lists:nthtail(N + 1, Y);
-        N =:= Len ->
-            Y ++ [Value];
+    %% SECURITY FIX: Validate N is non-negative integer before using sublist/nthtail
+    case is_integer(N) andalso N >= 0 of
         true ->
-            Y ++ lists:duplicate(N - Len, undefined) ++ [Value]
-    end,
-    Proc#proc{y = NewY};
+            Len = length(Y),
+            NewY = if
+                N < Len ->
+                    lists:sublist(Y, N) ++ [Value] ++ lists:nthtail(N + 1, Y);
+                N =:= Len ->
+                    Y ++ [Value];
+                true ->
+                    Y ++ lists:duplicate(N - Len, undefined) ++ [Value]
+            end,
+            Proc#proc{y = NewY};
+        false ->
+            %% Invalid Y register index - return unchanged
+            Proc
+    end;
 set_register(_Other, _Value, Proc) ->
     Proc.
 
@@ -543,12 +550,57 @@ execute_bif(lists, reverse, [List], _Options) when is_list(List) ->
     {ok, lists:reverse(List)};
 
 execute_bif(Mod, Fun, Args, _Options) ->
-    %% Try to call the actual BIF
-    case catch apply(Mod, Fun, Args) of
-        {'EXIT', Reason} ->
-            io:format("Warning: BIF ~p:~p/~p failed: ~p~n",
-                      [Mod, Fun, length(Args), Reason]),
-            {error, Reason};
-        Result ->
-            {ok, Result}
+    %% SECURITY: Enforce strict BIF allowlist — guest code must not execute arbitrary host functions
+    %% Only allow specific safe modules and functions
+    case is_allowed_bif(Mod, Fun, length(Args)) of
+        true ->
+            case catch apply(Mod, Fun, Args) of
+                {'EXIT', Reason} ->
+                    io:format("Warning: BIF ~p:~p/~p failed: ~p~n",
+                              [Mod, Fun, length(Args), Reason]),
+                    {error, Reason};
+                Result ->
+                    {ok, Result}
+            end;
+        false ->
+            {error, {undef, Mod, Fun, length(Args)}}
     end.
+
+%% SECURITY: BIF allowlist — only these module:function/arity combinations are permitted
+is_allowed_bif(erlang, '+', 2) -> true;
+is_allowed_bif(erlang, '-', 2) -> true;
+is_allowed_bif(erlang, '*', 2) -> true;
+is_allowed_bif(erlang, '/', 2) -> true;
+is_allowed_bif(erlang, 'div', 2) -> true;
+is_allowed_bif(erlang, 'rem', 2) -> true;
+is_allowed_bif(erlang, '==', 2) -> true;
+is_allowed_bif(erlang, '/=', 2) -> true;
+is_allowed_bif(erlang, '<', 2) -> true;
+is_allowed_bif(erlang, '>', 2) -> true;
+is_allowed_bif(erlang, '=<', 2) -> true;
+is_allowed_bif(erlang, '>=', 2) -> true;
+is_allowed_bif(erlang, 'not', 1) -> true;
+is_allowed_bif(erlang, display, 1) -> true;
+is_allowed_bif(io, format, 1) -> true;
+is_allowed_bif(io, format, 2) -> true;
+is_allowed_bif(lists, reverse, 1) -> true;
+is_allowed_bif(lists, map, 2) -> true;
+is_allowed_bif(lists, filter, 2) -> true;
+is_allowed_bif(lists, foldl, 3) -> true;
+is_allowed_bif(lists, foldr, 3) -> true;
+is_allowed_bif(lists, sort, 1) -> true;
+is_allowed_bif(lists, length, 1) -> true;
+is_allowed_bif(lists, nth, 2) -> true;
+is_allowed_bif(maps, new, 0) -> true;
+is_allowed_bif(maps, get, 2) -> true;
+is_allowed_bif(maps, put, 3) -> true;
+is_allowed_bif(maps, remove, 2) -> true;
+is_allowed_bif(maps, keys, 1) -> true;
+is_allowed_bif(maps, values, 1) -> true;
+is_allowed_bif(math, sin, 1) -> true;
+is_allowed_bif(math, cos, 1) -> true;
+is_allowed_bif(math, sqrt, 1) -> true;
+is_allowed_bif(math, pow, 2) -> true;
+is_allowed_bif(string, length, 1) -> true;
+is_allowed_bif(string, concat, 2) -> true;
+is_allowed_bif(_, _, _) -> false.
