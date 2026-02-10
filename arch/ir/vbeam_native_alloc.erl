@@ -93,11 +93,14 @@ emit_alloc_init(arm64, Format) ->
         ?ARM64_ENC:encode_mov_imm64(x17, ?HEAP_SIZE),
         ?ARM64_ENC:encode_add_rrr(x27, x27, x17)       %% x27 = heap_end
     ]);
-emit_alloc_init(x86_64, _Format) ->
-    %% x86_64 Linux mmap syscall:
-    %%   rax = 9 (sys_mmap)
+emit_alloc_init(x86_64, Format) ->
+    %% x86_64 mmap syscall: format-aware for Linux vs macOS
     %%   rdi = addr (0), rsi = length, rdx = prot,
     %%   r10 = flags, r8 = fd, r9 = offset
+    {MmapNum, ExitNum} = case Format of
+        elf64 -> {9, 60};        %% Linux: mmap=9, exit=60
+        _     -> {16#20000C5, 16#2000001}  %% macOS: mmap=0x20000C5, exit=0x2000001
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__alloc_init_x64_ok_", Uid/binary>>,
     FailLbl = <<"__alloc_init_x64_fail_", Uid/binary>>,
@@ -108,7 +111,7 @@ emit_alloc_init(x86_64, _Format) ->
         ?X86_ENC:encode_mov_imm64(r10, 16#22),
         ?X86_ENC:encode_mov_imm64(r8, -1),
         ?X86_ENC:encode_mov_imm64(r9, 0),
-        ?X86_ENC:encode_mov_imm64(rax, 9),
+        ?X86_ENC:encode_mov_imm64(rax, MmapNum),
         ?X86_ENC:encode_syscall(),
         %% Validate mmap result: negative rax means error
         ?X86_ENC:encode_test_rr(rax, rax),
@@ -117,7 +120,7 @@ emit_alloc_init(x86_64, _Format) ->
         %% Failure path
         {label, FailLbl},
         ?X86_ENC:encode_mov_imm64(rdi, 1),     %% exit code 1
-        ?X86_ENC:encode_mov_imm64(rax, 60),    %% sys_exit
+        ?X86_ENC:encode_mov_imm64(rax, ExitNum),
         ?X86_ENC:encode_syscall(),
         ?X86_ENC:encode_ud2(),                 %% CRITICAL FIX (Finding 2): trap if syscall returns
         %% Success path: store heap base in r15 and heap end in r14

@@ -143,6 +143,12 @@ lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, UsedCalleeSaved) -
     Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_load(Dst, rbp, Offset)];
 
+%% STORE_SPILL: Store parameter to stack (from parameter prologue)
+lower_instruction({store_spill, {preg, Src}, {stack, Slot}}, _FnName, UsedCalleeSaved) ->
+    %% Store to stack: MOV [rbp - offset], Src
+    Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
+    [?ENC:encode_mov_mem_store(rbp, Offset, Src)];
+
 %% LOAD from memory
 lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Base, Off)];

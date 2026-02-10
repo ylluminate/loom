@@ -56,12 +56,14 @@ execute(_Chunks, _FunctionName, Args, _Options) ->
 
 %% Initialize process state from parsed chunks
 init_proc(Chunks) ->
-    %% Extract required chunks
-    Code = maps:get('Code', Chunks),
-    %% FINDING 2 FIX: Validate Code is a map before accessing
-    case is_map(Code) of
-        false -> error({invalid_code_chunk, Code});
-        true -> ok
+    %% CODEX R37 FINDING #2 FIX: Use maps:find to handle missing Code chunk
+    Code = case maps:find('Code', Chunks) of
+        {ok, CodeChunk} when is_map(CodeChunk) ->
+            CodeChunk;
+        {ok, InvalidCode} ->
+            error({invalid_code_chunk, InvalidCode});
+        error ->
+            error(missing_code_chunk)
     end,
     CodeBinary = maps:get(code, Code),
 

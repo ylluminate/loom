@@ -242,12 +242,30 @@ write_file(Filename, Mod) ->
 
 -spec validate_functions([native_function()], [data_entry()], [bss_entry()]) ->
     ok | {error, term()}.
-validate_functions([], _Data, _Bss) ->
-    ok;
+validate_functions([], Data, Bss) ->
+    %% Validate data entries
+    case validate_data_entries(Data) of
+        ok -> validate_bss_entries(Bss);
+        {error, _} = Err -> Err
+    end;
 validate_functions([Fn | Rest], Data, Bss) ->
     case validate_function(Fn) of
         ok -> validate_functions(Rest, Data, Bss);
         {error, _} = Err -> Err
+    end.
+
+validate_data_entries([]) -> ok;
+validate_data_entries([{_Name, Align, _Bytes} | Rest]) ->
+    case Align > 0 of
+        true -> validate_data_entries(Rest);
+        false -> {error, {invalid_alignment, Align, "Alignment must be > 0"}}
+    end.
+
+validate_bss_entries([]) -> ok;
+validate_bss_entries([{_Name, Align, _Size} | Rest]) ->
+    case Align > 0 of
+        true -> validate_bss_entries(Rest);
+        false -> {error, {invalid_alignment, Align, "Alignment must be > 0"}}
     end.
 
 -spec validate_instructions([instruction()]) -> ok | {error, term()}.

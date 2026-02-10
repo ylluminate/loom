@@ -152,6 +152,13 @@ lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _FS, _Fmt, UC) ->
     Offset = 16 + NumCalleeSaved * 8 + Slot * 8,
     emit_stack_load(Dst, Offset);
 
+%% STORE_SPILL: Store parameter to stack (from parameter prologue)
+lower_instruction({store_spill, {preg, Src}, {stack, Slot}}, _FnName, _FS, _Fmt, UC) ->
+    %% Store to [x29 + offset]
+    NumCalleeSaved = length(UC),
+    Offset = 16 + NumCalleeSaved * 8 + Slot * 8,
+    emit_stack_store(Src, Offset);
+
 %% LOAD from memory
 lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName, _FS, _Fmt, _UC) ->
     [?ENC:encode_ldr(Dst, Base, Off)];

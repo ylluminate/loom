@@ -167,8 +167,10 @@ cond_code(eq)  -> 16#0;  %% Equal (Z=1)
 cond_code(ne)  -> 16#1;  %% Not equal (Z=0)
 cond_code(cs)  -> 16#2;  %% Carry set / unsigned >=
 cond_code(geu) -> 16#2;  %% alias for CS
+cond_code(hs)  -> 16#2;  %% alias for CS (higher-or-same)
 cond_code(cc)  -> 16#3;  %% Carry clear / unsigned <
 cond_code(ltu) -> 16#3;  %% alias for CC
+cond_code(lo)  -> 16#3;  %% alias for CC (lower)
 cond_code(mi)  -> 16#4;  %% Minus / negative
 cond_code(pl)  -> 16#5;  %% Plus / positive or zero
 cond_code(vs)  -> 16#6;  %% Overflow

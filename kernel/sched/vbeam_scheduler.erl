@@ -331,8 +331,12 @@ handle_call({spawn_process, Module, Function}, _From, State) ->
 
                     {reply, {ok, NextPid}, NewState};
 
+                %% CODEX R37 FINDING #3 FIX: Handle double-wrapped allocator errors first
+                {{error, Reason}, FailPageAlloc} ->
+                    %% Allocator returned {error, Reason} tuple - unwrap it
+                    {reply, {error, Reason}, State#state{page_alloc = FailPageAlloc}};
                 {error, Reason, FailPageAlloc} ->
-                    %% Error already wrapped - don't double-wrap
+                    %% Error already wrapped in 3-tuple format
                     {reply, {error, Reason}, State#state{page_alloc = FailPageAlloc}};
                 {Error, FailPageAlloc} ->
                     %% Legacy pattern or unwrapped error

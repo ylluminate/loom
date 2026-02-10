@@ -39,10 +39,12 @@ dispatch(SyscallNr, Args) when is_integer(SyscallNr), is_list(Args) ->
     try
         dispatch_impl(SyscallNr, Args)
     catch
-        error:function_clause -> {error, ?ENOSYS};
+        %% CODEX R37 FINDING #4 FIX: function_clause means bad args, not unimplemented
+        error:function_clause -> {error, ?EINVAL};
         error:badarg -> {error, ?EINVAL};
         error:{invalid_args, _} -> {error, ?EINVAL}
         %% Let exit/throw/other errors propagate
+        %% ENOSYS is reserved for truly unimplemented syscalls (default case in dispatch_impl)
     end;
 %% FINDING 11 FIX: Fallback clause for malformed dispatch calls
 dispatch(_, _) ->

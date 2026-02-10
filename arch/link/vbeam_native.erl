@@ -173,8 +173,13 @@ lower_functions(Functions, Target, Format) ->
 layout_data(DataEntries, LinkState) ->
     {DataBin, LS, _Offset} = lists:foldl(
         fun({Name, Align, Bytes}, {Acc, LS0, Off}) ->
+            %% Guard against Alignment=0 (causes badarith in align_padding)
+            SafeAlign = case Align > 0 of
+                true -> Align;
+                false -> 1  %% Default to 1 if invalid
+            end,
             %% Align offset
-            Padding = align_padding(Off, Align),
+            Padding = align_padding(Off, SafeAlign),
             PadBin = <<0:(Padding * 8)>>,
             AlignedOff = Off + Padding,
             LS1 = vbeam_native_link:add_symbol(LS0, Name, AlignedOff, data, true),
@@ -654,9 +659,9 @@ builtin_function_impl(<<"log">>, Target, _Format) ->
 
 builtin_function_impl(<<"exit">>, Target, Format) ->
     {ArgReg, SyscallReg, ExitNum} = case {Target, Format} of
-        {x86_64, elf} -> {rdi, rax, 60};   %% Linux x86_64: sys_exit = 60
+        {x86_64, elf64} -> {rdi, rax, 60};   %% Linux x86_64: sys_exit = 60
         {x86_64, _} -> {rdi, rax, 1};      %% macOS x86_64: exit = 1
-        {arm64, elf} -> {x0, x16, 93};     %% Linux arm64: sys_exit = 93
+        {arm64, elf64} -> {x0, x16, 93};     %% Linux arm64: sys_exit = 93
         {arm64, _} -> {x0, x16, 1}         %% macOS arm64: exit = 1
     end,
     {ok, #{
@@ -676,9 +681,9 @@ builtin_function_impl(<<"exit">>, Target, Format) ->
 
 builtin_function_impl(<<"panic">>, Target, Format) ->
     {ArgReg, SyscallReg, ExitNum} = case {Target, Format} of
-        {x86_64, elf} -> {rdi, rax, 60};   %% Linux x86_64: sys_exit = 60
+        {x86_64, elf64} -> {rdi, rax, 60};   %% Linux x86_64: sys_exit = 60
         {x86_64, _} -> {rdi, rax, 1};      %% macOS x86_64: exit = 1
-        {arm64, elf} -> {x0, x16, 93};     %% Linux arm64: sys_exit = 93
+        {arm64, elf64} -> {x0, x16, 93};     %% Linux arm64: sys_exit = 93
         {arm64, _} -> {x0, x16, 1}         %% macOS arm64: exit = 1
     end,
     {ok, #{

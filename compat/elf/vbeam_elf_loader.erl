@@ -761,10 +761,22 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
 
     SymAddr = calculate_symbol_address(Sym, AllSections, SectionAddrs),
 
+    %% CODEX R37 FINDING #1 FIX: Read implicit addend for REL entries
+    %% If addend is 0 and we have a REL-type relocation, read the implicit addend
+    %% from the target location in the data
+    ActualAddend = case Addend of
+        0 ->
+            %% Try to read implicit addend from Data at Offset
+            read_implicit_addend(Data, Offset, Type);
+        _ ->
+            %% RELA format - explicit addend already provided
+            Addend
+    end,
+
     %% Calculate relocation value
     P = CurrentSectionAddr + Offset,  % Place (address being patched)
     S = SymAddr,                      % Symbol address
-    A = Addend,                       % Addend
+    A = ActualAddend,                 % Addend (explicit or implicit)
 
     Value = case Type of
         r_x86_64_64 ->
@@ -804,6 +816,45 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
 
     %% Patch the data
     patch_data(Data, Offset, Value, Type).
+
+%% CODEX R37 FINDING #1 FIX: Read implicit addend from REL relocations
+read_implicit_addend(Data, Offset, Type) ->
+    DataSize = byte_size(Data),
+    Width = reloc_width(Type),
+    WidthBytes = Width div 8,
+
+    %% Check if we can safely read the addend
+    case Offset + WidthBytes =< DataSize of
+        true ->
+            case Type of
+                r_x86_64_64 ->
+                    %% 64-bit unsigned read
+                    <<_:Offset/binary, Addend:64/little, _/binary>> = Data,
+                    Addend;
+                r_x86_64_32 ->
+                    %% 32-bit unsigned read, zero-extend to 64-bit
+                    <<_:Offset/binary, Addend:32/little, _/binary>> = Data,
+                    Addend;
+                r_x86_64_32s ->
+                    %% 32-bit signed read, sign-extend to 64-bit
+                    <<_:Offset/binary, Addend:32/signed-little, _/binary>> = Data,
+                    Addend;
+                r_x86_64_pc32 ->
+                    %% 32-bit signed read (PC-relative)
+                    <<_:Offset/binary, Addend:32/signed-little, _/binary>> = Data,
+                    Addend;
+                r_x86_64_plt32 ->
+                    %% 32-bit signed read (PLT-relative)
+                    <<_:Offset/binary, Addend:32/signed-little, _/binary>> = Data,
+                    Addend;
+                r_x86_64_none ->
+                    %% No relocation
+                    0
+            end;
+        false ->
+            %% Offset out of bounds - fallback to 0
+            0
+    end.
 
 patch_data(Data, _Offset, _Value, r_x86_64_none) ->
     %% R_X86_64_NONE - no patching needed
