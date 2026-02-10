@@ -271,10 +271,10 @@ alloc_pages_loop(State, Count, Acc) ->
     case alloc_page(State) of
         {ok, Addr, NewState} ->
             alloc_pages_loop(NewState, Count - 1, [Addr | Acc]);
-        {error, _} = Error ->
-            %% Free already allocated pages and return error
+        {error, Reason} ->
+            %% Free already allocated pages and return error with state
             FinalState = free_pages(State, Acc),
-            {Error, FinalState}
+            {{error, Reason}, FinalState}
     end.
 
 %%% ----------------------------------------------------------------------------

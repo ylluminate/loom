@@ -226,17 +226,22 @@ sys_arch_prctl([Code, Addr]) ->
             put(vbeam_fs_base, Addr),
             {ok, 0};
         16#1003 -> % ARCH_GET_FS
-            FSBase = get(vbeam_fs_base),
-            case FSBase of
-                undefined -> {ok, 0};
-                _ -> {ok, FSBase}
-            end;
+            %% Linux writes FS base to *(unsigned long *)Addr
+            %% Simulate by storing to process dictionary key
+            FSBase = case get(vbeam_fs_base) of
+                undefined -> 0;
+                Val -> Val
+            end,
+            put({vbeam_user_mem, Addr}, FSBase),
+            {ok, 0}; %% Return 0 (success), not the base address
         16#1004 -> % ARCH_GET_GS
-            GSBase = get(vbeam_gs_base),
-            case GSBase of
-                undefined -> {ok, 0};
-                _ -> {ok, GSBase}
-            end;
+            %% Linux writes GS base to *(unsigned long *)Addr
+            GSBase = case get(vbeam_gs_base) of
+                undefined -> 0;
+                Val -> Val
+            end,
+            put({vbeam_user_mem, Addr}, GSBase),
+            {ok, 0}; %% Return 0 (success), not the base address
         _ -> {error, ?EINVAL}
     end.
 

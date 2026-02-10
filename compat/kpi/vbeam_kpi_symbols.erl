@@ -64,8 +64,8 @@ all_symbols() ->
         "_raw_spin_unlock" => {vbeam_linuxkpi, spin_unlock, 1},
         "spin_lock" => {vbeam_linuxkpi, spin_lock, 1},
         "spin_unlock" => {vbeam_linuxkpi, spin_unlock, 1},
-        "spin_lock_irqsave" => {vbeam_linuxkpi, spin_lock, 1}, %% Same as spin_lock for BEAM
-        "spin_unlock_irqrestore" => {vbeam_linuxkpi, spin_unlock, 1},
+        "spin_lock_irqsave" => {vbeam_linuxkpi, spin_lock_irqsave, 2},
+        "spin_unlock_irqrestore" => {vbeam_linuxkpi, spin_unlock_irqrestore, 2},
 
         %% ============================================================
         %% Synchronization - Mutexes

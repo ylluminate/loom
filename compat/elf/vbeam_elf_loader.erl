@@ -473,8 +473,15 @@ parse_symbols(_Binary, Sections) ->
             %% Validate EntSize before using as divisor
             case EntSize of
                 E when E > 0, E =:= ?SYM_SIZE ->
-                    StrTabSec = element(StrTabIdx + 1, SectionsTuple),
-                    #{data := StrTabData} = StrTabSec,
+                    %% Validate StrTabIdx before tuple indexing
+                    TupleSize = tuple_size(SectionsTuple),
+                    StrTabData = case StrTabIdx of
+                        Idx when Idx >= 0, Idx < TupleSize ->
+                            StrTabSec = element(StrTabIdx + 1, SectionsTuple),
+                            maps:get(data, StrTabSec);
+                        _ ->
+                            error({invalid_sh_link, StrTabIdx, max, TupleSize - 1})
+                    end,
 
                     %% Parse symbol entries
                     NumSyms = byte_size(SymTabData) div EntSize,
@@ -540,8 +547,15 @@ parse_relocations(_Binary, Sections, _StrTab) ->
                 _ -> error({invalid_rela_entsize, EntSize, expected, ?RELA_SIZE})
             end,
 
-            TargetSec = element(TargetIdx + 1, SectionsTuple),
-            TargetName = maps:get(name, TargetSec),
+            %% Validate TargetIdx (sh_info) before tuple indexing
+            TupleSize = tuple_size(SectionsTuple),
+            TargetName = case TargetIdx of
+                Idx when Idx >= 0, Idx < TupleSize ->
+                    TargetSec = element(TargetIdx + 1, SectionsTuple),
+                    maps:get(name, TargetSec);
+                _ ->
+                    error({invalid_sh_info, TargetIdx, max, TupleSize - 1})
+            end,
 
             NumRelas = byte_size(Data) div EntSize,
             %% BUG 14 FIX: Cap NumRelas at 500000
@@ -629,8 +643,16 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
                  Data, Symbols, AllSections, SectionAddrs, CurrentSectionAddr) ->
     %% BUG 9 FIX: Convert to tuple for O(1) access
     SymbolsTuple = list_to_tuple(Symbols),
-    %% Get symbol address
-    Sym = element(SymIdx + 1, SymbolsTuple),
+
+    %% Validate SymIdx before tuple indexing
+    TupleSize = tuple_size(SymbolsTuple),
+    Sym = case SymIdx of
+        Idx when Idx >= 0, Idx < TupleSize ->
+            element(SymIdx + 1, SymbolsTuple);
+        _ ->
+            error({invalid_symbol_index, SymIdx, max, TupleSize - 1})
+    end,
+
     SymAddr = calculate_symbol_address(Sym, AllSections, SectionAddrs),
 
     %% Calculate relocation value
@@ -730,8 +752,12 @@ calculate_symbol_address(#{shndx := ?SHN_ABS, value := Value}, _AllSections, _Se
     Value;
 calculate_symbol_address(#{shndx := Shndx, value := Value}, _AllSections, SectionAddrs) when Shndx > 0 ->
     %% Section-relative symbol - look up the section address by Shndx (which IS the section_index)
-    SectionAddr = maps:get(Shndx, SectionAddrs, 0),
-    SectionAddr + Value;
+    case maps:find(Shndx, SectionAddrs) of
+        {ok, SectionAddr} ->
+            SectionAddr + Value;
+        error ->
+            error({missing_section_address, Shndx})
+    end;
 calculate_symbol_address(_Sym, _AllSections, _SectionAddrs) ->
     0.
 
@@ -754,10 +780,15 @@ find_init_addr(#{symbols := Symbols, sections := _Sections}, SectionAddrs) ->
         {value, Sym} ->
             calculate_symbol_address(Sym, [], SectionAddrs);
         false ->
-            %% Return first allocated section address as fallback
-            case maps:to_list(SectionAddrs) of
-                [{_, Addr} | _] -> Addr;
-                [] -> 0
+            %% Look for _start or main explicitly
+            case lists:search(
+                fun(#{name := N}) -> N =:= <<"_start">> orelse N =:= <<"main">> end,
+                Symbols
+            ) of
+                {value, Sym} ->
+                    calculate_symbol_address(Sym, [], SectionAddrs);
+                false ->
+                    error(no_init_symbol)
             end
     end.
 

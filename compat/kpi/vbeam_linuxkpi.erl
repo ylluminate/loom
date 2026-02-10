@@ -2,13 +2,14 @@
 -export([
     %% Memory Management
     kmalloc/2, kfree/1, vmalloc/1, vfree/1, kzalloc/2,
-    dma_alloc_coherent/4, dma_free_coherent/3,
+    dma_alloc_coherent/4, dma_free_coherent/3, dma_free_coherent/4,
 
     %% Logging
     printk/2, dev_err/2, dev_warn/2, dev_info/2, dev_dbg/2,
 
     %% Synchronization
     spin_lock/1, spin_unlock/1, spin_lock_init/1,
+    spin_lock_irqsave/2, spin_unlock_irqrestore/2,
     mutex_init/1, mutex_lock/1, mutex_unlock/1,
     init_waitqueue_head/1, wake_up/1, wake_up_interruptible/1,
 
@@ -19,7 +20,7 @@
     pci_iomap/3, pci_iounmap/2,
 
     %% Interrupts
-    request_irq/5, free_irq/2, enable_irq/1, disable_irq/1,
+    request_irq/5, request_threaded_irq/6, free_irq/2, enable_irq/1, disable_irq/1,
 
     %% Workqueues/Timers
     schedule_work/1, queue_work/2, mod_timer/2, del_timer/1, timer_fired/1,
@@ -115,9 +116,16 @@ dma_alloc_coherent(_Dev, Size, _DmaHandle, _Flags) ->
             Error
     end.
 
-%% @doc Free DMA-coherent memory
+%% @doc Free DMA-coherent memory (3-arg version)
 dma_free_coherent(_Dev, _Size, Ptr) ->
     log_kapi_call(dma_free_coherent, [_Dev, _Size, Ptr]),
+    kfree(Ptr).
+
+%% @doc Free DMA-coherent memory (4-arg version with DMA handle)
+%% TODO: Track DMA handles properly when implementing real DMA subsystem
+dma_free_coherent(_Dev, _Size, Ptr, _DmaHandle) ->
+    log_kapi_call(dma_free_coherent, [_Dev, _Size, Ptr, _DmaHandle]),
+    %% Ignore DmaHandle for now - delegate to 3-arg version
     kfree(Ptr).
 
 %% ==================================================================
@@ -171,6 +179,20 @@ spin_lock(Lock) ->
 %% @doc Release spinlock
 spin_unlock(Lock) ->
     log_kapi_call(spin_unlock, [Lock]),
+    %% TODO: Call lock manager gen_server
+    ok.
+
+%% @doc Acquire spinlock with interrupt save (2-arg version)
+%% Returns {ok, SavedFlags} where SavedFlags is 0 (single-threaded BEAM)
+spin_lock_irqsave(Lock, _Flags) ->
+    log_kapi_call(spin_lock_irqsave, [Lock, _Flags]),
+    %% TODO: Call lock manager gen_server
+    %% Return 0 as saved flags since we're single-threaded
+    {ok, 0}.
+
+%% @doc Release spinlock with interrupt restore (2-arg version)
+spin_unlock_irqrestore(Lock, _Flags) ->
+    log_kapi_call(spin_unlock_irqrestore, [Lock, _Flags]),
     %% TODO: Call lock manager gen_server
     ok.
 
@@ -272,6 +294,16 @@ request_irq(Irq, Handler, Flags, Name, Dev) ->
     log_kapi_call(request_irq, [Irq, Handler, Flags, Name, Dev]),
     %% TODO: Register Handler with vbeam_irq manager
     0. %% Success
+
+%% @doc Request threaded interrupt line (with separate thread handler)
+%% TODO: Thread handler not supported yet - log warning and delegate to request_irq
+request_threaded_irq(Irq, Handler, ThreadFn, Flags, Name, Dev) ->
+    log_kapi_call(request_threaded_irq, [Irq, Handler, ThreadFn, Flags, Name, Dev]),
+    case ThreadFn of
+        undefined -> ok;
+        _ -> logger:warning("[KAPI] request_threaded_irq: thread handler ignored (not implemented)")
+    end,
+    request_irq(Irq, Handler, Flags, Name, Dev).
 
 %% @doc Free interrupt line
 free_irq(Irq, Dev) ->
