@@ -43,7 +43,8 @@ all_symbols() ->
         "vfree" => {vbeam_linuxkpi, vfree, 1},
         "kzalloc" => {vbeam_linuxkpi, kzalloc, 2},
         "dma_alloc_coherent" => {vbeam_linuxkpi, dma_alloc_coherent, 4},
-        "dma_free_coherent" => {vbeam_linuxkpi, dma_free_coherent, 3},
+        %% BUG 5 FIX: dma_free_coherent has 4 args (dev, size, vaddr, dma_handle)
+        "dma_free_coherent" => {vbeam_linuxkpi, dma_free_coherent, 4},
 
         %% ============================================================
         %% Logging
@@ -101,7 +102,8 @@ all_symbols() ->
         %% Interrupts
         %% ============================================================
         "request_irq" => {vbeam_linuxkpi, request_irq, 5},
-        "request_threaded_irq" => {vbeam_linuxkpi, request_irq, 5}, %% Simplified
+        %% BUG 4 FIX: request_threaded_irq has 6 args (irq, handler, thread_fn, flags, name, dev)
+        "request_threaded_irq" => {vbeam_linuxkpi, request_threaded_irq, 6},
         "free_irq" => {vbeam_linuxkpi, free_irq, 2},
         "enable_irq" => {vbeam_linuxkpi, enable_irq, 1},
         "disable_irq" => {vbeam_linuxkpi, disable_irq, 1},

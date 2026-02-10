@@ -181,6 +181,7 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
     try
         %% Build section address map by section index (integer), not full map
         %% We need to assign addresses to each allocated section
+        %% BUG 2 FIX: Use per-section sh_addralign instead of forcing 16-byte alignment
         {SectionAddrs, _NextAddr} = lists:foldl(
             fun(Section, {AddrMap, Addr}) ->
                 SectionIdx = maps:get(section_index, Section),
@@ -191,7 +192,11 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
                     _ ->
                         %% Allocate this section - key by section_index
                         Size = maps:get(size, Section, 0),
-                        {AddrMap#{SectionIdx => Addr}, align(Addr + Size, 16)}
+                        AddAlign = maps:get(addralign, Section, 1),
+                        %% BUG 2 FIX: Use section's addralign (capped at 4096 for sanity)
+                        AlignVal = max(1, min(4096, AddAlign)),
+                        AlignedAddr = align(Addr, AlignVal),
+                        {AddrMap#{SectionIdx => AlignedAddr}, AlignedAddr + Size}
                 end
             end,
             {#{}, BaseAddr},
@@ -262,11 +267,31 @@ load_impl(FilePath, SymbolTable) ->
                     case resolve_symbols(ElfInfo, SymbolTable) of
                         {ok, ResolvedElf} ->
                             BaseAddr = 16#1000000, % arbitrary base
+                            %% Build section address map for extract functions
+                            #{sections := Sections} = ResolvedElf,
+                            {SectionAddrs, _NextAddr} = lists:foldl(
+                                fun(Section, {AddrMap, Addr}) ->
+                                    SectionIdx = maps:get(section_index, Section),
+                                    case maps:get(flags, Section, 0) band ?SHF_ALLOC of
+                                        0 ->
+                                            {AddrMap, Addr};
+                                        _ ->
+                                            Size = maps:get(size, Section, 0),
+                                            AddAlign = maps:get(addralign, Section, 1),
+                                            %% BUG 2 FIX: Use per-section alignment
+                                            AlignVal = max(1, min(4096, AddAlign)),
+                                            AlignedAddr = align(Addr, AlignVal),
+                                            {AddrMap#{SectionIdx => AlignedAddr}, AlignedAddr + Size}
+                                    end
+                                end,
+                                {#{}, BaseAddr},
+                                Sections
+                            ),
                             case apply_relocations(ResolvedElf, BaseAddr) of
                                 {ok, Code} ->
-                                    %% Extract init function and exports
-                                    InitAddr = find_init_addr(ResolvedElf, BaseAddr),
-                                    Exports = extract_exports(ResolvedElf, BaseAddr),
+                                    %% BUG 1 FIX: Pass SectionAddrs to extract functions
+                                    InitAddr = find_init_addr(ResolvedElf, SectionAddrs),
+                                    Exports = extract_exports(ResolvedElf, SectionAddrs),
                                     Module = #{
                                         code => Code,
                                         data => <<>>,
@@ -720,21 +745,28 @@ safe_nth(N, List) when N > 0, N =< length(List) ->
 safe_nth(N, List) ->
     error({list_index_out_of_bounds, N, length(List)}).
 
-find_init_addr(#{symbols := Symbols}, BaseAddr) ->
+%% BUG 1 FIX: Use SectionAddrs to compute symbol addresses correctly
+find_init_addr(#{symbols := Symbols, sections := _Sections}, SectionAddrs) ->
     case lists:search(
         fun(#{name := N}) -> N =:= <<"init_module">> orelse N =:= <<"__init">> end,
         Symbols
     ) of
-        {value, #{value := Val, resolved_addr := Addr}} ->
-            coalesce(Addr, BaseAddr) + Val;
+        {value, Sym} ->
+            calculate_symbol_address(Sym, [], SectionAddrs);
         false ->
-            BaseAddr
+            %% Return first allocated section address as fallback
+            case maps:to_list(SectionAddrs) of
+                [{_, Addr} | _] -> Addr;
+                [] -> 0
+            end
     end.
 
-extract_exports(#{symbols := Symbols}, BaseAddr) ->
+%% BUG 1 FIX: Use SectionAddrs to compute symbol addresses correctly
+extract_exports(#{symbols := Symbols}, SectionAddrs) ->
     lists:foldl(
-        fun(#{name := Name, bind := global, value := Val, resolved_addr := Addr}, Acc) ->
-            Acc#{Name => coalesce(Addr, BaseAddr) + Val};
+        fun(#{name := Name, bind := global, shndx := Shndx} = Sym, Acc) when Shndx > 0 ->
+            Addr = calculate_symbol_address(Sym, [], SectionAddrs),
+            Acc#{Name => Addr};
            (_, Acc) ->
             Acc
         end,

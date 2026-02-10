@@ -484,7 +484,7 @@ decode_compact_term_int(<<Byte:8, Rest/binary>>) ->
                 <<V:8, Rest2/binary>> ->
                     {V, Rest2};
                 _ ->
-                    {0, <<>>}
+                    {error, {truncated_compact_value, literal_extended}}
             end;
         {1, false} ->  %% Integer, value in upper 4 bits
             {Val, Rest};
@@ -493,13 +493,13 @@ decode_compact_term_int(<<Byte:8, Rest/binary>>) ->
                 <<V:8, Rest2/binary>> ->
                     {V, Rest2};
                 _ ->
-                    {0, <<>>}
+                    {error, {truncated_compact_value, integer_extended}}
             end;
         {_, _} ->      %% Other tags
             {Val, Rest}
     end;
 decode_compact_term_int(_) ->
-    {0, <<>>}.
+    {error, {truncated_compact_value, no_data}}.
 
 %% ============================================================================
 %% Instruction Decoder
@@ -578,7 +578,7 @@ decode_compact_value(Byte, Rest) ->
                             HighBits = (Byte bsr 5) band 7,  %% Extract bits 7:5
                             {HighBits bor (Next bsl 3), Rest2};
                         _ ->
-                            {0, Rest}
+                            {error, {truncated_compact_value, medium}}
                     end;
                 _ ->
                     %% Large: variable-length integer
@@ -605,10 +605,10 @@ decode_large_value(Byte, Rest) ->
                             end,
                             {Val, Rest3};
                         _ ->
-                            {0, Rest}
+                            {error, {truncated_compact_value, recursive_length_data}}
                     end;
                 _ ->
-                    {0, Rest}
+                    {error, {malformed_compact_value, recursive_length_decode_failed}}
             end;
         _ ->
             %% LenCode 0-6: Fixed length (2-8 bytes)
@@ -624,7 +624,7 @@ decode_large_value(Byte, Rest) ->
                     end,
                     {Val, Rest2};
                 _ ->
-                    {0, Rest}
+                    {error, {truncated_compact_value, large_value_data}}
             end
     end.
 

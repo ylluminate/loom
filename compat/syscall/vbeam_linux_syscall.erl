@@ -216,12 +216,27 @@ sys_newfstatat([DirFd, Path, StatBuf, Flags]) ->
     vbeam_vfs:newfstatat(DirFd, Path, StatBuf, Flags).
 
 %% Architecture-specific
-sys_arch_prctl([Code, _Addr]) ->
+%% BUG 3 FIX: Track FS/GS base addresses using process dictionary
+sys_arch_prctl([Code, Addr]) ->
     case Code of
-        16#1001 -> {ok, 0};  % ARCH_SET_GS
-        16#1002 -> {ok, 0};  % ARCH_SET_FS
-        16#1003 -> {ok, 0};  % ARCH_GET_FS
-        16#1004 -> {ok, 0};  % ARCH_GET_GS
+        16#1001 -> % ARCH_SET_GS
+            put(vbeam_gs_base, Addr),
+            {ok, 0};
+        16#1002 -> % ARCH_SET_FS
+            put(vbeam_fs_base, Addr),
+            {ok, 0};
+        16#1003 -> % ARCH_GET_FS
+            FSBase = get(vbeam_fs_base),
+            case FSBase of
+                undefined -> {ok, 0};
+                _ -> {ok, FSBase}
+            end;
+        16#1004 -> % ARCH_GET_GS
+            GSBase = get(vbeam_gs_base),
+            case GSBase of
+                undefined -> {ok, 0};
+                _ -> {ok, GSBase}
+            end;
         _ -> {error, ?EINVAL}
     end.
 

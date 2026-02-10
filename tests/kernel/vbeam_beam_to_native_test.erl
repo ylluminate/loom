@@ -84,8 +84,8 @@ test_serial_puts_code() ->
     %% Should contain lodsb instruction (AC)
     true = binary:match(Code, <<16#AC>>) =/= nomatch,
 
-    %% Should contain test al, al (84 C0)
-    true = binary:match(Code, <<16#84, 16#C0>>) =/= nomatch,
+    %% Should contain test rcx, rcx (48 85 C9) for length-bounded loop
+    true = binary:match(Code, <<16#48, 16#85, 16#C9>>) =/= nomatch,
 
     %% Should contain ret instruction
     true = binary:match(Code, <<16#C3>>) =/= nomatch,

@@ -81,9 +81,11 @@ serial_putchar_code() ->
         <<16#C3>>                                 % ret
     ]).
 
-%% @doc Generate x86_64 code for serial puts (null-terminated string).
-%% Input: RSI = pointer to null-terminated string
-%% Clobbers: RSI, RAX, RBX, RDX
+%% @doc Generate x86_64 code for serial puts (length-bounded string).
+%% Input: RSI = pointer to string
+%%        RCX = length (number of bytes to output, max 4096)
+%% Clobbers: RSI, RCX, RAX, RBX, RDX
+%% SECURITY: Length-bounded to prevent reading past buffer boundaries
 serial_puts_code() ->
     SerialPutcharSize = byte_size(serial_putchar_code()),
 
@@ -91,25 +93,25 @@ serial_puts_code() ->
     %% serial_puts comes right after serial_putchar in the layout
     %% The call instruction is 5 bytes (E8 xx xx xx xx)
     %% Instruction layout before call:
-    %%   +0: lodsb (1 byte)
-    %%   +1: test al,al (2 bytes)
+    %%   +0: test rcx,rcx (3 bytes)
     %%   +3: jz done (2 bytes)
-    %%   +5: mov bl,al (2 bytes)
-    %%   +7: call rel32 (5 bytes, ends at +12)
-    %% At offset 7, the call instruction starts. It ends at 7+5=12.
-    %% Target is serial_putchar, which is at -(SerialPutcharSize + 7)
-    %% But displacement is from END of call instruction, so from position 12
-    %% Displacement = target - instruction_end = -(SerialPutcharSize + 7) - 5
-    CallOffset = -(SerialPutcharSize + 12),
+    %%   +5: lodsb (1 byte)
+    %%   +6: mov bl,al (2 bytes)
+    %%   +8: dec rcx (3 bytes)
+    %%   +11: call rel32 (5 bytes, ends at +16)
+    %% Target is serial_putchar at -(SerialPutcharSize + offset_from_start)
+    %% Displacement is from END of call instruction (offset 16)
+    CallOffset = -(SerialPutcharSize + 16),
 
     iolist_to_binary([
         %% loop:
+        <<16#48, 16#85, 16#C9>>,                  % test rcx, rcx (check counter)
+        <<16#74, 16#0C>>,                         % jz done (+12 bytes to ret)
         <<16#AC>>,                                % lodsb (load byte from [RSI++] to AL)
-        <<16#84, 16#C0>>,                         % test al, al
-        <<16#74, 16#09>>,                         % jz done (+9 bytes to ret)
         <<16#88, 16#C3>>,                         % mov bl, al (save char)
+        <<16#48, 16#FF, 16#C9>>,                  % dec rcx (decrement counter)
         <<16#E8, CallOffset:32/little-signed>>,   % call serial_putchar
-        <<16#EB, 16#F2>>,                         % jmp loop (-14 bytes)
+        <<16#EB, 16#EE>>,                         % jmp loop (-18 bytes)
         %% done:
         <<16#C3>>                                 % ret
     ]).
@@ -118,41 +120,90 @@ serial_puts_code() ->
 %% Internal Translation
 %% ============================================================================
 
+%% SECURITY: Translation size limits
+-define(MAX_FUNCTIONS, 10_000).
+-define(MAX_INSTRUCTIONS_PER_FUNCTION, 100_000).
+-define(MAX_OUTPUT_CODE_SIZE, 100_000_000).  % 100MB
+
 %% Translate chunks from beam file (standalone parser format)
 translate_chunks(ParsedData) ->
-    %% ParsedData is a map: #{atoms, exports, imports, code, code_info, literals, strings, funs}
-    Atoms = maps:get(atoms, ParsedData, []),
-    CodeBinary = maps:get(code, ParsedData, <<>>),
+    try
+        %% ParsedData is a map: #{atoms, exports, imports, code, code_info, literals, strings, funs}
+        Atoms = maps:get(atoms, ParsedData, []),
+        CodeBinary = maps:get(code, ParsedData, <<>>),
 
-    case CodeBinary of
-        <<>> ->
-            {error, no_code_chunk};
-        _ ->
-            %% Decode instructions from bytecode using standalone parser
-            Instructions = vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms),
+        case CodeBinary of
+            <<>> ->
+                {error, no_code_chunk};
+            _ ->
+                %% Decode instructions from bytecode using standalone parser
+                Instructions = vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms),
 
-            %% Split flat instruction list into per-function lists
-            Functions = extract_functions(Instructions),
+                %% SECURITY FIX (Finding #3): Check total instruction count
+                InstrCount = length(Instructions),
+                case InstrCount > ?MAX_INSTRUCTIONS_PER_FUNCTION of
+                    true ->
+                        {error, {instruction_count_exceeded, InstrCount, max, ?MAX_INSTRUCTIONS_PER_FUNCTION}};
+                    false ->
+                        %% Split flat instruction list into per-function lists
+                        Functions = extract_functions(Instructions),
 
-            %% Build helper functions
-            SerialPutchar = serial_putchar_code(),
-            SerialPuts = serial_puts_code(),
+                        %% SECURITY FIX (Finding #3): Check function count
+                        FunctionCount = length(Functions),
+                        case FunctionCount > ?MAX_FUNCTIONS of
+                            true ->
+                                {error, {function_count_exceeded, FunctionCount, max, ?MAX_FUNCTIONS}};
+                            false ->
+                                %% SECURITY FIX (Finding #3): Check instruction count per function
+                                case check_function_sizes(Functions) of
+                                    ok ->
+                                        %% Build helper functions
+                                        SerialPutchar = serial_putchar_code(),
+                                        SerialPuts = serial_puts_code(),
 
-            %% Translate each function
-            TranslatedFunctions = [translate_function_internal(F) || F <- Functions],
+                                        %% Translate each function
+                                        TranslatedFunctions = [translate_function_internal(F) || F <- Functions],
 
-            %% Combine code sections
-            %% Layout: [serial_putchar][serial_puts][function1][function2]...
-            CodeSections = [SerialPutchar, SerialPuts | TranslatedFunctions],
-            Code = iolist_to_binary(CodeSections),
+                                        %% Combine code sections
+                                        %% Layout: [serial_putchar][serial_puts][function1][function2]...
+                                        CodeSections = [SerialPutchar, SerialPuts | TranslatedFunctions],
+                                        Code = iolist_to_binary(CodeSections),
 
-            %% Entry point is first translated function (after helpers)
-            EntryOffset = byte_size(SerialPutchar) + byte_size(SerialPuts),
+                                        %% SECURITY FIX (Finding #3): Check output code size
+                                        CodeSize = byte_size(Code),
+                                        case CodeSize > ?MAX_OUTPUT_CODE_SIZE of
+                                            true ->
+                                                {error, {output_code_size_exceeded, CodeSize, max, ?MAX_OUTPUT_CODE_SIZE}};
+                                            false ->
+                                                %% Entry point is first translated function (after helpers)
+                                                EntryOffset = byte_size(SerialPutchar) + byte_size(SerialPuts),
 
-            %% Data section (empty for now - strings embedded in code via RIP-relative)
-            Data = <<>>,
+                                                %% Data section (empty for now - strings embedded in code via RIP-relative)
+                                                Data = <<>>,
 
-            {ok, #{code => Code, data => Data, entry => EntryOffset}}
+                                                {ok, #{code => Code, data => Data, entry => EntryOffset}}
+                                        end;
+                                    {error, CheckError} ->
+                                        {error, CheckError}
+                                end
+                        end
+                end
+        end
+    catch
+        error:CatchReason:Stack ->
+            {error, {translation_failed, CatchReason, Stack}}
+    end.
+
+%% SECURITY FIX (Finding #3): Check that no function exceeds instruction limit
+check_function_sizes([]) ->
+    ok;
+check_function_sizes([Function | Rest]) ->
+    InstrCount = length(Function),
+    case InstrCount > ?MAX_INSTRUCTIONS_PER_FUNCTION of
+        true ->
+            {error, {function_instruction_count_exceeded, InstrCount, max, ?MAX_INSTRUCTIONS_PER_FUNCTION}};
+        false ->
+            check_function_sizes(Rest)
     end.
 
 %% Extract function definitions from flat instruction list
