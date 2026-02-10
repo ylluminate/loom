@@ -96,7 +96,7 @@ alloc_pages(_State, Count) ->
 
 %% @doc Free a single page
 -spec free_page(state(), phys_addr()) -> state() | {error, invalid_address}.
-free_page(State, PhysAddr) ->
+free_page(State, PhysAddr) when is_integer(PhysAddr) ->
     #{total_pages := TotalPages} = State,
 
     %% Validate page alignment
@@ -110,7 +110,9 @@ free_page(State, PhysAddr) ->
             end;
         _ ->
             {error, invalid_address}
-    end.
+    end;
+free_page(_State, _PhysAddr) ->
+    {error, invalid_address}.
 
 free_page_checked(State, PageNum) ->
     #{bitmap := Bitmap, free_count := FreeCount, reserved_pages := ReservedPages} = State,
@@ -163,7 +165,7 @@ free_pages(State, PhysAddrs) ->
 
 %% @doc Mark a physical address range as reserved
 -spec mark_reserved(state(), phys_addr(), phys_addr()) -> state().
-mark_reserved(State, StartAddr, EndAddr) when StartAddr >= 0, EndAddr >= 0 ->
+mark_reserved(State, StartAddr, EndAddr) when is_integer(StartAddr), is_integer(EndAddr), StartAddr >= 0, EndAddr >= 0 ->
     case StartAddr > EndAddr of
         true ->
             %% Invalid range - return state unchanged
@@ -174,7 +176,7 @@ mark_reserved(State, StartAddr, EndAddr) when StartAddr >= 0, EndAddr >= 0 ->
             mark_reserved_pages(State, StartPage, EndPage)
     end;
 mark_reserved(_, _, _) ->
-    {error, {invalid_address, negative}}.
+    {error, invalid_address}.
 
 %% @doc Get allocator statistics
 -spec stats(state()) -> #{atom() => non_neg_integer()}.

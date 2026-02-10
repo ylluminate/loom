@@ -35,7 +35,7 @@ execute_file(Path, FunctionName, Args) ->
 execute({Module, Code}, FunctionName, Args) ->
     execute({Module, Code}, FunctionName, Args, []).
 
-execute({Module, Code}, FunctionName, Args, Options) ->
+execute({Module, Code}, FunctionName, Args, Options) when is_list(Args) ->
     %% Build code map and label map
     CodeMap = build_code_map(Code),
     Labels = build_label_map(Code),
@@ -86,7 +86,9 @@ execute({Module, Code}, FunctionName, Args, Options) ->
             %% Run the interpreter
             run(Proc, Options)
             end
-    end.
+    end;
+execute(_Module, _FunctionName, Args, _Options) ->
+    {error, {invalid_args, Args}}.
 
 %% Build function -> instructions mapping
 build_code_map(Code) ->

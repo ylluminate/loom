@@ -309,11 +309,12 @@ parse_atoms(Binary) ->
     %% Try different formats for atom count
     %% Modern BEAM files use compact encoding, but let's try signed int first
     case Binary of
-        <<Count:32/signed, Rest/binary>> when Count < 0 ->
-            %% Negative count means use absolute value
+        <<Count:32/signed, Rest/binary>> when Count < 0, abs(Count) < 10000 ->
+            %% OTP encodes atom count with high bit set; read as signed, use abs
+            %% FINDING 4 FIX: Cap absolute value to prevent resource exhaustion
             parse_atom_list(Rest, abs(Count), []);
-        <<Count:32, Rest/binary>> when Count > 0, Count < 10000 ->
-            %% Positive count
+        <<Count:32/unsigned, Rest/binary>> when Count > 0, Count < 10000 ->
+            %% Positive count (standard encoding)
             parse_atom_list(Rest, Count, []);
         _ ->
             []
@@ -540,12 +541,16 @@ decode_instr_loop(Binary, Atoms, Acc) ->
 %% Returns: {{Opcode, [Operands]}, RestBinary} | error
 decode_instruction(<<Opcode:8, Rest/binary>>, Atoms) ->
     OpcodeName = opcode_to_name(Opcode),
-    Arity = opcode_arity(Opcode),
-    case decode_operands(Rest, Arity, Atoms, []) of
-        {Operands, Rest2} ->
-            {{OpcodeName, Operands}, Rest2};
-        error ->
-            error
+    case opcode_arity(Opcode) of
+        {error, Reason} ->
+            {error, Reason};
+        Arity ->
+            case decode_operands(Rest, Arity, Atoms, []) of
+                {Operands, Rest2} ->
+                    {{OpcodeName, Operands}, Rest2};
+                error ->
+                    error
+            end
     end;
 decode_instruction(_, _) ->
     error.
@@ -1146,4 +1151,4 @@ opcode_arity(177) -> 6; % bs_create_bin
 opcode_arity(178) -> 3; % call_fun2
 opcode_arity(179) -> 0; % nif_start
 opcode_arity(180) -> 1; % badrecord
-opcode_arity(_) -> 0.   % unknown - assume no operands
+opcode_arity(N) -> {error, {unknown_opcode, N}}.   % FINDING 3 FIX: Return error instead of 0

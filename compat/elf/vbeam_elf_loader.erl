@@ -703,8 +703,8 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
 
     Value = case Type of
         r_x86_64_64 ->
-            %% S + A
-            S + A;
+            %% S + A (FINDING 5 FIX: Mask to 64 bits to prevent overflow)
+            (S + A) band 16#FFFFFFFFFFFFFFFF;
         r_x86_64_pc32 ->
             %% S + A - P (must fit in signed 32-bit)
             Val32 = S + A - P,

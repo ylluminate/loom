@@ -638,12 +638,32 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
             %% Extract vregs from Args (list of operands)
             ArgVregs = extract_vregs_from_term(Args),
             {ArgVregs, [Dst]};
+        %% Common opcodes that have no vreg defs (calls, branches, prints, etc.)
+        {call, _, _} -> {extract_vregs_from_tuple(Inst), []};
+        {call, _, _, _} -> {extract_vregs_from_tuple(Inst), []};
+        {ret, _} -> {extract_vregs_from_tuple(Inst), []};
+        {jmp, _} -> {[], []};
+        {jcc, _, _, _} -> {extract_vregs_from_tuple(Inst), []};
+        {print_int, Src} -> {[Src], []};
+        {print_str, Src} -> {[Src], []};
+        {print_float, Src} -> {[Src], []};
+        {float_to_str, Dst, Src} -> {[Src], [Dst]};
+        {int_to_str, Dst, Src} -> {[Src], [Dst]};
+        {str_concat, Dst, A, B} -> {[A, B], [Dst]};
+        {str_len, Dst, Src} -> {[Src], [Dst]};
+        {array_new, Dst, _, _} -> {[], [Dst]};
+        {array_get, Dst, Arr, Idx, _} -> {[Arr, Idx], [Dst]};
+        {array_set, Arr, Idx, _, Val} -> {[Arr, Idx, Val], []};
+        {array_len, Dst, Arr} -> {[Arr], [Dst]};
+        {map_new, Dst, _} -> {[], [Dst]};
+        {map_get, Dst, Map, Key} -> {[Map, Key], [Dst]};
+        {map_put, Map, Key, Val} -> {[Map, Key, Val], []};
         _ ->
-            %% FINDING 3 FIX: Conservative fallback changed to fail-closed.
-            %% Unknown opcodes likely have complex semantics - treat as uses with no defs
-            %% to avoid incorrectly marking args as defs (which caused spill corruption).
+            %% CRITICAL FIX (R32): For truly unknown opcodes, use conservative
+            %% uses-only fallback. This is safe — it may generate unnecessary
+            %% spill loads but won't corrupt values (extra loads are harmless).
             VregsInInst = extract_vregs_from_tuple(Inst),
-            {VregsInInst, []}  % conservative: all vregs are uses, no defs
+            {VregsInInst, []}
     end;
 analyze_inst_operands(_) -> {[], []}.
 

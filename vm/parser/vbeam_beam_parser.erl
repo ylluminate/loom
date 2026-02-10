@@ -106,7 +106,7 @@ parse_chunk_data('Code', Data) ->
               function_count => FunctionCount,
               code => Code};
         _ ->
-            Data
+            {error, invalid_code_chunk}
     end;
 
 parse_chunk_data('Atom', Data) ->

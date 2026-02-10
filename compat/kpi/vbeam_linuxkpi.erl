@@ -349,15 +349,19 @@ disable_irq(Irq) ->
 
 %% @doc Schedule work
 %% Real implementation: spawn BEAM process to execute work function
+%% FINDING 7 FIX: Return error until real implementation exists
 schedule_work(Work) ->
     log_kapi_call(schedule_work, [Work]),
+    logger:warning("[KAPI] schedule_work: stub implementation - work not actually scheduled"),
     %% TODO: spawn_link fun that calls Work function
-    true. %% Queued
+    {error, enosys}.
 
 %% @doc Queue work on specific workqueue
+%% FINDING 7 FIX: Return error until real implementation exists
 queue_work(Queue, Work) ->
     log_kapi_call(queue_work, [Queue, Work]),
-    schedule_work(Work).
+    logger:warning("[KAPI] queue_work: stub implementation - work not actually queued"),
+    {error, enosys}.
 
 %% @doc Modify timer expiration
 %% Real implementation: erlang:send_after

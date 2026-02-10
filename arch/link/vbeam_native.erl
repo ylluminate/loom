@@ -134,9 +134,16 @@ do_compile(#{target := Target, format := Format, functions := Functions,
     DataBase = data_base(Format, byte_size(CodeBin)),
     case vbeam_native_link:resolve(LinkState2, TextBase, DataBase, DataBase + byte_size(DataBin)) of
         {ok, Patches} ->
-            LinkedCode = vbeam_native_link:apply_patches(CodeBin, Patches),
-            %% 7. Emit binary format
-            emit_binary(Format, LinkedCode, DataBin, EntryOffset, Target);
+            %% CRITICAL FIX (Finding 5): Wrap apply_patches in try/catch to convert
+            %% relocation errors (overflow, out-of-bounds) to proper error tuples.
+            try
+                LinkedCode = vbeam_native_link:apply_patches(CodeBin, Patches),
+                %% 7. Emit binary format
+                emit_binary(Format, LinkedCode, DataBin, EntryOffset, Target)
+            catch
+                error:Reason ->
+                    {error, {link_failed, Reason}}
+            end;
         {error, {unresolved_symbols, _}} = Err ->
             %% Already properly wrapped - don't double-wrap
             Err;

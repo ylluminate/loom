@@ -392,7 +392,10 @@ handle_call({send_message, ToPid, Message}, _From, State) ->
             MailboxSize = queue:len(Mailbox),
             %% BUG 3 FIX: Check byte size limit (10MB default)
             MaxMailboxBytes = 10 * 1024 * 1024,
-            MsgBytes = erlang:external_size(Message),
+            MsgBytes = try erlang:external_size(Message)
+                       catch
+                           error:system_limit -> MaxMailboxBytes + 1  % Treat as too large
+                       end,
             case {MailboxSize >= ?DEFAULT_MAILBOX_LIMIT, MailboxBytes + MsgBytes > MaxMailboxBytes} of
                 {true, _} ->
                     {reply, {error, mailbox_full}, State};

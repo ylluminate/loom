@@ -84,6 +84,7 @@ emit_alloc_init(arm64, Format) ->
             _     -> ?ARM64_ENC:encode_mov_imm64(x8, 93)
         end,
         ?ARM64_ENC:encode_svc(SvcImm),                 %% exit(1)
+        ?ARM64_ENC:encode_brk(1),                      %% CRITICAL FIX (Finding 2): trap if syscall returns
         %% Success path: store heap base in x28 and heap end in x27
         {label, OkLbl},
         ?ARM64_ENC:encode_mov_rr(x28, x0),             %% x28 = heap_base
@@ -118,6 +119,7 @@ emit_alloc_init(x86_64, _Format) ->
         ?X86_ENC:encode_mov_imm64(rdi, 1),     %% exit code 1
         ?X86_ENC:encode_mov_imm64(rax, 60),    %% sys_exit
         ?X86_ENC:encode_syscall(),
+        ?X86_ENC:encode_ud2(),                 %% CRITICAL FIX (Finding 2): trap if syscall returns
         %% Success path: store heap base in r15 and heap end in r14
         {label, OkLbl},
         ?X86_ENC:encode_mov_rr(r15, rax),      %% r15 = heap_base

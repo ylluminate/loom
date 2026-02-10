@@ -905,7 +905,9 @@ lower_instruction({field_set, {preg, Struct}, {imm, Offset}, {preg, Val}}, _FnNa
 %%====================================================================
 
 lower_instruction({map_new, {preg, Dst}}, _FnName, _UsedCalleeSaved) ->
-    InitCap = 8,
+    %% CRITICAL FIX (Finding 3): Increased from 8 to 64 to delay capacity overflow.
+    %% No reallocation path exists yet - UD2 trap at overflow is safety net.
+    InitCap = 64,
     BufSize = InitCap * 16,
     lists:flatten([
         vbeam_native_alloc:emit_alloc(x86_64, rax, BufSize),
@@ -1019,9 +1021,9 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         {reloc, rel32, DoneLbl, -4},
 
         {label, CapFullLbl},
-        %% CRITICAL FIX #10: Map capacity exhausted - emit trap instead of silent drop.
-        %% Returning map unchanged silently loses data. Better to crash explicitly.
-        %% Emit UD2 (undefined instruction) to trap immediately.
+        %% CRITICAL FIX #10 + Finding 3: Map capacity exhausted - trap.
+        %% InitCap bumped to 64 (from 8) to delay overflow, but no reallocation path exists.
+        %% UD2 traps immediately rather than silently corrupting data.
         %% TODO: implement map growth/reallocation when capacity is reached.
         <<16#0F:8, 16#0B:8>>,  %% UD2 opcode
         %% (execution never reaches here after UD2 trap)
@@ -1457,6 +1459,19 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_pop(r13),
         ?ENC:encode_pop(r12),
         ?ENC:encode_pop(rbx)
+    ]);
+
+%% CRITICAL FIX (Finding 4): print_float clause was missing, causing UD2 trap.
+%% Convert float to string first, then print the string.
+lower_instruction({print_float, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
+    lists:flatten([
+        %% Convert float (in Reg) to string via float_to_str IR opcode
+        %% (which the lowerer will expand to its full implementation)
+        %% Then print that string via print_str.
+        %% We need a temporary vreg for the string result, but we're in post-regalloc
+        %% lowering so all operands must be pregs. Use rax as scratch.
+        [{float_to_str, {preg, rax}, {preg, Reg}}],
+        lower_instruction({print_str, {preg, rax}}, _FnName, _UsedCalleeSaved)
     ]);
 
 %% Catch-all for unhandled instructions

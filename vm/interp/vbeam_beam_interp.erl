@@ -26,7 +26,7 @@
 execute(Chunks, FunctionName, Args) ->
     execute(Chunks, FunctionName, Args, []).
 
-execute(Chunks, FunctionName, Args, Options) ->
+execute(Chunks, FunctionName, Args, Options) when is_list(Args) ->
     %% Initialize process state
     Proc = init_proc(Chunks),
 
@@ -50,12 +50,19 @@ execute(Chunks, FunctionName, Args, Options) ->
             run(Proc2, Options);
         error ->
             {error, {function_not_found, FunctionName, length(Args)}}
-    end.
+    end;
+execute(_Chunks, _FunctionName, Args, _Options) ->
+    {error, {invalid_args, Args}}.
 
 %% Initialize process state from parsed chunks
 init_proc(Chunks) ->
     %% Extract required chunks
     Code = maps:get('Code', Chunks),
+    %% FINDING 2 FIX: Validate Code is a map before accessing
+    case is_map(Code) of
+        false -> error({invalid_code_chunk, Code});
+        true -> ok
+    end,
     CodeBinary = maps:get(code, Code),
 
     %% Get atom table
