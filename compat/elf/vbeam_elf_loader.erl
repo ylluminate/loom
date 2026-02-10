@@ -665,6 +665,7 @@ parse_rela(Data, Offset) ->
 
 %% FINDING 6 FIX: Parse REL entries (addend implicit, derived from target)
 %% Codex R34 Finding #7: REL relocations use implicit addend from target
+%% CODEX R35 FINDING #4 FIX: Document limitation, no section data access here
 parse_rel(Data, Offset) ->
     <<_:Offset/binary,
       RelOffset:64/little, Info:64/little,
@@ -677,11 +678,18 @@ parse_rel(Data, Offset) ->
         offset => RelOffset,
         type => Type,
         symbol => Sym,
-        %% TODO: For REL format, the addend should be read from the relocation
-        %% target location (width/type-aware based on Type). Currently simplified
-        %% to 0, which produces incorrect relocations for non-zero addends.
-        %% Proper fix requires reading the target value at RelOffset with
-        %% appropriate width (32-bit/64-bit) based on relocation type.
+        %% CODEX R35 FINDING #4: REL addend limitation
+        %% For REL format, the addend should be read from the relocation target
+        %% location (the existing value at RelOffset in the target section).
+        %% Width depends on Type: 64-bit for R_X86_64_64, 32-bit for PC32/PLT32/32/32S.
+        %%
+        %% Current limitation: parse_rel() doesn't have access to section data to
+        %% read the implicit addend. This would require:
+        %%   1. Pass target section binary to parse_relocations()
+        %%   2. Extract width-appropriate value at RelOffset
+        %%   3. Sign-extend for signed types (PC32, PLT32, 32S)
+        %%
+        %% For now: hardcoded 0 (incorrect for non-zero implicit addends)
         addend => 0
     }.
 

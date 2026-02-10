@@ -416,27 +416,22 @@ lower_instruction({call_indirect, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
 
 %% RET
 lower_instruction(ret, _FnName, UsedCalleeSaved) ->
-    %% CRITICAL FIX: Correct epilogue sequence to restore callee-saved registers.
-    %% Frame layout (after prologue): rbp_save, callee_saved..., spill_area ← rsp
-    %% Epilogue must:
-    %%   1. Reclaim spill area (add rsp, SpillSize OR mov rsp, rbp to skip to callee-saved area)
-    %%   2. Pop callee-saved registers in REVERSE order
-    %%   3. Pop rbp
-    %%   4. ret
-    %% PROBLEM: SpillSize is not available here. But we can calculate where callee-saved starts:
-    %%   rbp points to old rbp. Callee-saved were pushed AFTER rbp, so they're at rbp-8, rbp-16, etc.
-    %%   Stack grows down: after "push rbp", rbp points to saved rbp. Then we push callee-saved.
-    %%   So callee-saved are at rbp - (N*8) down to rbp - 8.
-    %% To restore: set rsp = rbp - (NumCalleeSaved * 8), then pop each, then pop rbp.
+    %% CRITICAL FIX (Round 35, Finding 1): Always restore rsp from rbp.
+    %% Prologue does: push rbp; mov rbp, rsp; [push callee-saved]; [sub rsp, FrameSize]
+    %% Epilogue must undo this. Even when UsedCalleeSaved=[] but FrameSize>0,
+    %% we need mov rsp,rbp to reclaim spill space before pop rbp.
+    %% Frame layout: rbp_save ← rbp, callee_saved..., spill_area ← rsp
+    %% Solution: ALWAYS do mov rsp,rbp first (undoes sub rsp,FrameSize and callee-saved pushes)
     case UsedCalleeSaved of
         [] ->
-            emit_epilogue(0);
+            %% No callee-saved, but may have had spill space
+            %% Use mov rsp,rbp to restore, then pop rbp, ret
+            [?ENC:encode_mov_rr(rsp, rbp),
+             ?ENC:encode_pop(rbp),
+             ?ENC:encode_ret()];
         _ ->
+            %% Callee-saved present: mov rsp,rbp; sub rsp,N*8; pop each; pop rbp; ret
             NumCalleeSaved = length(UsedCalleeSaved),
-            %% Set rsp to point to the first callee-saved register on stack
-            %% (they were pushed after rbp, so they're below rbp in memory)
-            %% Use: sub rsp, rbp; sub rsp, -(NumCalleeSaved*8) = add rsp, -...;
-            %% Actually simpler: mov rsp, rbp; sub rsp, NumCalleeSaved*8
             SetRsp = [?ENC:encode_mov_rr(rsp, rbp),
                       ?ENC:encode_sub_imm(rsp, NumCalleeSaved * 8)],
             RestoreCode = [?ENC:encode_pop(Reg) || Reg <- lists:reverse(UsedCalleeSaved)],
@@ -1546,8 +1541,10 @@ break_cycles_and_emit_x86(Moves, UsedCalleeSaved) ->
     Cycles = find_all_cycles(Graph),
     case Cycles of
         [] ->
-            %% No cycles — emit directly
-            [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- Moves];
+            %% CRITICAL FIX (Round 35, Finding 3): Emit moves in reverse order.
+            %% Acyclic chains like rdi←rsi, rsi←rdx clobber if emitted forward.
+            %% Reverse ensures consumers execute before producers (rdx→rsi then rsi→rdi).
+            [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- lists:reverse(Moves)];
         _ ->
             %% Break each cycle by saving one register to r11 before the cycle
             break_all_cycles(Cycles, Moves, UsedCalleeSaved)

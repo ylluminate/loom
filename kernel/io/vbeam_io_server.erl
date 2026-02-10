@@ -237,16 +237,16 @@ handle_io_request({put_chars, Encoding, Mod, Fun, Args}, State) ->
             Arity = length(Args),
             case is_safe_mfa(Mod, Fun, Arity) of
                 true when Arity >= 0, Arity =< 3 ->
-                    %% Codex R34 Finding #4: Pre-validate argument size before apply()
-                    %% to prevent memory DoS from format expansion
+                    %% CODEX R35 FINDING #3 FIX: Check args size BEFORE apply()
+                    %% Prevent memory DoS from format expansion or malicious args
                     MaxArgSize = 16 * 1024,  % Limit total argument size
                     try
                         ArgsSize = erlang:external_size(Args),
-                        case ArgsSize of
-                            Size when Size > MaxArgSize ->
-                                {error, {args_too_large, Size, max, MaxArgSize}, State};
-                            _ ->
-                                %% Args are within bounds, safe to format
+                        case ArgsSize > MaxArgSize of
+                            true ->
+                                {error, {args_too_large, ArgsSize, max, MaxArgSize}, State};
+                            false ->
+                                %% Args are within bounds, NOW safe to format
                                 Chars = apply(Mod, Fun, Args),
                                 %% FINDING 9 FIX: Preflight check with iolist_size before materialization
                                 MaxOutputSize = 64 * 1024,

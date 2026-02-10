@@ -560,11 +560,12 @@ decode_instruction(_, _) ->
     error.
 
 %% Decode N operands
+%% CODEX R35 FINDING #2 FIX: Ensure error tuples are never matched as {Items, Rest3}
 decode_operands(Rest, 0, _Atoms, Acc) ->
     {lists:reverse(Acc), Rest};
 decode_operands(Binary, N, Atoms, Acc) ->
     case decode_operand(Binary, Atoms) of
-        %% Codex R34 Finding #6: Match error tuple BEFORE generic tuple pattern
+        %% Codex R34 Finding #6 + R35 Finding #2: Match error tuple BEFORE generic tuple pattern
         {error, _Reason} = Error ->
             Error;
         {Operand, Rest} when is_binary(Rest) ->
@@ -719,8 +720,11 @@ decode_extended(1, Rest, Atoms) ->
     %% List - count (as compact term) followed by count elements
     case decode_operand(Rest, Atoms) of
         {{integer, Count}, Rest2} when Count >= 0, Count =< 1000 ->
+            %% CODEX R35 FINDING #2 FIX: Match error tuple BEFORE generic {Items, Rest3}
             case decode_operands(Rest2, Count, Atoms, []) of
-                {Items, Rest3} ->
+                {error, _Reason} = Error ->
+                    Error;
+                {Items, Rest3} when is_binary(Rest3) ->
                     {{list, Items}, Rest3};
                 error ->
                     error

@@ -342,7 +342,7 @@ translate_opcode_normalized({move, Src, Dst}, Acc) ->
     <<Acc/binary, Code/binary>>;
 
 translate_opcode_normalized({call_ext, _Arity, {extfunc, Mod, Fun, _A}}, Acc) ->
-    %% External function call - handle io:format, erlang:display as serial output
+    %% External function call - fail on unimplemented calls instead of emitting unsafe code
     Code = translate_external_call(Mod, Fun),
     <<Acc/binary, Code/binary>>;
 
@@ -359,6 +359,7 @@ translate_opcode_normalized({call_ext_last, _Arity, {extfunc, Mod, Fun, _A}, Dea
 
 translate_opcode_normalized({call_ext_only, _Arity, {extfunc, Mod, Fun, _A}}, Acc) ->
     %% Tail call without deallocation (used when no stack frame)
+    %% CODEX R35 FINDING #1 FIX: translate_external_call now errors for unsafe calls
     Code1 = translate_external_call(Mod, Fun),
     Code2 = <<16#C3>>,  % ret
     <<Acc/binary, Code1/binary, Code2/binary>>;
@@ -453,11 +454,14 @@ translate_move(Src, Dst) ->
 %% External Call Translation
 %% ============================================================================
 
+%% CODEX R35 FINDING #1 FIX: Reject io:format and erlang:display call_ext
+%% The inline serial output code uses lodsb from RSI, which is uninitialized.
+%% Previously put_string was disabled but call_ext still generated unsafe code.
 translate_external_call(io, format) ->
-    translate_serial_output();
+    error({unimplemented_external_call, io, format, "requires initialized RSI for serial output"});
 
 translate_external_call(erlang, display) ->
-    translate_serial_output();
+    error({unimplemented_external_call, erlang, display, "requires initialized RSI for serial output"});
 
 %% SECURITY FIX (Finding #5): Return error instead of silently emitting NOP
 translate_external_call(Mod, Fun) ->

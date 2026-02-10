@@ -43,8 +43,10 @@ emit_prologue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_mov_rr(x29, sp)] ++
     save_callee_saved(UsedCallee, 16);
 emit_prologue(FrameSize, UsedCallee) ->
-    %% Large frame: stp x29,x30,[sp,#-16]! then mov x29,sp then sub sp,sp,#(FrameSize-16)
-    %% CRITICAL: Set x29 to point to FP/LR save slot, not bottom of frame
+    %% CRITICAL FIX (Round 35, Finding 2): Set x29 AFTER full stack allocation.
+    %% Large frame: stp x29,x30,[sp,#-16]! then sub sp,sp,#(FrameSize-16) then mov x29,sp
+    %% This ensures x29 points to the FP/LR save slot (at top of frame),
+    %% and spill accesses at positive offsets from x29 point DOWN into the frame.
     %% If (FrameSize-16) > 4095, materialize in x16 and use register form
     FrameDelta = FrameSize - 16,
     SubInstr = case FrameDelta =< 4095 of
@@ -54,9 +56,9 @@ emit_prologue(FrameSize, UsedCallee) ->
             [?ENC:encode_mov_imm64(x16, FrameDelta),
              ?ENC:encode_sub_rrr(sp, sp, x16)]
     end,
-    [?ENC:encode_stp_pre(x29, x30, sp, -16),
-     ?ENC:encode_mov_rr(x29, sp)] ++
+    [?ENC:encode_stp_pre(x29, x30, sp, -16)] ++
     SubInstr ++
+    [?ENC:encode_mov_rr(x29, sp)] ++
     save_callee_saved(UsedCallee, 16).
 
 %% Epilogue: restore callee-saved; mov sp, x29; ldp x29, x30, [sp], #FrameSize; ret
@@ -1563,8 +1565,10 @@ break_cycles_and_emit_arm64(Moves, NumCalleeSaved) ->
 
     case AllCycles of
         [] ->
-            %% No cycles — emit directly
-            [emit_move_arm64(Dst, Src, NumCalleeSaved) || {Dst, Src} <- Moves];
+            %% CRITICAL FIX (Round 35, Finding 3): Emit moves in reverse order.
+            %% Acyclic chains like x0←x1, x1←x2 clobber if emitted forward.
+            %% Reverse ensures consumers execute before producers (x2→x1 then x1→x0).
+            [emit_move_arm64(Dst, Src, NumCalleeSaved) || {Dst, Src} <- lists:reverse(Moves)];
         _ ->
             %% Break each cycle independently using x16 as temp
             %% Process moves, breaking cycles as we go

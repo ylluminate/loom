@@ -577,15 +577,15 @@ rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
             end;
            (_) -> false
         end, Defs),
-    %% CRITICAL FIX (Finding 3): Deduplicate by vreg before counting.
-    %% Repeated use of same spilled vreg inflates count → false too_many_spills crash.
+    %% CRITICAL FIX (Round 35, Finding 4): Build unified vreg set to avoid double-counting.
+    %% If vreg is both used and defined (e.g., add v1,v1,v2), it appears in both lists.
+    %% Count distinct vregs, assign ONE scratch per vreg, use for both load and store.
     LoadsNeeded = lists:usort(LoadsNeeded0),
     StoresNeeded = lists:usort(StoresNeeded0),
-    %% CRITICAL FIX #6: Multiple spills in one instruction need distinct scratch registers.
-    %% If >2 spills, error. For 0-2 spills, assign r11/r10 (x86_64) or x15/x14 (arm64).
-    NumLoads = length(LoadsNeeded),
-    NumStores = length(StoresNeeded),
-    case NumLoads + NumStores of
+    %% Union of all spilled vregs (deduplicated)
+    AllSpilledVregs = lists:usort([V || {V, _Slot} <- LoadsNeeded ++ StoresNeeded]),
+    NumSpills = length(AllSpilledVregs),
+    case NumSpills of
         0 ->
             %% No spills - just rewrite and return
             [rewrite_inst_operands(Inst, Assignments, undefined)];
@@ -593,26 +593,26 @@ rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
             error({too_many_spills_in_instruction, Inst, N,
                    "Instruction has more than 2 spilled operands - not yet supported"});
         _ ->
-            %% 1 or 2 spills - assign scratch registers
+            %% 1 or 2 spills - assign ONE scratch per vreg
             {ScratchRegs, _} = case Target of
                 x86_64 -> {[r11, r10], r11};
                 arm64 -> {[x15, x14], x15}
             end,
-            %% Assign scratch regs to each spilled vreg
-            %% CRITICAL FIX (Round 28, Finding 3): Trim scratch list to match spill count
-            LoadAssignments = lists:zip(LoadsNeeded, lists:sublist(ScratchRegs, length(LoadsNeeded))),
-            StoreAssignments = lists:zip(StoresNeeded, lists:sublist(ScratchRegs, length(StoresNeeded))),
-            %% Generate loads with assigned scratch regs
-            Loads = [{mov, {preg, Scratch}, {stack, Slot}}
-                     || {{_V, Slot}, Scratch} <- LoadAssignments],
-            %% Build vreg-to-scratch mapping for operand rewriting
-            VregToScratch = maps:from_list([{V, Scratch}
-                                            || {{V, _Slot}, Scratch} <- LoadAssignments ++ StoreAssignments]),
-            %% Rewrite instruction operands with per-vreg scratch assignments
+            %% Build vreg→slot map (use LoadsNeeded first, fall back to StoresNeeded)
+            VregSlotMap = maps:from_list(LoadsNeeded ++ StoresNeeded),
+            %% Assign scratch registers: one per unique vreg
+            VregScratchPairs = lists:zip(AllSpilledVregs, lists:sublist(ScratchRegs, NumSpills)),
+            VregToScratch = maps:from_list(VregScratchPairs),
+            %% Generate loads for vregs that are USED
+            LoadVregs = [V || {V, _} <- LoadsNeeded],
+            Loads = [{mov, {preg, maps:get(V, VregToScratch)}, {stack, maps:get(V, VregSlotMap)}}
+                     || V <- LoadVregs],
+            %% Rewrite instruction operands with unified vreg→scratch map
             RewrittenInst = rewrite_inst_operands_multi(Inst, Assignments, VregToScratch),
-            %% Generate stores with assigned scratch regs
-            Stores = [{mov, {stack, Slot}, {preg, Scratch}}
-                      || {{_V, Slot}, Scratch} <- StoreAssignments],
+            %% Generate stores for vregs that are DEFINED
+            StoreVregs = [V || {V, _} <- StoresNeeded],
+            Stores = [{mov, {stack, maps:get(V, VregSlotMap)}, {preg, maps:get(V, VregToScratch)}}
+                      || V <- StoreVregs],
             %% Concatenate: loads + rewritten instruction + stores
             Loads ++ [RewrittenInst] ++ Stores
     end;
