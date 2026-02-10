@@ -565,12 +565,22 @@ execute_erlang_bif(erlang, '>=', [A, B], _Options) ->
     {ok, A >= B};
 
 execute_erlang_bif(io, format, [Format], _Options) ->
-    io:format("~s", [Format]),
-    {ok, ok};
+    try
+        io:format("~s", [Format]),
+        {ok, ok}
+    catch
+        error:Reason ->
+            {error, {format_error, Reason}}
+    end;
 
 execute_erlang_bif(io, format, [Format, Args], _Options) ->
-    io:format(Format, Args),
-    {ok, ok};
+    try
+        io:format(Format, Args),
+        {ok, ok}
+    catch
+        error:Reason ->
+            {error, {format_error, Reason}}
+    end;
 
 execute_erlang_bif(Mod, Fun, Args, _Options) ->
     io:format("Warning: BIF ~p:~p/~p not implemented~n", [Mod, Fun, length(Args)]),

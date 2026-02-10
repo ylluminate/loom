@@ -584,7 +584,8 @@ parse_relocations(_Binary, Sections, _StrTab) ->
                 || I <- lists:seq(0, NumRelas - 1)
             ],
 
-            Acc#{TargetName => Relocs}
+            ExistingRelocs = maps:get(TargetName, Acc, []),
+            Acc#{TargetName => ExistingRelocs ++ Relocs}
         end,
         #{},
         RelaSections

@@ -23,7 +23,7 @@
     request_irq/5, request_threaded_irq/6, free_irq/2, enable_irq/1, disable_irq/1,
 
     %% Workqueues/Timers
-    schedule_work/1, queue_work/2, mod_timer/2, del_timer/1, timer_fired/1,
+    schedule_work/1, queue_work/2, mod_timer/2, del_timer/1, timer_fired/1, timer_fired/2,
 
     %% DMA
     dma_map_single/4, dma_unmap_single/4, dma_set_mask/2,
@@ -72,9 +72,14 @@ kmalloc(Size, _Flags) when is_integer(Size), Size > 0, Size =< 1073741824 ->
     log_kapi_call(kmalloc, [Size, _Flags]),
     %% Allocate BEAM binary (automatically managed)
     Ptr = make_ref(),
-    Memory = <<0:(Size*8)>>,
-    %% TODO: Store in ETS table for tracking: {Ptr, Memory, Size}
-    {ok, Ptr, Memory};
+    try
+        Memory = <<0:(Size*8)>>,
+        %% TODO: Store in ETS table for tracking: {Ptr, Memory, Size}
+        {ok, Ptr, Memory}
+    catch
+        error:system_limit -> {error, enomem};
+        error:badarg -> {error, enomem}
+    end;
 kmalloc(Size, _Flags) ->
     log_kapi_call(kmalloc, [Size, _Flags]),
     %% Invalid size
@@ -407,8 +412,21 @@ del_timer(Timer) ->
             1 %% Was active, now cancelled
     end.
 
-%% @doc Clean up timer ref after timer fires (call when handling {timer_expired, Timer})
+%% @doc Clean up timer ref after timer fires (call when handling {timer_expired, Timer, Gen})
 %% This prevents timer ref leaks from one-shot timers
+%% Generation-aware: only removes if generation matches (prevents stale timer from clearing new timer)
+timer_fired(Timer, Gen) ->
+    case get_timer_ref(Timer) of
+        {_TRef, StoredGen} when StoredGen =:= Gen ->
+            %% Generation matches - this is the current timer firing
+            remove_timer_ref(Timer),
+            ok;
+        _ ->
+            %% Generation mismatch or no timer - stale fire, ignore
+            ok
+    end.
+
+%% @doc Legacy 1-arg version - always remove (unsafe but backward compatible)
 timer_fired(Timer) ->
     remove_timer_ref(Timer),
     ok.

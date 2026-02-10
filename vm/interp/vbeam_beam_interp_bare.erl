@@ -50,6 +50,7 @@ load_module(BeamBinary) ->
             CodeBinary = maps:get(code, Parsed, <<>>),
             Instructions = case vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms) of
                 {ok, Instrs} -> Instrs;
+                {error, {decode_failed, _Reason, PartialInstrs}} -> PartialInstrs;
                 Instrs when is_list(Instrs) -> Instrs
             end,
 

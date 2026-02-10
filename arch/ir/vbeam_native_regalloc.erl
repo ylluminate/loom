@@ -37,7 +37,8 @@
     free_regs :: [atom()],
     used_regs :: [atom()],
     next_spill :: non_neg_integer(),
-    assignments :: #{non_neg_integer() => atom() | {stack, integer()}}
+    assignments :: #{non_neg_integer() => atom() | {stack, integer()}},
+    context :: map()  % Contains call_positions and target for call-aware allocation
 }).
 
 %% Main entry point: allocate physical registers for a function's IR body.
@@ -108,7 +109,8 @@ allocate(Body, Target, NumParams, Opts) ->
         free_regs = FreeRegs,
         used_regs = ParamRegs,
         next_spill = 0,
-        assignments = ParamAssign
+        assignments = ParamAssign,
+        context = #{call_positions => CallPositions, target => Target}
     },
     State1 = linear_scan(NonParamIntervals, State0),
     RewrittenBody0 = rewrite_instructions(Body, State1#alloc_state.assignments, Target),
@@ -195,21 +197,41 @@ extract_vregs_from_list([_ | Rest]) ->
     extract_vregs_from_list(Rest).
 
 %% Linear scan allocation core.
+%% CRITICAL FIX: Pass CallPositions and Target through state for call-aware allocation
 linear_scan([], State) -> State;
 linear_scan([Interval | Rest], State) ->
     %% Expire old intervals
     State1 = expire_old(Interval#interval.start, State),
-    case State1#alloc_state.free_regs of
+
+    %% Check if this interval spans a call
+    CallPositions = maps:get(call_positions, State1#alloc_state.context, []),
+    Target = maps:get(target, State1#alloc_state.context, x86_64),
+    SpansCall = spans_call(Interval, CallPositions),
+
+    %% Determine which registers are available for this interval
+    AvailableRegs = case SpansCall of
+        true ->
+            %% Interval spans call - MUST use callee-saved register
+            CalleeSaved = callee_saved_regs(Target),
+            [R || R <- State1#alloc_state.free_regs, lists:member(R, CalleeSaved)];
+        false ->
+            %% No call constraint - can use any free register
+            State1#alloc_state.free_regs
+    end,
+
+    case AvailableRegs of
         [] ->
-            %% No free registers — spill
+            %% No suitable registers available — spill
             State2 = spill_at_interval(Interval, State1),
             linear_scan(Rest, State2);
-        [Reg | FreeRest] ->
-            %% Assign a free register
+        [Reg | _] ->
+            %% Assign the first suitable register
             Assigned = Interval#interval{preg = Reg},
             Active2 = insert_active(Assigned, State1#alloc_state.active),
             Assignments2 = maps:put(Interval#interval.vreg, Reg,
                                     State1#alloc_state.assignments),
+            %% Remove assigned register from free pool
+            FreeRest = lists:delete(Reg, State1#alloc_state.free_regs),
             State2 = State1#alloc_state{
                 active = Active2,
                 free_regs = FreeRest,

@@ -599,12 +599,22 @@ execute_bif(erlang, 'not', [A], _Options) ->
     {ok, not A};
 
 execute_bif(io, format, [Format], _Options) ->
-    io:format("~s", [Format]),
-    {ok, ok};
+    try
+        io:format("~s", [Format]),
+        {ok, ok}
+    catch
+        error:Reason ->
+            {error, {format_error, Reason}}
+    end;
 
 execute_bif(io, format, [Format, Args], _Options) ->
-    io:format(Format, Args),
-    {ok, ok};
+    try
+        io:format(Format, Args),
+        {ok, ok}
+    catch
+        error:Reason ->
+            {error, {format_error, Reason}}
+    end;
 
 execute_bif(lists, reverse, [List], _Options) when is_list(List) ->
     {ok, lists:reverse(List)};

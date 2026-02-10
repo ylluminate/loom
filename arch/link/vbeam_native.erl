@@ -207,17 +207,29 @@ emit_binary(pe, Code, Data, EntryOffset, Arch) ->
 emit_binary(Format, _, _, _, _) ->
     {error, {unsupported_format, Format}}.
 
-%% Inject alloc_init code at the start of the "main" function.
+%% Inject alloc_init code at the start of the entry function.
 %% This sets up the bump allocator before any heap allocations.
+%% The entry function is either "main" or the first function if main is absent.
 inject_alloc_init(CodeParts, Target, Format) ->
     InitCode = vbeam_native_alloc:emit_alloc_init(Target, Format),
-    inject_into_main(CodeParts, InitCode).
+    inject_into_entry(CodeParts, InitCode).
 
-inject_into_main([], _InitCode) -> [];
-inject_into_main([{<<"main">>, Parts} | Rest], InitCode) ->
+inject_into_entry([], _InitCode) -> [];
+inject_into_entry([{<<"main">>, Parts} | Rest], InitCode) ->
+    %% Main exists - inject into it
     [{<<"main">>, InitCode ++ Parts} | Rest];
-inject_into_main([Other | Rest], InitCode) ->
-    [Other | inject_into_main(Rest, InitCode)].
+inject_into_entry([First | Rest], InitCode) ->
+    %% No main found - inject into the first function (which becomes entry)
+    case Rest of
+        [] ->
+            %% Only one function - inject here
+            {Name, Parts} = First,
+            [{Name, InitCode ++ Parts}];
+        _ ->
+            %% Multiple functions, no main - inject into first
+            {Name, Parts} = First,
+            [{Name, InitCode ++ Parts} | Rest]
+    end.
 
 %% Get the lowering module for a target architecture.
 lowerer_module(x86_64) -> vbeam_native_lower_x86_64;

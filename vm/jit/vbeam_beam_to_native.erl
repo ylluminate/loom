@@ -104,6 +104,8 @@ serial_puts_code() ->
     CallOffset = -(SerialPutcharSize + 16),
 
     iolist_to_binary([
+        %% Clear direction flag before lodsb loop (CRITICAL: prevents backward reads)
+        <<16#FC>>,                                % cld (clear direction flag)
         %% loop:
         <<16#48, 16#85, 16#C9>>,                  % test rcx, rcx (check counter)
         <<16#74, 16#0C>>,                         % jz done (+12 bytes to ret)
@@ -447,6 +449,7 @@ translate_serial_output() ->
     iolist_to_binary([
         %% Inline string output loop
         %% RSI = string pointer (assumed already loaded)
+        <<16#FC>>,                                % cld (clear direction flag - CRITICAL)
         <<16#AC>>,                                % lodsb
         <<16#84, 16#C0>>,                         % test al, al
         <<16#74, 16#16>>,                         % jz done (+22 bytes)
