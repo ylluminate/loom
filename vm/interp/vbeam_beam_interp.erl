@@ -417,12 +417,12 @@ decode_arg(_Rest, _PC) ->
     {error, truncated}.
 
 %% Safe list access with bounds checking
-safe_nth(N, List) when is_integer(N), N >= 1, N =< length(List) ->
+safe_nth(N, List) when is_list(List), is_integer(N), N >= 1, N =< length(List) ->
     {ok, lists:nth(N, List)};
-safe_nth(N, List) when is_integer(N) ->
+safe_nth(N, List) when is_list(List), is_integer(N) ->
     {error, {invalid_index, N, length(List)}};
 safe_nth(_, _) ->
-    {error, invalid_index}.
+    {error, invalid_list}.
 
 %% Get value from source
 get_value({x, N}, #proc{x = X}) ->

@@ -195,7 +195,7 @@ find_entry([{<<"main">>, _} | _]) -> 0;
 find_entry([{_, Parts} | Rest]) ->
     Size = lists:sum([byte_size(B) || B <- Parts, is_binary(B)]),
     Size + find_entry(Rest);
-find_entry([]) -> 0.
+find_entry([]) -> 0.  % No main found - use offset 0 (first function)
 
 %% Emit the final binary in the requested format.
 emit_binary(elf64, Code, Data, EntryOffset, Arch) ->

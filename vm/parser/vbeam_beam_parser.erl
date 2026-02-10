@@ -303,8 +303,17 @@ decompress_chunks(Z, Data, MaxSize, Acc) ->
     end.
 
 %% Parse literal table
-parse_literals(<<Count:32, Rest/binary>>) ->
-    parse_literal_list(Rest, Count, []).
+%% SECURITY FIX: Cap at 1,000,000 entries and verify Count doesn't exceed byte size
+parse_literals(<<Count:32, Rest/binary>>) when Count =< 1_000_000 ->
+    %% Verify Count doesn't exceed remaining bytes / minimum entry size (4 bytes)
+    case byte_size(Rest) >= Count * 4 of
+        true ->
+            parse_literal_list(Rest, Count, []);
+        false ->
+            []  %% Invalid - not enough bytes for declared count
+    end;
+parse_literals(_) ->
+    [].
 
 parse_literal_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);

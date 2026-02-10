@@ -549,8 +549,12 @@ decode_operand(<<Byte:8, Rest/binary>>, Atoms) ->
             decode_extended(Byte bsr 4, Rest, Atoms);
         _ ->
             %% Decode the integer value, then interpret by tag
-            {Val, Rest2} = decode_compact_value(Byte, Rest),
-            interpret_tag(Tag, Val, Rest2, Atoms)
+            case decode_compact_value(Byte, Rest) of
+                {error, Reason} ->
+                    {error, {decode_operand_failed, Reason}};
+                {Val, Rest2} ->
+                    interpret_tag(Tag, Val, Rest2, Atoms)
+            end
     end;
 decode_operand(_, _) ->
     error.

@@ -349,10 +349,12 @@ mod_timer(Timer, ExpiresJiffies) ->
     MaxTimeout = 86400000, % 24 hours in ms
     case is_integer(ExpiresJiffies) andalso ExpiresJiffies >= 0 andalso ExpiresJiffies =< MaxTimeout of
         true ->
-            %% Cancel old timer if exists
+            %% Cancel old timer if exists and delete ref
             case get_timer_ref(Timer) of
                 undefined -> ok;
-                OldTRef -> erlang:cancel_timer(OldTRef)
+                OldTRef ->
+                    erlang:cancel_timer(OldTRef),
+                    remove_timer_ref(Timer)
             end,
             %% Jiffies conversion: 1 jiffy = 1ms on most systems
             TimeoutMs = ExpiresJiffies,
@@ -492,13 +494,26 @@ store_timer_ref(Timer, TRef) ->
     init_timer_storage(),
     %% BUG 10 FIX: Check cardinality before inserting
     case ets:info(?TIMER_TABLE, size) of
-        Size when Size < 10000 ->
-            %% BUG 11 FIX: Key by {self(), Timer} to avoid namespace collision
-            ets:insert(?TIMER_TABLE, {{self(), Timer}, TRef}),
-            ok;
+        Size when Size >= 9500 ->
+            %% Approaching capacity - prune dead process entries first
+            prune_dead_timers(),
+            %% Re-check after prune
+            case ets:info(?TIMER_TABLE, size) of
+                NewSize when NewSize < 10000 ->
+                    %% BUG 11 FIX: Key by {self(), Timer} to avoid namespace collision
+                    OwnerPid = self(),
+                    erlang:monitor(process, OwnerPid),
+                    ets:insert(?TIMER_TABLE, {{OwnerPid, Timer}, TRef}),
+                    ok;
+                _ ->
+                    {error, timer_table_full}
+            end;
         _ ->
-            %% Reject if exceeded
-            {error, timer_table_full}
+            %% BUG 11 FIX: Key by {self(), Timer} to avoid namespace collision
+            OwnerPid = self(),
+            erlang:monitor(process, OwnerPid),
+            ets:insert(?TIMER_TABLE, {{OwnerPid, Timer}, TRef}),
+            ok
     end.
 
 get_timer_ref(Timer) ->
@@ -513,6 +528,16 @@ remove_timer_ref(Timer) ->
     init_timer_storage(),
     %% BUG 11 FIX: Delete by {self(), Timer}
     ets:delete(?TIMER_TABLE, {self(), Timer}),
+    ok.
+
+%% Prune timer refs where owner process is dead
+prune_dead_timers() ->
+    init_timer_storage(),
+    AllKeys = ets:match(?TIMER_TABLE, {{'$1', '_'}, '_'}),
+    DeadPids = [Pid || [Pid] <- AllKeys, not is_process_alive(Pid)],
+    lists:foreach(fun(DeadPid) ->
+        ets:match_delete(?TIMER_TABLE, {{DeadPid, '_'}, '_'})
+    end, DeadPids),
     ok.
 
 log_kapi_call(Function, Args) ->
