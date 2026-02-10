@@ -248,6 +248,8 @@ data_base(pe, CodeSize) ->
 %% Scan for unresolved call targets and inject native implementations
 %% for commonly-needed runtime functions.
 inject_runtime_builtins(#{functions := Functions} = Module) ->
+    %% Extract target early - needed for builtin generation
+    Target = maps:get(target, Module, x86_64),
     %% Collect all defined function names
     Defined = sets:from_list([Name || #{name := Name} <- Functions]),
     %% Collect all called symbols
@@ -258,7 +260,7 @@ inject_runtime_builtins(#{functions := Functions} = Module) ->
     %% For each unresolved symbol, check if we have a builtin
     {Builtins, StillUnresolved} = lists:foldl(
         fun(Name, {Found, NotFound}) ->
-            case builtin_function(Name) of
+            case builtin_function(Name, Target) of
                 {ok, Fn} -> {[Fn | Found], NotFound};
                 none -> {Found, [Name | NotFound]}
             end
@@ -277,7 +279,6 @@ inject_runtime_builtins(#{functions := Functions} = Module) ->
             {error, {unresolved_symbols, StillUnresolved}};
         {_, true} ->
             %% Unresolved symbols but stubs allowed - generate them
-            Target = maps:get(target, Module, arm64),
             AutoStubs = [make_auto_stub(Name, Target) || Name <- StillUnresolved],
             AllNew = Builtins ++ AutoStubs,
             Module#{functions := Functions ++ AllNew}
@@ -319,7 +320,14 @@ collect_called_symbols(Functions) ->
 
 %% Return a builtin IR function implementation for the given symbol name.
 %% These are commonly-needed functions that many V programs reference.
-builtin_function(<<"string__int">>) ->
+%% Target-aware: uses appropriate physical registers for x86_64 vs arm64.
+builtin_function(Name, Target) when is_atom(Target) ->
+    builtin_function_impl(Name, Target).
+
+%% Target-conditional register selection
+builtin_function_impl(<<"string__int">>, Target) ->
+    %% Define target-specific registers
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Convert string fat pointer to integer.
     %% Arg0 (vreg 0) = fat pointer {ptr, len}
     %% Scans digits, returns integer in return value.
@@ -371,21 +379,22 @@ builtin_function(<<"string__int">>) ->
             {jcc, eq, <<"si_ret">>},
             {neg, {vreg, 3}, {vreg, 3}},
             {label, <<"si_ret">>},
-            {mov, {preg, x0}, {vreg, 3}},
+            {mov, {preg, RetReg}, {vreg, 3}},
             ret
         ]
     }};
 
 %% int_to_str variants: various type names V uses for integers
-builtin_function(<<"int literal__str">>) ->
-    int_to_str_builtin(<<"int literal__str">>);
-builtin_function(<<"int__str">>) ->
-    int_to_str_builtin(<<"int__str">>);
-builtin_function(<<"i64__str">>) ->
-    int_to_str_builtin(<<"i64__str">>);
+builtin_function_impl(<<"int literal__str">>, Target) ->
+    int_to_str_builtin(<<"int literal__str">>, Target);
+builtin_function_impl(<<"int__str">>, Target) ->
+    int_to_str_builtin(<<"int__str">>, Target);
+builtin_function_impl(<<"i64__str">>, Target) ->
+    int_to_str_builtin(<<"i64__str">>, Target);
 
 %% Print functions: println prints string + newline, print just prints string
-builtin_function(<<"println">>) ->
+builtin_function_impl(<<"println">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"println">>,
         arity => 1,
@@ -398,12 +407,13 @@ builtin_function(<<"println">>) ->
             %% Print newline: write(1, &newline, 1) using syscall
             %% We'll use print_int of a data ref trick -- just emit raw newline
             %% Actually, use lea + write syscall for a single '\n'
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
-builtin_function(<<"print">>) ->
+builtin_function_impl(<<"print">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"print">>,
         arity => 1,
@@ -412,19 +422,20 @@ builtin_function(<<"print">>) ->
         locals => 1,
         body => [
             {print_str, {vreg, 0}},
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
-builtin_function(<<"eprintln">>) ->
+builtin_function_impl(<<"eprintln">>, Target) ->
     %% Print to stderr -- for now, just print to stdout
-    case builtin_function(<<"println">>) of
+    case builtin_function_impl(<<"println">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"eprintln">>}};
         none -> none
     end;
 
-builtin_function(<<"intn">>) ->
+builtin_function_impl(<<"intn">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Simple pseudo-random integer: returns n mod max.
     %% Uses a linear congruential generator with static state.
     %% For native compilation, this is a deterministic PRNG.
@@ -442,12 +453,13 @@ builtin_function(<<"intn">>) ->
             %% Using a fixed state value (this is deterministic, not truly random)
             {mov_imm, {vreg, 1}, 42},          %% simple seed
             {srem, {vreg, 2}, {vreg, 1}, {vreg, 0}},
-            {mov, {preg, x0}, {vreg, 2}},
+            {mov, {preg, RetReg}, {vreg, 2}},
             ret
         ]
     }};
 
-builtin_function(<<"arguments">>) ->
+builtin_function_impl(<<"arguments">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Return command-line arguments as an array.
     %% For native compilation, we can't easily access argc/argv without
     %% platform-specific code. Return an empty array for now.
@@ -459,12 +471,13 @@ builtin_function(<<"arguments">>) ->
         locals => 1,
         body => [
             {array_new, {vreg, 0}, {imm, 8}, {imm, 4}},
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
-builtin_function(<<"from">>) ->
+builtin_function_impl(<<"from">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% Error.from() — construct an error from a string
     %% For now, just return the input value as-is
     {ok, #{
@@ -474,12 +487,12 @@ builtin_function(<<"from">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
-builtin_function(<<"sqrt">>) ->
+builtin_function_impl(<<"sqrt">>, arm64) ->
     %% Square root: uses FSQRT hardware instruction.
     %% Input: float as int64 bit pattern. Output: float as int64 bit pattern.
     %% FMOV D0, X0; FSQRT D0, D0; FMOV X0, D0
@@ -501,15 +514,30 @@ builtin_function(<<"sqrt">>) ->
             ret
         ]
     }};
+builtin_function_impl(<<"sqrt">>, x86_64) ->
+    %% x86_64 sqrt: use SSE2 sqrtsd instruction
+    %% For now, return 0 as placeholder - needs proper x86_64 implementation
+    {ok, #{
+        name => <<"sqrt">>,
+        arity => 1,
+        exported => false,
+        params => [{vreg, 0}],
+        locals => 1,
+        body => [
+            {mov_imm, {preg, rax}, 0},
+            ret
+        ]
+    }};
 
-builtin_function(<<"atoi">>) ->
+builtin_function_impl(<<"atoi">>, Target) ->
     %% atoi: C-style string-to-integer (same as string__int for our purposes)
-    case builtin_function(<<"string__int">>) of
+    case builtin_function_impl(<<"string__int">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"atoi">>}};
         none -> none
     end;
 
-builtin_function(<<"gs">>) ->
+builtin_function_impl(<<"gs">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% gs: string formatting function used in euler.v
     %% For now, return input as-is (approximate behavior)
     {ok, #{
@@ -519,12 +547,13 @@ builtin_function(<<"gs">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
-builtin_function(<<"log">>) ->
+builtin_function_impl(<<"log">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     %% math.log: natural logarithm.
     %% This needs FPU support. For now, return 0.
     {ok, #{
@@ -534,12 +563,16 @@ builtin_function(<<"log">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
-builtin_function(<<"exit">>) ->
+builtin_function_impl(<<"exit">>, Target) ->
+    {RetReg, SyscallReg} = case Target of
+        x86_64 -> {rax, rax};  %% x86_64 syscall number in rax
+        arm64 -> {x0, x16}     %% arm64 syscall number in x16
+    end,
     {ok, #{
         name => <<"exit">>,
         arity => 1,
@@ -548,13 +581,17 @@ builtin_function(<<"exit">>) ->
         locals => 1,
         body => [
             %% exit(code): syscall 1 (exit) on macOS, 60 on Linux
-            {mov, {preg, x0}, {vreg, 0}},
-            {mov_imm, {preg, x16}, 1},  %% exit syscall (macOS)
+            {mov, {preg, RetReg}, {vreg, 0}},
+            {mov_imm, {preg, SyscallReg}, 1},  %% exit syscall (macOS)
             syscall
         ]
     }};
 
-builtin_function(<<"panic">>) ->
+builtin_function_impl(<<"panic">>, Target) ->
+    {RetReg, SyscallReg} = case Target of
+        x86_64 -> {rax, rax};
+        arm64 -> {x0, x16}
+    end,
     {ok, #{
         name => <<"panic">>,
         arity => 1,
@@ -563,14 +600,18 @@ builtin_function(<<"panic">>) ->
         locals => 1,
         body => [
             {print_str, {vreg, 0}},
-            {mov_imm, {preg, x0}, 1},
-            {mov_imm, {preg, x16}, 1},  %% exit syscall (macOS)
+            {mov_imm, {preg, RetReg}, 1},
+            {mov_imm, {preg, SyscallReg}, 1},  %% exit syscall (macOS)
             syscall
         ]
     }};
 
 %% string__to_upper: convert a string to uppercase in-place (returns new fat pointer)
-builtin_function(<<"string__to_upper">>) ->
+builtin_function_impl(<<"string__to_upper">>, Target) ->
+    {RetReg, HeapPtr} = case Target of
+        x86_64 -> {rax, r15};
+        arm64 -> {x0, x28}
+    end,
     {ok, #{
         name => <<"string__to_upper">>,
         arity => 1,
@@ -582,8 +623,8 @@ builtin_function(<<"string__to_upper">>) ->
             {load, {vreg, 1}, {vreg, 0}, 0},       %% vreg1 = ptr
             {load, {vreg, 2}, {vreg, 0}, 8},       %% vreg2 = len
             %% Allocate new buffer on heap
-            {mov, {vreg, 3}, {preg, x28}},          %% vreg3 = new_ptr (from heap)
-            {add, {preg, x28}, {preg, x28}, {vreg, 2}},  %% bump heap
+            {mov, {vreg, 3}, {preg, HeapPtr}},          %% vreg3 = new_ptr (from heap)
+            {add, {preg, HeapPtr}, {preg, HeapPtr}, {vreg, 2}},  %% bump heap
             {mov_imm, {vreg, 4}, 0},               %% vreg4 = index
             {label, <<"stu_loop">>},
             {cmp, {vreg, 4}, {vreg, 2}},
@@ -605,17 +646,18 @@ builtin_function(<<"string__to_upper">>) ->
             {jmp, <<"stu_loop">>},
             {label, <<"stu_done">>},
             %% Build fat pointer on heap: {ptr, len}
-            {mov, {vreg, 5}, {preg, x28}},          %% result fat pointer
+            {mov, {vreg, 5}, {preg, HeapPtr}},          %% result fat pointer
             {store, {vreg, 5}, 0, {vreg, 3}},        %% store ptr
             {store, {vreg, 5}, 8, {vreg, 2}},        %% store len
-            {add, {preg, x28}, {preg, x28}, {imm, 16}},
-            {mov, {preg, x0}, {vreg, 5}},
+            {add, {preg, HeapPtr}, {preg, HeapPtr}, {imm, 16}},
+            {mov, {preg, RetReg}, {vreg, 5}},
             ret
         ]
     }};
 
 %% string__index_after: find index of substring after position (stub: returns -1)
-builtin_function(<<"string__index_after">>) ->
+builtin_function_impl(<<"string__index_after">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__index_after">>,
         arity => 3,
@@ -623,13 +665,14 @@ builtin_function(<<"string__index_after">>) ->
         params => [{vreg, 0}, {vreg, 1}, {vreg, 2}],
         locals => 3,
         body => [
-            {mov_imm, {preg, x0}, -1},
+            {mov_imm, {preg, RetReg}, -1},
             ret
         ]
     }};
 
 %% []int__clone: clone an array (just return the same pointer for now)
-builtin_function(<<"[]int__clone">>) ->
+builtin_function_impl(<<"[]int__clone">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"[]int__clone">>,
         arity => 1,
@@ -637,13 +680,14 @@ builtin_function(<<"[]int__clone">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
 %% thread__wait: no-op stub for single-threaded native compilation
-builtin_function(<<"thread__wait">>) ->
+builtin_function_impl(<<"thread__wait">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"thread__wait">>,
         arity => 1,
@@ -651,13 +695,13 @@ builtin_function(<<"thread__wait">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
 %% flush_stdout: no-op stub
-builtin_function(<<"flush_stdout">>) ->
+builtin_function_impl(<<"flush_stdout">>, _Target) ->
     {ok, #{
         name => <<"flush_stdout">>,
         arity => 0,
@@ -670,7 +714,7 @@ builtin_function(<<"flush_stdout">>) ->
     }};
 
 %% unbuffer_stdout: no-op stub
-builtin_function(<<"unbuffer_stdout">>) ->
+builtin_function_impl(<<"unbuffer_stdout">>, _Target) ->
     {ok, #{
         name => <<"unbuffer_stdout">>,
         arity => 0,
@@ -683,7 +727,8 @@ builtin_function(<<"unbuffer_stdout">>) ->
     }};
 
 %% error: construct an error (return input string as-is)
-builtin_function(<<"error">>) ->
+builtin_function_impl(<<"error">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"error">>,
         arity => 1,
@@ -691,13 +736,14 @@ builtin_function(<<"error">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
 %% f: generic function reference (stub: return identity)
-builtin_function(<<"f">>) ->
+builtin_function_impl(<<"f">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"f">>,
         arity => 1,
@@ -705,13 +751,17 @@ builtin_function(<<"f">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
 %% get_raw_line: read from stdin (stub: return empty string)
-builtin_function(<<"get_raw_line">>) ->
+builtin_function_impl(<<"get_raw_line">>, Target) ->
+    {RetReg, HeapPtr} = case Target of
+        x86_64 -> {rax, r15};
+        arm64 -> {x0, x28}
+    end,
     {ok, #{
         name => <<"get_raw_line">>,
         arity => 0,
@@ -720,18 +770,18 @@ builtin_function(<<"get_raw_line">>) ->
         locals => 1,
         body => [
             %% Return empty fat pointer
-            {mov, {vreg, 0}, {preg, x28}},
-            {store, {vreg, 0}, 0, {preg, x28}},  %% ptr = heap (empty)
+            {mov, {vreg, 0}, {preg, HeapPtr}},
+            {store, {vreg, 0}, 0, {preg, HeapPtr}},  %% ptr = heap (empty)
             {mov_imm, {vreg, 1}, 0},
             {store, {vreg, 0}, 8, {vreg, 1}},    %% len = 0
-            {add, {preg, x28}, {preg, x28}, {imm, 16}},
-            {mov, {preg, x0}, {vreg, 0}},
+            {add, {preg, HeapPtr}, {preg, HeapPtr}, {imm, 16}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
 %% info: log.info stub (print to stdout)
-builtin_function(<<"info">>) ->
+builtin_function_impl(<<"info">>, _Target) ->
     {ok, #{
         name => <<"info">>,
         arity => 1,
@@ -745,7 +795,7 @@ builtin_function(<<"info">>) ->
     }};
 
 %% warn: log.warn stub (print to stdout)
-builtin_function(<<"warn">>) ->
+builtin_function_impl(<<"warn">>, _Target) ->
     {ok, #{
         name => <<"warn">>,
         arity => 1,
@@ -759,7 +809,7 @@ builtin_function(<<"warn">>) ->
     }};
 
 %% debug: log.debug stub (no-op)
-builtin_function(<<"debug">>) ->
+builtin_function_impl(<<"debug">>, _Target) ->
     {ok, #{
         name => <<"debug">>,
         arity => 1,
@@ -772,7 +822,7 @@ builtin_function(<<"debug">>) ->
     }};
 
 %% sleep: stub (no-op)
-builtin_function(<<"sleep">>) ->
+builtin_function_impl(<<"sleep">>, _Target) ->
     {ok, #{
         name => <<"sleep">>,
         arity => 1,
@@ -785,7 +835,8 @@ builtin_function(<<"sleep">>) ->
     }};
 
 %% string__trim_space: return input as-is (stub)
-builtin_function(<<"string__trim_space">>) ->
+builtin_function_impl(<<"string__trim_space">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__trim_space">>,
         arity => 1,
@@ -793,13 +844,14 @@ builtin_function(<<"string__trim_space">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
 %% string__repeat: return input as-is (stub)
-builtin_function(<<"string__repeat">>) ->
+builtin_function_impl(<<"string__repeat">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__repeat">>,
         arity => 2,
@@ -807,13 +859,14 @@ builtin_function(<<"string__repeat">>) ->
         params => [{vreg, 0}, {vreg, 1}],
         locals => 2,
         body => [
-            {mov, {preg, x0}, {vreg, 0}},
+            {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]
     }};
 
 %% string__f64: parse string to float (stub: return 0)
-builtin_function(<<"string__f64">>) ->
+builtin_function_impl(<<"string__f64">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"string__f64">>,
         arity => 1,
@@ -821,13 +874,14 @@ builtin_function(<<"string__f64">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
 %% atof64: parse string to f64 (stub: return 0)
-builtin_function(<<"atof64">>) ->
+builtin_function_impl(<<"atof64">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"atof64">>,
         arity => 1,
@@ -835,20 +889,21 @@ builtin_function(<<"atof64">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
 %% input_opt: read user input (stub: return empty string)
-builtin_function(<<"input_opt">>) ->
-    case builtin_function(<<"get_raw_line">>) of
+builtin_function_impl(<<"input_opt">>, Target) ->
+    case builtin_function_impl(<<"get_raw_line">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"input_opt">>}};
         none -> none
     end;
 
 %% new: generic constructor (stub: return 0)
-builtin_function(<<"new">>) ->
+builtin_function_impl(<<"new">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"new">>,
         arity => 1,
@@ -856,20 +911,21 @@ builtin_function(<<"new">>) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
 %% int: alias for string__int
-builtin_function(<<"int">>) ->
-    case builtin_function(<<"string__int">>) of
+builtin_function_impl(<<"int">>, Target) ->
+    case builtin_function_impl(<<"string__int">>, Target) of
         {ok, Fn} -> {ok, Fn#{name => <<"int">>}};
         none -> none
     end;
 
 %% now: return 0 (stub for time)
-builtin_function(<<"now">>) ->
+builtin_function_impl(<<"now">>, Target) ->
+    RetReg = case Target of x86_64 -> rax; arm64 -> x0 end,
     {ok, #{
         name => <<"now">>,
         arity => 0,
@@ -877,22 +933,21 @@ builtin_function(<<"now">>) ->
         params => [],
         locals => 0,
         body => [
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, RetReg}, 0},
             ret
         ]
     }};
 
 %% Catch-all: generic pass-through builtins for common method-call patterns
 %% These let programs that call methods on types compile, even if behavior is stubbed
-builtin_function(_) -> none.
+builtin_function_impl(_, _) -> none.
 
 %% Helper: create an int-to-string builtin with a given name.
 %% Takes an integer argument, returns a fat pointer string.
 %% Target-parametric: uses appropriate return register for architecture.
-int_to_str_builtin(Name) ->
-    %% Note: Target is not available here, so we use a generic IR form
-    %% that will be lowered to the appropriate register during compilation.
-    %% During register allocation, vreg 1 will be mapped to the return register.
+int_to_str_builtin(Name, _Target) ->
+    %% Note: int_to_str lowering is target-aware and will use the correct
+    %% return register. We use vregs here and let register allocation handle it.
     {ok, #{
         name => Name,
         arity => 1,
