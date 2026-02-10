@@ -19,7 +19,8 @@ run_all() ->
         fun test_delivery_single_irq/0,
         fun test_delivery_multiple_irqs/0,
         fun test_delivery_no_handler/0,
-        fun test_isr_code_generation/0
+        fun test_isr_code_generation/0,
+        fun test_dead_handler_cleanup/0
     ],
 
     Results = [run_test(Test) || Test <- Tests],
@@ -243,4 +244,39 @@ test_isr_code_generation() ->
     %% Verify it starts with push instructions (save registers)
     <<16#50, _/binary>> = Code,  % push rax
 
+    ok.
+
+test_dead_handler_cleanup() ->
+    {ok, BridgePid} = vbeam_irq_bridge:start_link(),
+
+    %% Spawn a handler process
+    HandlerPid = spawn(fun() ->
+        receive
+            {irq, _, _} -> ok
+        end
+    end),
+
+    %% Register the handler for IRQ 3
+    ok = vbeam_irq_bridge:register_handler(3, HandlerPid),
+
+    %% Verify it's registered
+    #{3 := HandlerPid} = vbeam_irq_bridge:get_handlers(),
+
+    %% Kill the handler process
+    exit(HandlerPid, kill),
+    timer:sleep(10),
+
+    %% Simulate IRQ 3
+    ok = vbeam_irq_bridge:simulate_irq(3),
+    timer:sleep(10),
+
+    %% Tick to trigger delivery attempt
+    %% The bridge should detect the dead handler and remove it
+    {ok, _} = vbeam_irq_bridge:tick(BridgePid),
+
+    %% Verify handler was cleaned up
+    Handlers = vbeam_irq_bridge:get_handlers(),
+    false = maps:is_key(3, Handlers),
+
+    exit(BridgePid, kill),
     ok.

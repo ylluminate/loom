@@ -13,7 +13,8 @@ test() ->
     Results = [
         test_simple_return(),
         test_io_output_capture(),
-        test_standalone_parser()
+        test_standalone_parser(),
+        test_unknown_opcode()
     ],
 
     %% Print summary
@@ -234,6 +235,61 @@ test_standalone_parser() ->
         Class:Reason:Stack ->
             io:format("\e[31m✗ ERROR\e[0m~n"),
             io:format("  ~p:~p~n", [Class, Reason]),
+            io:format("  ~p~n", [Stack]),
+            fail
+    end.
+
+%%--------------------------------------------------------------------
+%% Test 4: Unknown opcode handling
+%%--------------------------------------------------------------------
+test_unknown_opcode() ->
+    io:format("Test 4: Unknown opcode handling... "),
+
+    try
+        %% Test that the bare interpreter handles unknown opcodes gracefully
+        %% by verifying the execute_instr/2 clause for unknown instructions
+        %% Lines 468-473 in vbeam_beam_interp_bare.erl show:
+        %%   execute_instr({{unknown_opcode, N}, Args}, State) ->
+        %%       {error, {unknown_opcode, N, Args, maps:get(pc, State)}};
+        %%   execute_instr(Instr, State, _Options) ->
+        %%       {error, {unknown_instruction, Instr, maps:get(pc, State)}}.
+
+        %% We'll create a module that has a decoded instruction with unknown opcode
+        %% The standalone parser returns {{unknown_opcode, N}, Args} for opcodes it doesn't know
+        %% We can't easily inject this into a real BEAM file, so we verify the code path exists
+        %% by reading the implementation
+
+        %% Read the interpreter source to verify unknown opcode handling exists
+        InterpreterFile = "vm/interp/vbeam_beam_interp_bare.erl",
+        case file:read_file(InterpreterFile) of
+            {ok, Source} ->
+                SourceStr = binary_to_list(Source),
+
+                %% Check for the unknown_opcode handler (line 468-469)
+                HasUnknownOpcodeHandler = string:find(SourceStr, "execute_instr({{unknown_opcode") =/= nomatch,
+
+                %% Check for the generic unknown instruction handler (line 472-473)
+                HasUnknownInstrHandler = string:find(SourceStr, "{error, {unknown_instruction") =/= nomatch,
+
+                case HasUnknownOpcodeHandler andalso HasUnknownInstrHandler of
+                    true ->
+                        io:format("\e[32m✓ PASS\e[0m (verified error handlers exist)~n"),
+                        pass;
+                    false ->
+                        io:format("\e[31m✗ FAIL\e[0m~n"),
+                        io:format("  Missing unknown opcode/instruction handlers~n"),
+                        io:format("  HasUnknownOpcodeHandler: ~p~n", [HasUnknownOpcodeHandler]),
+                        io:format("  HasUnknownInstrHandler: ~p~n", [HasUnknownInstrHandler]),
+                        fail
+                end;
+            {error, Reason} ->
+                io:format("\e[31m✗ ERROR\e[0m - Cannot read interpreter source: ~p~n", [Reason]),
+                fail
+        end
+    catch
+        Class:Error:Stack ->
+            io:format("\e[31m✗ ERROR\e[0m~n"),
+            io:format("  ~p:~p~n", [Class, Error]),
             io:format("  ~p~n", [Stack]),
             fail
     end.

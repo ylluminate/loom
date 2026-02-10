@@ -29,7 +29,10 @@ run_all() ->
         fun test_pic_init_code/0,
         fun test_round_robin_ordering/0,
         fun test_mailbox_fifo/0,
-        fun test_idle_process/0
+        fun test_idle_process/0,
+        fun test_pit_init_zero_freq/0,
+        fun test_receive_nonexistent_pid/0,
+        fun test_blocked_round_trip/0
     ],
 
     Results = lists:map(fun(Test) -> run_test(Test) end, Tests),
@@ -381,6 +384,65 @@ test_idle_process() ->
     Stats = vbeam_scheduler:stats(),
     #{idle_ticks := IdleTicks} = Stats,
     true = IdleTicks > 0,
+
+    stop_scheduler(),
+    ok.
+
+test_pit_init_zero_freq() ->
+    %% Test PIT initialization with zero frequency
+    %% Should fail with function_clause (guard prevents divide-by-zero)
+    try
+        vbeam_scheduler:pit_init_code(0),
+        error(should_have_failed)
+    catch
+        error:function_clause ->
+            ok
+    end.
+
+test_receive_nonexistent_pid() ->
+    {ok, _} = vbeam_scheduler:start_link(?CONFIG),
+
+    %% Try to receive from a PID that doesn't exist
+    Result = vbeam_scheduler:receive_message(9999),
+    {error, not_found} = Result,
+
+    stop_scheduler(),
+    ok.
+
+test_blocked_round_trip() ->
+    {ok, _} = vbeam_scheduler:start_link(?CONFIG),
+
+    %% Spawn a process
+    {ok, Pid} = vbeam_scheduler:spawn_process(test_mod, test_fun),
+
+    %% Process should start in ready state
+    {ok, Proc1} = vbeam_scheduler:get_process(Pid),
+    ready = maps:get(status, Proc1),
+
+    %% Receive on empty mailbox (transitions to blocked)
+    {error, empty} = vbeam_scheduler:receive_message(Pid),
+
+    %% Check if process transitioned to blocked
+    %% (Implementation may or may not auto-block, so we're flexible)
+    {ok, Proc2} = vbeam_scheduler:get_process(Pid),
+    Status2 = maps:get(status, Proc2),
+
+    %% Send a message
+    ok = vbeam_scheduler:send_message(Pid, wake_up),
+
+    %% Process should be ready or running now
+    {ok, Proc3} = vbeam_scheduler:get_process(Pid),
+    Status3 = maps:get(status, Proc3),
+    true = (Status3 =:= ready) orelse (Status3 =:= running),
+
+    %% If it was blocked, verify it's no longer blocked
+    case Status2 of
+        blocked ->
+            true = Status3 =/= blocked;
+        _ ->
+            %% If it never blocked, sending message should preserve ready state
+            ok
+    end,
 
     stop_scheduler(),
     ok.

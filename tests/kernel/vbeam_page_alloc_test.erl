@@ -24,6 +24,9 @@ run() ->
     test_exhaustion(),
     test_fragmentation(),
     test_edge_cases(),
+    test_double_free_exact_accounting(),
+    test_mark_reserved_equal_addrs(),
+    test_alloc_pages_failure_shape(),
 
     io:format("~n=== All Tests Passed ===~n"),
     ok.
@@ -256,6 +259,86 @@ test_edge_cases() ->
     Stats6 = vbeam_page_alloc:stats(State6),
     %% Stats should be exactly the same - double-free should not change accounting
     Stats5 = Stats6,
+
+    io:format("PASS~n"),
+    ok.
+
+test_double_free_exact_accounting() ->
+    io:format("Test: Double free should not change accounting twice... "),
+    State0 = vbeam_page_alloc:init(16 * ?MB),
+    {ok, Addr, State1} = vbeam_page_alloc:alloc_page(State0),
+
+    %% Free once
+    State2 = vbeam_page_alloc:free_page(State1, Addr),
+    Stats2 = vbeam_page_alloc:stats(State2),
+    FreeCount2 = maps:get(free, Stats2),
+    AllocCount2 = maps:get(allocated, Stats2),
+
+    %% Free again - should be idempotent
+    State3 = vbeam_page_alloc:free_page(State2, Addr),
+    Stats3 = vbeam_page_alloc:stats(State3),
+    FreeCount3 = maps:get(free, Stats3),
+    AllocCount3 = maps:get(allocated, Stats3),
+
+    %% Verify counts are exactly the same (not incremented again)
+    FreeCount2 = FreeCount3,
+    AllocCount2 = AllocCount3,
+
+    io:format("PASS~n"),
+    ok.
+
+test_mark_reserved_equal_addrs() ->
+    io:format("Test: Mark reserved with StartAddr == EndAddr... "),
+    State0 = vbeam_page_alloc:init(16 * ?MB),
+    Stats0 = vbeam_page_alloc:stats(State0),
+
+    %% Mark one page as reserved (start == end should mark exactly 1 page)
+    Addr = 4 * ?MB,
+    State1 = vbeam_page_alloc:mark_reserved(State0, Addr, Addr),
+
+    Stats1 = vbeam_page_alloc:stats(State1),
+
+    %% Should mark exactly 1 page (not crash, not mark 0 pages)
+    %% Free count should decrease by 1
+    FreeCount0 = maps:get(free, Stats0),
+    FreeCount1 = maps:get(free, Stats1),
+    1 = FreeCount0 - FreeCount1,
+
+    io:format("PASS~n"),
+    ok.
+
+test_alloc_pages_failure_shape() ->
+    io:format("Test: alloc_pages failure returns correct error shape... "),
+    %% Create a small pool and exhaust it
+    State0 = vbeam_page_alloc:init(1 * ?MB), %% 256 pages total
+    Stats0 = vbeam_page_alloc:stats(State0),
+    FreeCount = maps:get(free, Stats0),
+
+    %% Allocate all free pages
+    case FreeCount of
+        0 ->
+            %% Already exhausted (all reserved)
+            State1 = State0;
+        N when N > 0 ->
+            {ok, _Addrs, State1} = vbeam_page_alloc:alloc_pages(State0, N),
+            ok
+    end,
+
+    %% Verify exhausted
+    Stats1 = vbeam_page_alloc:stats(State1),
+    0 = maps:get(free, Stats1),
+
+    %% Now try to allocate - should return {{error, Reason}, State}
+    %% Not nested errors like {{error, {error, Reason}}, State}
+    Result = vbeam_page_alloc:alloc_pages(State1, 1),
+    case Result of
+        {{error, _Reason}, _State2} ->
+            ok; %% Correct shape
+        {error, _Reason} ->
+            error(wrong_shape_missing_state_tuple);
+        {{error, {error, _}}, _} ->
+            error(nested_error_tuples)
+    end,
 
     io:format("PASS~n"),
     ok.
