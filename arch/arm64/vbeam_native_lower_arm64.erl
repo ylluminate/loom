@@ -1194,6 +1194,17 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         {label, <<"__its_signok_", Uid/binary>>},
 
         %% Negate value (we'll add '-' at the end)
+        %% CRITICAL FIX: INT64_MIN (-9223372036854775808) cannot be negated.
+        %% Add 1 before negating, then fix the last digit after conversion.
+        %% x15 = flag: 0 = normal, 1 = was INT64_MIN
+        ?ENC:encode_mov_imm64(x15, 0),
+        ?ENC:encode_mov_imm64(x9, 16#8000000000000000),  %% INT64_MIN
+        ?ENC:encode_cmp_rrr(x19, x9),
+        ?ENC:encode_b_cond(ne, 0),
+        {reloc, arm64_cond_branch19, <<"__its_not_min_", Uid/binary>>, -4},
+        ?ENC:encode_add_imm(x19, x19, 1),     %% x19 = INT64_MIN + 1
+        ?ENC:encode_mov_imm64(x15, 1),        %% flag: was INT64_MIN
+        {label, <<"__its_not_min_", Uid/binary>>},
         ?ENC:encode_neg(x19, x19),
 
         %% Positive (or negated)
@@ -1214,6 +1225,18 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         ?ENC:encode_cmp_imm(x19, 0),
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, DivLoopLbl, -4},
+
+        %% If x15=1, we converted INT64_MIN+1, so increment the last digit ('7'→'8')
+        ?ENC:encode_cmp_imm(x15, 0),
+        ?ENC:encode_b_cond(eq, 0),
+        {reloc, arm64_cond_branch19, <<"__its_no_fixup_", Uid/binary>>, -4},
+        %% Last digit is at sp + x20, increment it
+        ?ENC:encode_add_imm(x12, sp, 0),
+        ?ENC:encode_add_rrr(x12, x12, x20),
+        ?ENC:encode_ldrb(x11, x12, 0),        %% Load last digit
+        ?ENC:encode_add_imm(x11, x11, 1),     %% '7' → '8'
+        ?ENC:encode_strb(x11, x12, 0),        %% Store back
+        {label, <<"__its_no_fixup_", Uid/binary>>},
 
         %% If original was negative (check saved x14), prepend '-'
         ?ENC:encode_cmp_imm(x14, 0),
@@ -1478,16 +1501,11 @@ break_single_cycle([First | Rest] = Cycle, AllMoves, NumCalleeSaved) ->
 
     %% Build the rotation moves in order: for each position, move predecessor to it
     %% Cycle = [R0, R1, R2, ...], moves are R1→R0, R2→R1, ..., x16→Rn
+    %% For a cycle, all moves are register-to-register (no immediates/stack)
     RotationMoves = lists:zipwith(
         fun(Dst, Src) ->
-            %% Find the source value for Src register
-            case lists:keyfind(Src, 1, AllMoves) of
-                {Src, SrcVal} ->
-                    emit_move_arm64(Dst, SrcVal, NumCalleeSaved);
-                false ->
-                    %% Should not happen in valid cycle
-                    []
-            end
+            %% Direct register-to-register move within the cycle
+            ?ENC:encode_mov_rr(Dst, Src)
         end,
         Cycle,           %% destinations in cycle order
         Rest ++ [First]  %% sources: rotate left (second elem goes to first, etc.)
