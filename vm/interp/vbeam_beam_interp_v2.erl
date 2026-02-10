@@ -596,6 +596,7 @@ execute_bif(Mod, Fun, Args, _Options) ->
     end.
 
 %% SECURITY: BIF allowlist — only these module:function/arity combinations are permitted
+%% TIGHTENED: Removed higher-order functions (map, filter, foldl, foldr, foreach)
 is_allowed_bif(erlang, '+', 2) -> true;
 is_allowed_bif(erlang, '-', 2) -> true;
 is_allowed_bif(erlang, '*', 2) -> true;
@@ -612,14 +613,26 @@ is_allowed_bif(erlang, 'not', 1) -> true;
 is_allowed_bif(erlang, display, 1) -> true;
 is_allowed_bif(io, format, 1) -> true;
 is_allowed_bif(io, format, 2) -> true;
+%% lists: only first-order safe functions
 is_allowed_bif(lists, reverse, 1) -> true;
-is_allowed_bif(lists, map, 2) -> true;
-is_allowed_bif(lists, filter, 2) -> true;
-is_allowed_bif(lists, foldl, 3) -> true;
-is_allowed_bif(lists, foldr, 3) -> true;
-is_allowed_bif(lists, sort, 1) -> true;
-is_allowed_bif(lists, length, 1) -> true;
+is_allowed_bif(lists, append, 2) -> true;
 is_allowed_bif(lists, nth, 2) -> true;
+is_allowed_bif(lists, length, 1) -> true;
+is_allowed_bif(lists, member, 2) -> true;
+is_allowed_bif(lists, keyfind, 3) -> true;
+is_allowed_bif(lists, keystore, 4) -> true;
+is_allowed_bif(lists, keydelete, 3) -> true;
+is_allowed_bif(lists, sort, 1) -> true;
+is_allowed_bif(lists, usort, 1) -> true;
+is_allowed_bif(lists, seq, 2) -> true;
+is_allowed_bif(lists, flatten, 1) -> true;
+is_allowed_bif(lists, zip, 2) -> true;
+is_allowed_bif(lists, unzip, 1) -> true;
+is_allowed_bif(lists, duplicate, 2) -> true;
+is_allowed_bif(lists, last, 1) -> true;
+is_allowed_bif(lists, sum, 1) -> true;
+is_allowed_bif(lists, max, 1) -> true;
+is_allowed_bif(lists, min, 1) -> true;
 is_allowed_bif(maps, new, 0) -> true;
 is_allowed_bif(maps, get, 2) -> true;
 is_allowed_bif(maps, put, 3) -> true;

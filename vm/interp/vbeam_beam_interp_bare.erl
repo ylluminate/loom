@@ -855,6 +855,7 @@ reverse_bare_acc([H | T], Acc) ->
 
 %% Convert binary or atom to atom for BIF dispatch
 %% If atom doesn't exist, return the binary itself
+safe_to_atom(undefined) -> undefined;  % CRITICAL FIX: Handle undefined from invalid import index
 safe_to_atom(A) when is_atom(A) -> A;
 safe_to_atom(B) when is_binary(B) ->
     try binary_to_existing_atom(B, utf8)

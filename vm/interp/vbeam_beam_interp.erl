@@ -480,14 +480,19 @@ set_register(_Other, _Value, Proc) ->
 
 %% Execute built-in function
 execute_bif(ImportIndex, Arity, #proc{imports = Imports, x = X} = Proc, Options) ->
-    case safe_nth(ImportIndex + 1, Imports) of
-        {ok, {ModIndex, FunIndex, Arity}} ->
-            case safe_nth(ModIndex, Proc#proc.atoms) of
-                {ok, Mod} ->
-                    case safe_nth(FunIndex, Proc#proc.atoms) of
-                        {ok, Fun} ->
-                            %% Get arguments from X registers
-                            Args = [maps:get(I, X, undefined) || I <- lists:seq(0, Arity - 1)],
+    %% SECURITY FIX: Validate arity before using in lists:seq
+    case is_integer(Arity) andalso Arity >= 0 andalso Arity =< 255 of
+        false ->
+            {error, {invalid_arity, Arity}};
+        true ->
+            case safe_nth(ImportIndex + 1, Imports) of
+                {ok, {ModIndex, FunIndex, Arity}} ->
+                    case safe_nth(ModIndex, Proc#proc.atoms) of
+                        {ok, Mod} ->
+                            case safe_nth(FunIndex, Proc#proc.atoms) of
+                                {ok, Fun} ->
+                                    %% Get arguments from X registers
+                                    Args = [maps:get(I, X, undefined) || I <- lists:seq(0, Arity - 1)],
 
                             %% Execute the BIF
                             case execute_erlang_bif(Mod, Fun, Args, Options) of
@@ -502,10 +507,11 @@ execute_bif(ImportIndex, Arity, #proc{imports = Imports, x = X} = Proc, Options)
                 {error, Reason} ->
                     {error, Reason}
             end;
-        {ok, _} ->
-            {error, invalid_import};
-        {error, Reason} ->
-            {error, Reason}
+                {ok, _} ->
+                    {error, invalid_import};
+                {error, Reason} ->
+                    {error, Reason}
+            end
     end.
 
 %% Execute Erlang BIFs

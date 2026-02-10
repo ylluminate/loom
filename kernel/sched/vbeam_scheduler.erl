@@ -482,11 +482,14 @@ handle_cast(_Msg, State) ->
 %% @doc Handle timer interrupt from IRQ bridge
 %% BUG 4 FIX: Authenticate sender to prevent spoofed IRQ messages
 %% Only accept tick messages from the registered vbeam_irq_bridge process
+%% NOTE: When irq_bridge_pid is undefined, ticks are accepted for testing/bootstrap.
+%% This is INTENTIONAL - production should set the bridge PID during init to enforce auth.
 handle_info({irq, ?IRQ_TIMER, _Timestamp}, #state{irq_bridge_pid = AuthPid} = State) ->
     %% Authenticate tick source. On bare metal, use capability token.
     case AuthPid of
         undefined ->
             %% No bridge registered yet — accept tick (testing/bootstrap)
+            %% SECURITY: Set irq_bridge_pid during system init to enforce authentication
             NewState = tick(State),
             {noreply, NewState};
         _ ->

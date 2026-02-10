@@ -328,7 +328,7 @@ builtin_function(<<"string__int">>) ->
         arity => 1,
         exported => false,
         params => [{vreg, 0}],
-        locals => 7,
+        locals => 8,
         body => [
             %% Load ptr and len from fat pointer
             {load, {vreg, 1}, {vreg, 0}, 0},       %% vreg1 = ptr
@@ -358,7 +358,9 @@ builtin_function(<<"string__int">>) ->
             {cmp, {vreg, 6}, {imm, 57}},
             {jcc, gt, <<"si_done">>},
             %% result = result * 10 + (byte - '0')
-            {mul, {vreg, 3}, {vreg, 3}, {imm, 10}},
+            %% Multiply by 10 using temp register (lowerers need register source)
+            {mov_imm, {vreg, 7}, 10},
+            {mul, {vreg, 3}, {vreg, 3}, {vreg, 7}},
             {sub, {vreg, 6}, {vreg, 6}, {imm, 48}},
             {add, {vreg, 3}, {vreg, 3}, {vreg, 6}},
             {add, {vreg, 4}, {vreg, 4}, {imm, 1}},
@@ -598,14 +600,14 @@ builtin_function(<<"string__to_upper">>) ->
             {label, <<"stu_store">>},
             %% Store to new buffer
             {add, {vreg, 6}, {vreg, 3}, {vreg, 4}},
-            {store_byte, {vreg, 6}, {vreg, 5}, 0},
+            {store_byte, {vreg, 6}, 0, {vreg, 5}},
             {add, {vreg, 4}, {vreg, 4}, {imm, 1}},
             {jmp, <<"stu_loop">>},
             {label, <<"stu_done">>},
             %% Build fat pointer on heap: {ptr, len}
             {mov, {vreg, 5}, {preg, x28}},          %% result fat pointer
-            {store, {vreg, 5}, {vreg, 3}, 0},        %% store ptr
-            {store, {vreg, 5}, {vreg, 2}, 8},        %% store len
+            {store, {vreg, 5}, 0, {vreg, 3}},        %% store ptr
+            {store, {vreg, 5}, 8, {vreg, 2}},        %% store len
             {add, {preg, x28}, {preg, x28}, {imm, 16}},
             {mov, {preg, x0}, {vreg, 5}},
             ret
@@ -719,9 +721,9 @@ builtin_function(<<"get_raw_line">>) ->
         body => [
             %% Return empty fat pointer
             {mov, {vreg, 0}, {preg, x28}},
-            {store, {vreg, 0}, {preg, x28}, 0},  %% ptr = heap (empty)
+            {store, {vreg, 0}, 0, {preg, x28}},  %% ptr = heap (empty)
             {mov_imm, {vreg, 1}, 0},
-            {store, {vreg, 0}, {vreg, 1}, 8},    %% len = 0
+            {store, {vreg, 0}, 8, {vreg, 1}},    %% len = 0
             {add, {preg, x28}, {preg, x28}, {imm, 16}},
             {mov, {preg, x0}, {vreg, 0}},
             ret

@@ -186,21 +186,16 @@ parse_chunk_data('LitT', Data) ->
                         {Declared, Actual} ->
                             {error, {litt_size_mismatch, declared, Declared, actual, Actual}}
                     end;
-                {error, _Reason} ->
-                    %% Decompression failed — data may be uncompressed
-                    %% (V compiler and some tools write uncompressed LitT)
+                {error, Reason} ->
+                    %% SECURITY FIX: Return error instead of fallback parsing
+                    %% Fallback parsing of compressed data as raw bytes is unsafe
                     case UncompressedSize of
                         0 ->
                             %% Size 0 means not compressed, parse directly
                             parse_literals(Compressed);
                         _ ->
-                            %% Try parsing as-is (fallback)
-                            case catch parse_literals(Compressed) of
-                                L when is_list(L) -> L;
-                                _ ->
-                                    #{uncompressed_size => UncompressedSize,
-                                      compressed => Compressed}
-                            end
+                            %% Decompression failed with non-zero size - this is an error
+                            {error, {decompression_failed, Reason}}
                     end
             end;
         <<UncompressedSize:32, _/binary>> ->

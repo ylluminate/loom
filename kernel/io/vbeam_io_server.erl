@@ -231,27 +231,14 @@ handle_io_request(_Request, State) ->
 -spec encode_chars(unicode | latin1, iodata()) -> binary().
 
 %% BUG 6 FIX: Whitelist for safe MFA calls with module restriction
-%% Only allow specific safe formatting functions from whitelisted modules
-is_safe_mfa(erlang, Fun, _Arity) when Fun =:= integer_to_list;
-                                       Fun =:= integer_to_binary;
-                                       Fun =:= float_to_list;
-                                       Fun =:= float_to_binary;
-                                       Fun =:= atom_to_list;
-                                       Fun =:= atom_to_binary;
-                                       Fun =:= list_to_binary;
-                                       Fun =:= iolist_to_binary;
-                                       Fun =:= binary_to_list ->
+%% TIGHTENED: Only allow specific safe formatting functions, NO wildcard module access
+is_safe_mfa(erlang, Fun, 1) when Fun =:= integer_to_list;
+                                  Fun =:= float_to_list;
+                                  Fun =:= atom_to_list;
+                                  Fun =:= list_to_binary ->
     true;
-is_safe_mfa(io_lib, Fun, _Arity) when Fun =:= format;
-                                       Fun =:= fwrite;
-                                       Fun =:= write;
-                                       Fun =:= print;
-                                       Fun =:= nl ->
-    true;
-is_safe_mfa(lists, _Fun, _Arity) ->
-    true;  % Allow lists module functions
-is_safe_mfa(unicode, _Fun, _Arity) ->
-    true;  % Allow unicode module functions
+is_safe_mfa(io_lib, format, 2) -> true;
+is_safe_mfa(io_lib, write, 1) -> true;
 is_safe_mfa(_Mod, _Fun, _Arity) ->
     false.
 

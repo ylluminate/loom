@@ -290,10 +290,13 @@ pci_iounmap(Dev, Addr) ->
 
 %% @doc Request interrupt line
 %% Real implementation: register IRQ handler process, route BEAM messages
+%% NOTE: Currently returns stub indicator - real IRQ registration not implemented
 request_irq(Irq, Handler, Flags, Name, Dev) ->
     log_kapi_call(request_irq, [Irq, Handler, Flags, Name, Dev]),
+    logger:warning("[KAPI] request_irq: stub implementation - IRQ not actually registered"),
     %% TODO: Register Handler with vbeam_irq manager
-    0. %% Success
+    Ref = make_ref(),
+    {ok, {stub, Ref}}. %% Stub indicator
 
 %% @doc Request threaded interrupt line (with separate thread handler)
 %% TODO: Thread handler not supported yet - log warning and delegate to request_irq
