@@ -179,6 +179,7 @@ isr_ring_buffer_write() ->
 
         %% Load ring buffer pointers
         <<16#48, 16#B8>>, <<RingBufferBase:64/little>>,        % mov rax, RingBufferBase
+        <<16#49, 16#89, 16#C3>>,                               % mov r11, rax (save base, rdtsc will clobber rax)
         <<16#48, 16#8B, 16#50, 16#08>>,                        % mov rdx, [rax+8] (tail)
         <<16#48, 16#8B, 16#48, 16#10>>,                        % mov rcx, [rax+16] (size)
 
@@ -192,7 +193,7 @@ isr_ring_buffer_write() ->
 
         %% Write IRQ number (from stack at [rsp+24], pushed by exception_stubs)
         <<16#48, 16#8B, 16#4C, 16#24, 16#18>>,                 % mov rcx, [rsp+24]
-        <<16#48, 16#89, 16#0C, 16#10>>,                        % mov [rax+rdx], rcx
+        <<16#4A, 16#89, 16#0C, 16#1A>>,                        % mov [r11+rdx], rcx (use r11 base)
 
         %% Save entry offset to R8 (rdx will be clobbered by rdtsc)
         <<16#49, 16#89, 16#D0>>,                               % mov r8, rdx
@@ -201,12 +202,12 @@ isr_ring_buffer_write() ->
         <<16#0F, 16#31>>,                                       % rdtsc (edx:eax)
         <<16#48, 16#C1, 16#E2, 16#20>>,                        % shl rdx, 32
         <<16#48, 16#09, 16#C2>>,                               % or rdx, rax
-        <<16#4A, 16#89, 16#54, 16#00, 16#08>>,                 % mov [rax+r8+8], rdx
+        <<16#4B, 16#89, 16#54, 16#03, 16#08>>,                 % mov [r11+r8+8], rdx (use r11 base)
 
         %% Increment tail
-        <<16#48, 16#8B, 16#50, 16#08>>,                        % mov rdx, [rax+8]
+        <<16#49, 16#8B, 16#53, 16#08>>,                        % mov rdx, [r11+8]
         <<16#48, 16#FF, 16#C2>>,                               % inc rdx
-        <<16#48, 16#89, 16#50, 16#08>>,                        % mov [rax+8], rdx
+        <<16#49, 16#89, 16#53, 16#08>>,                        % mov [r11+8], rdx (use r11 base)
 
         %% Send EOI to LAPIC (0xFEE000B0)
         <<16#48, 16#B8, 16#B0, 16#00, 16#E0, 16#FE, 16#00, 16#00, 16#00, 16#00>>,  % mov rax, 0xFEE000B0

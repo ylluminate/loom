@@ -46,15 +46,20 @@ boot_code(Config) ->
     %% Status prints can be added in a future iteration with proper
     %% RIP-relative addressing setup
 
+    %% Get helper code blocks and strip trailing ret (0xC3) for inlining
+    GDTCode = vbeam_gdt_idt:gdt_load_code(GDTBase),
+    IDTCode = vbeam_gdt_idt:idt_load_code(IDTBase),
+    PageCode = vbeam_paging:load_cr3_code(PageTablesBase),
+
     iolist_to_binary([
         %% === Load GDT ===
-        vbeam_gdt_idt:gdt_load_code(GDTBase),
+        strip_trailing_ret(GDTCode),
 
         %% === Load IDT ===
-        vbeam_gdt_idt:idt_load_code(IDTBase),
+        strip_trailing_ret(IDTCode),
 
         %% === Load CR3 (page tables) ===
-        vbeam_paging:load_cr3_code(PageTablesBase),
+        strip_trailing_ret(PageCode),
 
         %% === Setup stack ===
         %% mov rsp, StackBase + StackSize
@@ -65,22 +70,51 @@ boot_code(Config) ->
         <<16#EB, 16#FD>> %% jmp -3 (infinite loop)
     ]).
 
-%% @doc Generate boot data section containing GDT, IDT, page tables, and strings.
+%% @doc Generate boot data section containing GDT, IDT, IDTR, page tables, and strings.
+%%      Data is packed sequentially but must align with configured base addresses.
+%%      IDTR is placed at IDTBase + 4096 to match idt_load_code expectations.
 -spec boot_data(map()) -> binary().
 boot_data(Config) ->
     #{
-        gdt_base := _GDTBase,
-        idt_base := _IDTBase,
-        page_tables_base := _PageTablesBase
+        gdt_base := GDTBase,
+        idt_base := IDTBase,
+        page_tables_base := PageTablesBase
     } = Config,
 
-    %% GDT data (includes 5 entries + GDTR)
+    %% GDT data (includes 5 entries + GDTR at end)
     GDTData = vbeam_gdt_idt:gdt_data(),
+    GDTSize = byte_size(GDTData),
 
-    %% IDT data (256 entries)
+    %% Padding between GDT and IDT if needed
+    ExpectedIDTOffset = IDTBase - GDTBase,
+    GDTPadding = if
+        ExpectedIDTOffset > GDTSize ->
+            binary:copy(<<0>>, ExpectedIDTOffset - GDTSize);
+        true ->
+            <<>>
+    end,
+
+    %% IDT data (256 entries, 4096 bytes)
     %% ISR stubs will be at known location - pass base address
     ISRStubsBase = 16#210000,  %% Placeholder, actual location TBD
     IDTData = vbeam_gdt_idt:idt_data(ISRStubsBase),
+    IDTSize = byte_size(IDTData),
+
+    %% IDTR (10 bytes: 2-byte limit + 8-byte base)
+    %% idt_load_code expects IDTR at IDTBase + 4096
+    %% Reserve space for it
+    IDTRReserved = <<0:80>>,  %% 10 bytes zeroed
+
+    %% Padding between IDT+IDTR and page tables if needed
+    ExpectedPageTablesOffset = PageTablesBase - GDTBase,
+    ActualPageTablesOffset = GDTSize + byte_size(GDTPadding) + IDTSize + 10,
+
+    PageTablesPadding = if
+        ExpectedPageTablesOffset > ActualPageTablesOffset ->
+            binary:copy(<<0>>, ExpectedPageTablesOffset - ActualPageTablesOffset);
+        true ->
+            <<>>
+    end,
 
     %% Page tables (4GB identity-mapped)
     PageTablesData = vbeam_paging:page_tables(4),
@@ -95,17 +129,19 @@ boot_data(Config) ->
         <<"[BOOT] BEAM kernel ready\r\n", 0>>
     ],
 
-    iolist_to_binary([GDTData, IDTData, PageTablesData, Strings]).
+    iolist_to_binary([GDTData, GDTPadding, IDTData, IDTRReserved, PageTablesPadding, PageTablesData, Strings]).
 
 %% @doc Returns layout map describing data section structure.
+%%      Must match the structure created by boot_data/1.
 -spec boot_data_layout(map()) -> map().
 boot_data_layout(Config) ->
     #{
-        gdt_base := _GDTBase,
-        idt_base := _IDTBase
+        gdt_base := GDTBase,
+        idt_base := IDTBase,
+        page_tables_base := PageTablesBase
     } = Config,
 
-    %% Calculate sizes
+    %% Calculate sizes (must match boot_data/1)
     GDTData = vbeam_gdt_idt:gdt_data(),
     GDTSize = byte_size(GDTData),
 
@@ -115,6 +151,22 @@ boot_data_layout(Config) ->
 
     PageTablesData = vbeam_paging:page_tables(4),
     PageTablesSize = byte_size(PageTablesData),
+
+    %% Calculate padding (same logic as boot_data/1)
+    ExpectedIDTOffset = IDTBase - GDTBase,
+    GDTPaddingSize = if
+        ExpectedIDTOffset > GDTSize -> ExpectedIDTOffset - GDTSize;
+        true -> 0
+    end,
+
+    ExpectedPageTablesOffset = PageTablesBase - GDTBase,
+    ActualPageTablesOffset = GDTSize + GDTPaddingSize + IDTSize + 10,  %% 10 = IDTR size
+    PageTablesPaddingSize = if
+        ExpectedPageTablesOffset > ActualPageTablesOffset ->
+            ExpectedPageTablesOffset - ActualPageTablesOffset;
+        true ->
+            0
+    end,
 
     %% String data
     Strings = [
@@ -126,10 +178,10 @@ boot_data_layout(Config) ->
         <<"[BOOT] BEAM kernel ready\r\n", 0>>
     ],
 
-    %% Calculate offsets
+    %% Calculate actual offsets in the packed data
     GDTOffset = 0,
-    IDTOffset = GDTOffset + GDTSize,
-    PageTablesOffset = IDTOffset + IDTSize,
+    IDTOffset = GDTOffset + GDTSize + GDTPaddingSize,
+    PageTablesOffset = IDTOffset + IDTSize + 10 + PageTablesPaddingSize,  %% 10 = IDTR
     StringsOffset = PageTablesOffset + PageTablesSize,
 
     %% Build string offset list
@@ -162,6 +214,21 @@ build_string_offsets([], _CurrentOffset, Acc) ->
 build_string_offsets([Str | Rest], CurrentOffset, Acc) ->
     build_string_offsets(Rest, CurrentOffset + byte_size(Str),
                         [{CurrentOffset, Str} | Acc]).
+
+%% @doc Strip trailing ret (0xC3) from code block for inlining.
+-spec strip_trailing_ret(binary()) -> binary().
+strip_trailing_ret(<<>>) ->
+    <<>>;
+strip_trailing_ret(Code) ->
+    Size = byte_size(Code),
+    case binary:last(Code) of
+        16#C3 ->
+            %% Strip the ret
+            binary:part(Code, 0, Size - 1);
+        _ ->
+            %% No ret, return as-is
+            Code
+    end.
 
 %% @doc Encode: mov rsp, imm64
 -spec encode_mov_rsp_imm64(non_neg_integer()) -> binary().

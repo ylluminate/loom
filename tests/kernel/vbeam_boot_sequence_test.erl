@@ -156,18 +156,22 @@ test_layout_offsets_valid() ->
         page_tables_size := PTSize
     } = Layout,
 
-    %% Offsets should be sequential and non-overlapping
+    %% GDT should start at offset 0
     true = GDTOff =:= 0,
-    true = IDTOff =:= GDTOff + GDTSize,
-    true = PTOff =:= IDTOff + IDTSize,
+
+    %% IDT should come after GDT (possibly with padding to align with configured address)
+    true = IDTOff >= GDTOff + GDTSize,
+
+    %% Page tables should come after IDT + IDTR (10 bytes)
+    true = PTOff >= IDTOff + IDTSize + 10,
 
     %% Sizes should be reasonable
     true = GDTSize > 0,
     true = IDTSize > 0,
     true = PTSize > 0,
 
-    io:format("  Layout: GDT=~w bytes, IDT=~w bytes, PT=~w bytes~n",
-              [GDTSize, IDTSize, PTSize]).
+    io:format("  Layout: GDT@~w (~w bytes), IDT@~w (~w bytes), PT@~w (~w bytes)~n",
+              [GDTOff, GDTSize, IDTOff, IDTSize, PTOff, PTSize]).
 
 %%====================================================================
 %% Helpers

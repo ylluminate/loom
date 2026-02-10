@@ -83,10 +83,10 @@ serial_puts_code() ->
         %% loop:
         <<16#AC>>,                                % lodsb (load byte from [RSI++] to AL)
         <<16#84, 16#C0>>,                         % test al, al
-        <<16#74, 16#07>>,                         % jz done (+7 bytes to ret)
+        <<16#74, 16#09>>,                         % jz done (+9 bytes to ret)
         <<16#88, 16#C3>>,                         % mov bl, al (save char)
         <<16#E8, CallOffset:32/little-signed>>,   % call serial_putchar
-        <<16#EB, 16#F3>>,                         % jmp loop (-13 bytes)
+        <<16#EB, 16#F2>>,                         % jmp loop (-14 bytes)
         %% done:
         <<16#C3>>                                 % ret
     ]).
@@ -331,7 +331,7 @@ translate_move({integer, Val}, {x, 0}) ->
             <<16#48, 16#C7, 16#C0, Val:32/little-signed>>;  % mov rax, imm32
         true ->
             %% 64-bit immediate (movabs)
-            <<16#48, 16#B8, Val:64/little>>  % movabs rax, imm64
+            <<16#48, 16#B8, Val:64/little-signed>>  % movabs rax, imm64
     end;
 
 translate_move({atom, _Atom}, {x, 0}) ->
@@ -367,17 +367,17 @@ translate_serial_output() ->
         %% RSI = string pointer (assumed already loaded)
         <<16#AC>>,                                % lodsb
         <<16#84, 16#C0>>,                         % test al, al
-        <<16#74, 16#0E>>,                         % jz done (+14 bytes, adjusted from +15)
+        <<16#74, 16#16>>,                         % jz done (+22 bytes)
         <<16#88, 16#C3>>,                         % mov bl, al
         %% Wait for TX ready
         <<16#BA, 16#FD, 16#03, 16#00, 16#00>>,   % mov edx, 0x3FD
         <<16#EC>>,                                % in al, dx
         <<16#A8, 16#20>>,                         % test al, 0x20
-        <<16#74, 16#F6>>,                         % jz wait (-10)
+        <<16#74, 16#FB>>,                         % jz wait (-5)
         <<16#88, 16#D8>>,                         % mov al, bl
         <<16#BA, 16#F8, 16#03, 16#00, 16#00>>,   % mov edx, 0x3F8
         <<16#EE>>,                                % out dx, al
-        <<16#EB, 16#E4>>                          % jmp loop (-28)
+        <<16#EB, 16#E5>>                          % jmp loop (-27)
         %% done: (fall through to next instruction in caller)
     ]).
 

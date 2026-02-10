@@ -8,8 +8,7 @@
     gdt_load_code/1,
     idt_data/1,
     idt_load_code/1,
-    exception_stubs/0,
-    timer_isr/0
+    exception_stubs/0
 ]).
 
 %%====================================================================
@@ -39,7 +38,8 @@ gdt_data() ->
     %% Entry 2: Data segment ring 0
     %% Access byte: Present=1, DPL=00, Type=1, Executable=0,
     %%              Direction=0, Writable=1, Accessed=0 = 0x92
-    KernelData = build_gdt_entry(0, 16#FFFFF, 16#92, 16#A),
+    %% Flags: Granularity=1 (4KB), Long mode=0 (L-bit for data), Reserved=0, AVL=0 = 0x8
+    KernelData = build_gdt_entry(0, 16#FFFFF, 16#92, 16#8),
 
     %% Entry 3: Code segment ring 3 (user)
     %% Access byte: Present=1, DPL=11 (ring 3), Type=1, Executable=1,
@@ -49,7 +49,8 @@ gdt_data() ->
     %% Entry 4: Data segment ring 3 (user)
     %% Access byte: Present=1, DPL=11, Type=1, Executable=0,
     %%              Direction=0, Writable=1, Accessed=0 = 0xF2
-    UserData = build_gdt_entry(0, 16#FFFFF, 16#F2, 16#A),
+    %% Flags: Granularity=1 (4KB), Long mode=0 (L-bit for data), Reserved=0, AVL=0 = 0x8
+    UserData = build_gdt_entry(0, 16#FFFFF, 16#F2, 16#8),
 
     %% GDTR structure (10 bytes total)
     %% Limit: size - 1 = (5 entries * 8) - 1 = 39
@@ -169,19 +170,22 @@ gdt_load_code(GDTBaseAddr) ->
 %%      Input: ISRStubBaseAddr = physical address of exception_stubs code
 -spec idt_data(non_neg_integer()) -> binary().
 idt_data(ISRStubBaseAddr) ->
-    %% Each ISR stub is a fixed size: push + push + jmp = 10 bytes per stub
+    %% Each exception stub is padded to 10 bytes
     StubSize = 10,
 
     %% Build entries 0-31: exception handlers
     Exceptions = [build_idt_entry(ISRStubBaseAddr + (N * StubSize), 16#08, 16#8E) || N <- lists:seq(0, 31)],
 
-    %% Entry 32: timer interrupt
-    TimerStub = ISRStubBaseAddr + (32 * StubSize),
-    Timer = build_idt_entry(TimerStub, 16#08, 16#8E),
+    %% Entry 32: Timer interrupt (variable size, but follows stubs)
+    %% Timer stub starts after all 32 exception stubs
+    TimerStubOffset = 32 * StubSize,
+    Timer = build_idt_entry(ISRStubBaseAddr + TimerStubOffset, 16#08, 16#8E),
 
-    %% Entries 33-255: generic stub (halts)
-    GenericStub = ISRStubBaseAddr + (33 * StubSize),
-    Generic = [build_idt_entry(GenericStub, 16#08, 16#8E) || _ <- lists:seq(33, 255)],
+    %% Entry 33: Generic stub (find offset by measuring timer stub)
+    %% Timer stub is complex, measure it
+    TimerStubData = build_timer_stub(),
+    GenericStubOffset = TimerStubOffset + byte_size(TimerStubData),
+    Generic = [build_idt_entry(ISRStubBaseAddr + GenericStubOffset, 16#08, 16#8E) || _ <- lists:seq(33, 255)],
 
     iolist_to_binary([Exceptions, Timer, Generic]).
 
@@ -286,12 +290,23 @@ exception_stubs() ->
 %%      Total must be 10 bytes, so we pad with nop if needed.
 -spec build_exception_stub(non_neg_integer(), boolean()) -> binary().
 build_exception_stub(ExcNum, HasErrorCode) ->
-    %% Common handler comes after all 34 stubs (32 exceptions + timer + generic)
-    %% Each stub is 10 bytes, so total stub block is 34 * 10 = 340 bytes
-    %% From this stub (at ExcNum * 10), offset to common handler is:
-    %%   (number of remaining stubs * 10) = (34 - ExcNum) * 10 - 10 (size of this stub)
-    %%   Which simplifies to: (33 - ExcNum) * 10
-    CommonHandlerOffset = (33 - ExcNum) * 10,
+    %% Common handler comes after: 32 exception stubs + timer stub + generic stub
+    %% Exception stubs: 32 * 10 = 320 bytes
+    %% Timer stub: variable size (measure it)
+    TimerStubSize = byte_size(build_timer_stub()),
+    %% Generic stub: variable size (measure it)
+    GenericStubSize = byte_size(build_generic_stub()),
+
+    %% From END of this stub's jmp instruction to common handler start
+    %% This stub is at offset: ExcNum * 10
+    %% This stub ends at: (ExcNum * 10) + 10
+    %% Jmp instruction is the last 5 bytes of stub, so jmp ends at: (ExcNum * 10) + 10
+    %% Common handler starts at: 320 + TimerStubSize + GenericStubSize
+    %% Relative offset from after jmp = target - (current_position + 5)
+    %% Since we're building the jmp and it's at the end, offset is measured from stub end
+    ThisStubEnd = (ExcNum + 1) * 10,
+    CommonHandlerStart = 320 + TimerStubSize + GenericStubSize,
+    CommonHandlerOffset = CommonHandlerStart - ThisStubEnd,
 
     Base = case HasErrorCode of
         false ->
@@ -412,13 +427,8 @@ build_common_handler() ->
         <<16#EB, 16#FE>>
     ]).
 
-%% @doc Returns x86_64 machine code for timer ISR.
-%%      Increments a counter and sends EOI to PIC.
--spec timer_isr() -> binary().
-timer_isr() ->
-    %% This is handled by build_timer_stub/0 above
-    %% Return empty binary as this function is included in exception_stubs/0
-    <<>>.
+%% timer_isr/0 removed - functionality is in build_timer_stub/0
+%% which is called by exception_stubs/0
 
 %%====================================================================
 %% x86_64 Instruction Encoders

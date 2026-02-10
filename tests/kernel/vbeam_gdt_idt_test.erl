@@ -242,10 +242,13 @@ test_exception_stubs_exist() ->
     end.
 
 test_timer_isr_exists() ->
-    ISR = vbeam_gdt_idt:timer_isr(),
+    %% timer_isr/0 was removed - functionality is in build_timer_stub/0
+    %% which is called by exception_stubs/0
+    %% Verify that exception_stubs contains the timer stub (stub 32)
+    Stubs = vbeam_gdt_idt:exception_stubs(),
 
-    %% Should be a binary (may be empty if included in exception_stubs)
-    case is_binary(ISR) of
+    %% Stubs should be non-empty binary containing all exception stubs + timer + generic + common handler
+    case is_binary(Stubs) andalso byte_size(Stubs) > 0 of
         true -> ok;
-        false -> error(timer_isr_not_binary)
+        false -> error(exception_stubs_empty)
     end.

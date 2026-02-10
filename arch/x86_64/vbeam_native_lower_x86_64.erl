@@ -414,12 +414,14 @@ lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) -
         ?ENC:encode_cmp_rr(r11, rdx),
         ?ENC:encode_jcc_rel32(ge, 0),
         {reloc, rel32, CopyADone, -4},
+        %% Load byte: movzx rax, byte [rsi+r11]
         ?ENC:encode_mov_rr(rax, rsi),
         ?ENC:encode_add_rr(rax, r11),
-        ?ENC:encode_mov_mem_load(rax, rax, 0),
+        encode_movzx_byte_mem(rax, rax),
+        %% Store byte: mov byte [r10+r11], al
         ?ENC:encode_mov_rr(rcx, r10),
         ?ENC:encode_add_rr(rcx, r11),
-        ?ENC:encode_mov_mem_store(rcx, 0, rax),   %% byte-level (approx)
+        encode_mov_byte_reg_to_mem(rcx, rax),
         ?ENC:encode_add_imm(r11, 1),
         ?ENC:encode_jmp_rel32(0),
         {reloc, rel32, CopyALbl, -4},
@@ -431,13 +433,15 @@ lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName) -
         ?ENC:encode_cmp_rr(r11, r8),
         ?ENC:encode_jcc_rel32(ge, 0),
         {reloc, rel32, CopyBDone, -4},
+        %% Load byte: movzx rax, byte [rdi+r11]
         ?ENC:encode_mov_rr(rax, rdi),
         ?ENC:encode_add_rr(rax, r11),
-        ?ENC:encode_mov_mem_load(rax, rax, 0),
+        encode_movzx_byte_mem(rax, rax),
+        %% Store byte: mov byte [r10+rdx+r11], al
         ?ENC:encode_mov_rr(rcx, r10),
         ?ENC:encode_add_rr(rcx, rdx),          %% + A.len
         ?ENC:encode_add_rr(rcx, r11),          %% + index
-        ?ENC:encode_mov_mem_store(rcx, 0, rax),
+        encode_mov_byte_reg_to_mem(rcx, rax),
         ?ENC:encode_add_imm(r11, 1),
         ?ENC:encode_jmp_rel32(0),
         {reloc, rel32, CopyBLbl, -4},
@@ -898,13 +902,13 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName) ->
         %% Save callee-saved regs we'll use
         ?ENC:encode_push(rbx),
         ?ENC:encode_push(r12),
-        ?ENC:encode_push(r13),
+        ?ENC:encode_push(r14),
         %% Allocate 48 bytes on stack for digit buffer
         ?ENC:encode_sub_imm(rsp, 48),
 
-        %% rbx = input value, r13 = sign flag (0=positive, 1=negative)
+        %% rbx = input value, r14 = sign flag (0=positive, 1=negative)
         ?ENC:encode_mov_rr(rbx, Src),
-        ?ENC:encode_xor_rr(r13, r13),     %% r13 = 0 (positive)
+        ?ENC:encode_xor_rr(r14, r14),     %% r14 = 0 (positive)
         %% r12 = 47 (write position, right to left)
         ?ENC:encode_mov_imm64(r12, 47),
 
@@ -925,7 +929,7 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName) ->
         {reloc, rel32, PositiveLbl, -4},
         %% Negate and record sign
         ?ENC:encode_neg(rbx),
-        ?ENC:encode_mov_imm64(r13, 1),    %% r13 = 1 (was negative)
+        ?ENC:encode_mov_imm64(r14, 1),    %% r14 = 1 (was negative)
 
         {label, PositiveLbl},
         {label, DivLoopLbl},
@@ -945,8 +949,8 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName) ->
         ?ENC:encode_jcc_rel32(ne, 0),
         {reloc, rel32, DivLoopLbl, -4},
 
-        %% If original was negative (r13=1), prepend '-'
-        ?ENC:encode_cmp_imm(r13, 0),
+        %% If original was negative (r14=1), prepend '-'
+        ?ENC:encode_cmp_imm(r14, 0),
         ?ENC:encode_jcc_rel32(eq, 0),
         {reloc, rel32, DoneLbl, -4},
         ?ENC:encode_sub_imm(r12, 1),
@@ -996,7 +1000,7 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName) ->
 
         %% Clean up stack and restore
         ?ENC:encode_add_imm(rsp, 48),
-        ?ENC:encode_pop(r13),
+        ?ENC:encode_pop(r14),
         ?ENC:encode_pop(r12),
         ?ENC:encode_pop(rbx),
         ?ENC:encode_mov_rr(Dst, rdi)

@@ -350,6 +350,8 @@ handle_call({send_message, ToPid, Message}, _From, State) ->
         undefined ->
             {reply, {error, not_found}, State};
         #{mailbox := Mailbox, status := Status} = Process ->
+            %% NOTE: Messages are shared-heap (not copied). This matches our modeled semantics.
+            %% On bare metal with strict per-process heaps, this would require deep-copy.
             NewMailbox = queue:in(Message, Mailbox),
             UpdatedProcess = Process#{mailbox => NewMailbox},
             NewProcesses = Processes#{ToPid => UpdatedProcess},
@@ -370,6 +372,7 @@ handle_call({receive_message, Pid}, _From, #state{processes = Processes} = State
         undefined ->
             {reply, {error, not_found}, State};
         #{mailbox := Mailbox} = Process ->
+            %% NOTE: Returned message is shared-heap (not copied). This matches our modeled semantics.
             case queue:out(Mailbox) of
                 {{value, Message}, NewMailbox} ->
                     UpdatedProcess = Process#{mailbox => NewMailbox},

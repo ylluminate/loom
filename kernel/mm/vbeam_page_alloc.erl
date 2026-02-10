@@ -80,9 +80,25 @@ alloc_pages(State, Count) ->
     alloc_pages_loop(State, Count, []).
 
 %% @doc Free a single page
--spec free_page(state(), phys_addr()) -> state().
+-spec free_page(state(), phys_addr()) -> state() | {error, invalid_address}.
 free_page(State, PhysAddr) ->
+    #{total_pages := TotalPages} = State,
+
+    %% Validate page alignment
+    case PhysAddr rem ?PAGE_SIZE of
+        0 -> ok;
+        _ -> error({error, invalid_address})
+    end,
+
     PageNum = PhysAddr div ?PAGE_SIZE,
+
+    %% Validate page number is within allocator range
+    case PageNum >= 0 andalso PageNum < TotalPages of
+        false -> {error, invalid_address};
+        true -> free_page_checked(State, PageNum)
+    end.
+
+free_page_checked(State, PageNum) ->
     #{bitmap := Bitmap, free_count := FreeCount, reserved_end := ReservedEnd} = State,
 
     %% Check if page is in reserved region

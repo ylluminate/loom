@@ -45,7 +45,7 @@
 %% @doc Generate complete page table hierarchy for MaxPhysicalGB
 %% Identity-mapped (virtual = physical) using 2MB pages
 -spec page_tables(pos_integer()) -> binary().
-page_tables(MaxPhysicalGB) when MaxPhysicalGB > 0 ->
+page_tables(MaxPhysicalGB) when MaxPhysicalGB >= 1, MaxPhysicalGB =< 512 ->
     %% Calculate how many PD tables we need (one per GB)
     NumPDs = MaxPhysicalGB,
 
@@ -109,6 +109,14 @@ enable_paging_code() ->
 %% @doc Create a page table entry with given physical address, flags, and level
 -spec page_table_entry(non_neg_integer(), [atom()], atom()) -> binary().
 page_table_entry(PhysAddr, Flags, Level) ->
+    %% Validate flags against known set
+    KnownFlags = [present, writable, user, write_through, cache_disable, accessed, dirty, ps, global, nx],
+    UnknownFlags = Flags -- KnownFlags,
+    case UnknownFlags of
+        [] -> ok;
+        _ -> error({unknown_flags, UnknownFlags})
+    end,
+
     %% Validate alignment: 2MB for 2MB pages, 4KB for others
     case {Level, lists:member(ps, Flags)} of
         {pd, true} ->
@@ -135,7 +143,14 @@ page_table_entry(PhysAddr, Flags, Level) ->
         _ -> 16#000FFFFFFFFFF000             %% 4KB page: bits 12-51
     end,
 
-    Entry = (PhysAddr band AddrMask) bor FlagBits,
+    %% Check if address masking would lose bits (address too large)
+    MaskedAddr = PhysAddr band AddrMask,
+    case MaskedAddr =:= PhysAddr of
+        true -> ok;
+        false -> error({address_bits_lost, PhysAddr, MaskedAddr})
+    end,
+
+    Entry = MaskedAddr bor FlagBits,
     <<Entry:64/little>>.
 
 %%%----------------------------------------------------------------------------
