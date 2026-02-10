@@ -251,22 +251,14 @@ init([]) ->
     {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}, pending_counts = #{}}}.
 
 handle_call({register_handler, IrqNum, Pid}, From, #state{handlers = Handlers, monitors = Monitors} = State) ->
-    %% BUG 10 FIX: Check ownership before allowing replacement
-    case maps:get(IrqNum, Handlers, undefined) of
-        undefined ->
-            %% No existing handler - proceed with registration
+    %% FINDING 5 FIX: Authorization check — caller must register itself (CallerPid =:= Pid)
+    %% Prevents arbitrary processes from claiming IRQs they don't own
+    {CallerPid, _Tag} = From,
+    case CallerPid =:= Pid of
+        true ->
             register_handler_impl(IrqNum, Pid, Handlers, Monitors, State);
-        OldPid ->
-            %% Handler exists - verify caller owns it
-            {CallerPid, _Tag} = From,
-            case CallerPid =:= OldPid orelse CallerPid =:= self() of
-                true ->
-                    %% Owner or bridge itself - allow replacement
-                    register_handler_impl(IrqNum, Pid, Handlers, Monitors, State);
-                false ->
-                    %% Unauthorized replacement attempt
-                    {reply, {error, unauthorized_replacement}, State}
-            end
+        false ->
+            {reply, {error, unauthorized_pid_mismatch}, State}
     end;
 
 

@@ -623,13 +623,18 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
         {cmp, A, B} -> {[A, B], []};
         {load, Dst, Base, _Off} -> {[Base], [Dst]};
         {store, Base, _Off, Src} -> {[Base, Src], []};
+        %% FINDING 3 FIX: method_call has a dst and args
+        {method_call, Dst, _RecvType, _Method, Args} ->
+            %% method_call returns a value (Dst) and uses Args
+            %% Extract vregs from Args (list of operands)
+            ArgVregs = extract_vregs_from_term(Args),
+            {ArgVregs, [Dst]};
         _ ->
-            %% CRITICAL FIX #7: Conservative fallback for unknown opcodes.
-            %% Scan tuple elements for {vreg, _} patterns and treat as both used and defined.
-            %% This prevents silent miscompilation by ensuring vregs in unknown instructions
-            %% get allocated and have correct live ranges.
+            %% FINDING 3 FIX: Conservative fallback changed to fail-closed.
+            %% Unknown opcodes likely have complex semantics - treat as uses with no defs
+            %% to avoid incorrectly marking args as defs (which caused spill corruption).
             VregsInInst = extract_vregs_from_tuple(Inst),
-            {VregsInInst, VregsInInst}  % conservative: all vregs are both used and defined
+            {VregsInInst, []}  % conservative: all vregs are uses, no defs
     end;
 analyze_inst_operands(_) -> {[], []}.
 
@@ -678,6 +683,13 @@ rewrite_operand_multi({mem, {vreg, N}, Off}, Assignments, VregToScratch) ->
         {ok, Reg} -> {mem, {preg, Reg}, Off};
         error -> {mem, {vreg, N}, Off}
     end;
+%% FINDING 4 FIX: Recursively rewrite lists (e.g., method_call args)
+rewrite_operand_multi(List, Assignments, VregToScratch) when is_list(List) ->
+    [rewrite_operand_multi(E, Assignments, VregToScratch) || E <- List];
+%% FINDING 4 FIX: Recursively rewrite tuples (e.g., nested operands)
+rewrite_operand_multi(Tuple, Assignments, VregToScratch) when is_tuple(Tuple) ->
+    list_to_tuple([rewrite_operand_multi(E, Assignments, VregToScratch)
+                   || E <- tuple_to_list(Tuple)]);
 rewrite_operand_multi(Other, _, _) -> Other.
 
 rewrite_operand_for_scratch({vreg, N}, Assignments, ScratchReg) ->

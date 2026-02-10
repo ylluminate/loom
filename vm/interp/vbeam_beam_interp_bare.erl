@@ -48,25 +48,27 @@ load_module(BeamBinary) ->
             %% Decode instructions from Code chunk
             Atoms = get_atoms(Parsed),
             CodeBinary = maps:get(code, Parsed, <<>>),
-            Instructions = case vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms) of
-                {ok, Instrs} -> Instrs;
-                {error, {decode_failed, _Reason, PartialInstrs}} -> PartialInstrs;
-                Instrs when is_list(Instrs) -> Instrs
-            end,
+            %% FINDING 6 FIX: Treat decode failure as fatal - no partial execution
+            case vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms) of
+                {ok, Instructions} ->
+                    %% Build function map and label map
+                    {Functions, Labels} = build_maps(Instructions, Atoms, Parsed),
 
-            %% Build function map and label map
-            {Functions, Labels} = build_maps(Instructions, Atoms, Parsed),
-
-            {ok, #{
-                module_name => get_module_name(Atoms, Parsed),
-                atoms => Atoms,
-                literals => maps:get(literals, Parsed, []),
-                strings => maps:get(strings, Parsed, <<>>),
-                imports => maps:get(imports, Parsed, []),
-                exports => maps:get(exports, Parsed, []),
-                functions => Functions,
-                labels => Labels
-            }};
+                    {ok, #{
+                        module_name => get_module_name(Atoms, Parsed),
+                        atoms => Atoms,
+                        literals => maps:get(literals, Parsed, []),
+                        strings => maps:get(strings, Parsed, <<>>),
+                        imports => maps:get(imports, Parsed, []),
+                        exports => maps:get(exports, Parsed, []),
+                        functions => Functions,
+                        labels => Labels
+                    }};
+                {error, {decode_failed, Reason, _PartialInstrs}} ->
+                    {error, {decode_failed, Reason}};
+                {error, Reason} ->
+                    {error, {decode_failed, Reason}}
+            end;
         {error, Reason} ->
             {error, {parse_failed, Reason}}
     end.

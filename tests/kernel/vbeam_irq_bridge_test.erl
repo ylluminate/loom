@@ -249,15 +249,18 @@ test_isr_code_generation() ->
 test_dead_handler_cleanup() ->
     {ok, BridgePid} = vbeam_irq_bridge:start_link(),
 
-    %% Spawn a handler process
+    %% Spawn a handler process that registers itself (authorization requires CallerPid =:= Pid)
+    TestPid = self(),
     HandlerPid = spawn(fun() ->
+        ok = vbeam_irq_bridge:register_handler(3, self()),
+        TestPid ! {registered, self()},
         receive
             {irq, _, _} -> ok
         end
     end),
 
-    %% Register the handler for IRQ 3
-    ok = vbeam_irq_bridge:register_handler(3, HandlerPid),
+    %% Wait for registration to complete
+    receive {registered, HandlerPid} -> ok after 1000 -> error(registration_timeout) end,
 
     %% Verify it's registered
     #{3 := HandlerPid} = vbeam_irq_bridge:get_handlers(),

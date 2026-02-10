@@ -157,23 +157,24 @@ printk(Fmt, Args) ->
     ok.
 
 %% @doc Device error log
+%% FINDING (linuxkpi qual review): Use ~tp instead of ~s to handle non-string Msg
 dev_err(Dev, Msg) ->
-    logger:error("[KAPI dev_err] ~p: ~s", [Dev, Msg]),
+    logger:error("[KAPI dev_err] ~p: ~tp", [Dev, Msg]),
     ok.
 
 %% @doc Device warning log
 dev_warn(Dev, Msg) ->
-    logger:warning("[KAPI dev_warn] ~p: ~s", [Dev, Msg]),
+    logger:warning("[KAPI dev_warn] ~p: ~tp", [Dev, Msg]),
     ok.
 
 %% @doc Device info log
 dev_info(Dev, Msg) ->
-    logger:info("[KAPI dev_info] ~p: ~s", [Dev, Msg]),
+    logger:info("[KAPI dev_info] ~p: ~tp", [Dev, Msg]),
     ok.
 
 %% @doc Device debug log
 dev_dbg(Dev, Msg) ->
-    logger:debug("[KAPI dev_dbg] ~p: ~s", [Dev, Msg]),
+    logger:debug("[KAPI dev_dbg] ~p: ~tp", [Dev, Msg]),
     ok.
 
 %% ==================================================================

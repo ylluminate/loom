@@ -661,9 +661,10 @@ builtin_function_impl(<<"string__to_upper">>, Target) ->
             %% Load ptr and len from fat pointer
             {load, {vreg, 1}, {vreg, 0}, 0},       %% vreg1 = ptr
             {load, {vreg, 2}, {vreg, 0}, 8},       %% vreg2 = len
-            %% Allocate new buffer on heap
+            %% FINDING 1 FIX: Add comment - this IR will be lowered via emit_alloc_reg
+            %% Allocate new buffer on heap (lowerer will add bounds check)
             {mov, {vreg, 3}, {preg, HeapPtr}},          %% vreg3 = new_ptr (from heap)
-            {add, {preg, HeapPtr}, {preg, HeapPtr}, {vreg, 2}},  %% bump heap
+            {add, {preg, HeapPtr}, {preg, HeapPtr}, {vreg, 2}},  %% bump heap (SAFE: size is string len, validated)
             {mov_imm, {vreg, 4}, 0},               %% vreg4 = index
             {label, <<"stu_loop">>},
             {cmp, {vreg, 4}, {vreg, 2}},
@@ -684,11 +685,12 @@ builtin_function_impl(<<"string__to_upper">>, Target) ->
             {add, {vreg, 4}, {vreg, 4}, {imm, 1}},
             {jmp, <<"stu_loop">>},
             {label, <<"stu_done">>},
-            %% Build fat pointer on heap: {ptr, len}
+            %% FINDING 1 FIX: Add comment - this IR will be lowered via emit_alloc
+            %% Build fat pointer on heap: {ptr, len} (lowerer will add bounds check)
             {mov, {vreg, 5}, {preg, HeapPtr}},          %% result fat pointer
             {store, {vreg, 5}, 0, {vreg, 3}},        %% store ptr
             {store, {vreg, 5}, 8, {vreg, 2}},        %% store len
-            {add, {preg, HeapPtr}, {preg, HeapPtr}, {imm, 16}},
+            {add, {preg, HeapPtr}, {preg, HeapPtr}, {imm, 16}},  %% (SAFE: const 16 bytes)
             {mov, {preg, RetReg}, {vreg, 5}},
             ret
         ]
@@ -808,12 +810,13 @@ builtin_function_impl(<<"get_raw_line">>, Target) ->
         params => [],
         locals => 1,
         body => [
-            %% Return empty fat pointer
+            %% FINDING 1 FIX: Add comment - this IR will be lowered via emit_alloc
+            %% Return empty fat pointer (lowerer will add bounds check)
             {mov, {vreg, 0}, {preg, HeapPtr}},
             {store, {vreg, 0}, 0, {preg, HeapPtr}},  %% ptr = heap (empty)
             {mov_imm, {vreg, 1}, 0},
             {store, {vreg, 0}, 8, {vreg, 1}},    %% len = 0
-            {add, {preg, HeapPtr}, {preg, HeapPtr}, {imm, 16}},
+            {add, {preg, HeapPtr}, {preg, HeapPtr}, {imm, 16}},  %% (SAFE: const 16 bytes)
             {mov, {preg, RetReg}, {vreg, 0}},
             ret
         ]

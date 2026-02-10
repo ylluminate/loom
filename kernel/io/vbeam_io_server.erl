@@ -212,18 +212,18 @@ handle_io_request({put_chars, Encoding, Mod, Fun, Args}, State) ->
                 true when Arity >= 0, Arity =< 3 ->
                     try
                         Chars = apply(Mod, Fun, Args),
-                        String = encode_chars(Encoding, Chars),
-                        %% BUG 6 FIX: Truncate output to 64KB max
+                        %% FINDING 9 FIX: Preflight check with iolist_size before materialization
                         MaxOutputSize = 64 * 1024,
-                        TruncatedString = case byte_size(String) of
+                        case iolist_size(Chars) of
                             Size when Size > MaxOutputSize ->
-                                <<Prefix:MaxOutputSize/binary, _/binary>> = String,
-                                Prefix;
-                            _ ->
-                                String
-                        end,
-                        NewState = output_all(TruncatedString, State),
-                        {ok, ok, NewState}
+                                %% Reject oversized output before materializing
+                                {error, {output_too_large, Size, max, MaxOutputSize}, State};
+                            _Size ->
+                                %% Safe to encode and output
+                                String = encode_chars(Encoding, Chars),
+                                NewState = output_all(String, State),
+                                {ok, ok, NewState}
+                        end
                     catch
                         _:Reason ->
                             {error, Reason, State}

@@ -46,25 +46,32 @@
 %%% ----------------------------------------------------------------------------
 
 %% @doc Initialize allocator with total physical memory size
--spec init(non_neg_integer()) -> state().
+-spec init(non_neg_integer()) -> state() | {error, term()}.
 init(TotalMemoryBytes) ->
-    TotalPages = TotalMemoryBytes div ?PAGE_SIZE,
-    BitmapSize = (TotalPages + 7) div 8, %% Round up to nearest byte
-    Bitmap = <<0:(BitmapSize * 8)>>, %% All pages initially free
+    %% FINDING 7 FIX: Enforce max 4GB to prevent bitmap overflow
+    MaxMemory = 4 * 1024 * 1024 * 1024,  % 4GB
+    case TotalMemoryBytes > MaxMemory of
+        true ->
+            {error, {memory_too_large, TotalMemoryBytes, max, MaxMemory}};
+        false ->
+            TotalPages = TotalMemoryBytes div ?PAGE_SIZE,
+            BitmapSize = (TotalPages + 7) div 8, %% Round up to nearest byte
+            Bitmap = <<0:(BitmapSize * 8)>>, %% All pages initially free
 
-    %% Mark first 2MB as reserved (kernel + boot structures)
-    ReservedPages = ?KERNEL_RESERVED_SIZE div ?PAGE_SIZE,
-    State0 = #{
-        bitmap => Bitmap,
-        page_size => ?PAGE_SIZE,
-        total_pages => TotalPages,
-        free_count => TotalPages,
-        next_hint => 0,
-        reserved_pages => #{}
-    },
+            %% Mark first 2MB as reserved (kernel + boot structures)
+            ReservedPages = ?KERNEL_RESERVED_SIZE div ?PAGE_SIZE,
+            State0 = #{
+                bitmap => Bitmap,
+                page_size => ?PAGE_SIZE,
+                total_pages => TotalPages,
+                free_count => TotalPages,
+                next_hint => 0,
+                reserved_pages => #{}
+            },
 
-    %% Reserve the first 2MB
-    mark_reserved_pages(State0, 0, ReservedPages - 1).
+            %% Reserve the first 2MB
+            mark_reserved_pages(State0, 0, ReservedPages - 1)
+    end.
 
 %% @doc Allocate a single page
 -spec alloc_page(state()) -> {ok, phys_addr(), state()} | {error, out_of_memory}.

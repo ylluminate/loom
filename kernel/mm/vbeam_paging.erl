@@ -90,16 +90,22 @@ page_tables_size(MaxPhysicalGB) when MaxPhysicalGB > 0 ->
 %%   1. Moves address into RAX
 %%   2. Loads CR3 from RAX
 %%   3. Returns
--spec load_cr3_code(non_neg_integer()) -> binary().
+-spec load_cr3_code(non_neg_integer()) -> binary() | {error, term()}.
 load_cr3_code(PageTableAddr) ->
-    iolist_to_binary([
-        %% mov rax, imm64 (48 B8 followed by 8-byte address)
-        <<16#48, 16#B8, PageTableAddr:64/little>>,
-        %% mov cr3, rax (0F 22 D8)
-        <<16#0F, 16#22, 16#D8>>,
-        %% ret
-        <<16#C3>>
-    ]).
+    %% FINDING 8 FIX: Validate CR3 is 4KB-aligned (bits 0-11 must be zero)
+    case (PageTableAddr band 16#FFF) =:= 0 of
+        true ->
+            iolist_to_binary([
+                %% mov rax, imm64 (48 B8 followed by 8-byte address)
+                <<16#48, 16#B8, PageTableAddr:64/little>>,
+                %% mov cr3, rax (0F 22 D8)
+                <<16#0F, 16#22, 16#D8>>,
+                %% ret
+                <<16#C3>>
+            ]);
+        false ->
+            {error, {misaligned_cr3, PageTableAddr}}
+    end.
 
 %% @doc Generate x86_64 machine code to enable/verify paging
 %% Note: In long mode (UEFI), paging is already enabled.

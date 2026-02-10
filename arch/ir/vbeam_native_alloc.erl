@@ -189,19 +189,31 @@ emit_alloc_reg(arm64, DstReg, SizeReg) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__alloc_reg_ok_", Uid/binary>>,
     OomLbl = <<"__alloc_reg_oom_", Uid/binary>>,
+    OverflowLbl = <<"__alloc_reg_ovfl_", Uid/binary>>,
     lists:flatten([
         %% Align SizeReg to 8: size = (size + 7) & ~7
         ?ARM64_ENC:encode_add_imm(x16, SizeReg, 7),
+        %% FINDING 2 FIX: Check for overflow after add (x16 < SizeReg means unsigned carry)
+        ?ARM64_ENC:encode_cmp_rr(x16, SizeReg),
+        ?ARM64_ENC:encode_b_cond(lt, 0),
+        {reloc, arm64_cond_branch19, OverflowLbl, -4},
         ?ARM64_ENC:encode_mov_imm64(x17, -8),         %% ~7 = 0xFFF...F8
         ?ARM64_ENC:encode_and_rrr(x16, x16, x17),     %% x16 = aligned size
         %% Calculate new heap pointer
         ?ARM64_ENC:encode_add_rrr(x17, HeapReg, x16), %% x17 = new_heap_ptr
+        %% FINDING 2 FIX: Check for wraparound (new_ptr < old_ptr)
+        ?ARM64_ENC:encode_cmp_rr(x17, HeapReg),
+        ?ARM64_ENC:encode_b_cond(lt, 0),
+        {reloc, arm64_cond_branch19, OverflowLbl, -4},
         %% Bounds check
         ?ARM64_ENC:encode_cmp_rr(x17, HeapEndReg),
         ?ARM64_ENC:encode_b_cond(le, 0),
         {reloc, arm64_cond_branch19, OkLbl, -4},
         %% OOM path
         {label, OomLbl},
+        ?ARM64_ENC:encode_brk(16#DEAD),
+        %% Overflow path
+        {label, OverflowLbl},
         ?ARM64_ENC:encode_brk(16#DEAD),
         %% Success path
         {label, OkLbl},
@@ -216,21 +228,34 @@ emit_alloc_reg(x86_64, DstReg, SizeReg) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__alloc_reg_x64_ok_", Uid/binary>>,
     OomLbl = <<"__alloc_reg_x64_oom_", Uid/binary>>,
+    OverflowLbl = <<"__alloc_reg_x64_ovfl_", Uid/binary>>,
     lists:flatten([
-        %% Align: tmp = (size + 7) & ~7
+        %% Save original SizeReg to check for overflow after alignment
         ?X86_ENC:encode_mov_rr(TmpReg, SizeReg),
+        %% Align: tmp = (size + 7) & ~7
         ?X86_ENC:encode_add_imm(TmpReg, 7),
+        %% FINDING 2 FIX: Check for overflow after add (tmp < SizeReg means carry)
+        ?X86_ENC:encode_cmp_rr(TmpReg, SizeReg),
+        ?X86_ENC:encode_jl(0),
+        {reloc, rel32, OverflowLbl, -4},
         encode_and_imm64(TmpReg, -8),
         %% Save current heap pointer in DstReg
         ?X86_ENC:encode_mov_rr(DstReg, HeapReg),
         %% Advance heap pointer
         ?X86_ENC:encode_add_rr(HeapReg, TmpReg),
+        %% FINDING 2 FIX: Check for wraparound (HeapReg < DstReg means overflow)
+        ?X86_ENC:encode_cmp_rr(HeapReg, DstReg),
+        ?X86_ENC:encode_jl(0),
+        {reloc, rel32, OverflowLbl, -4},
         %% Bounds check
         ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
         ?X86_ENC:encode_jle(0),
         {reloc, rel32, OkLbl, -4},
         %% OOM path
         {label, OomLbl},
+        ?X86_ENC:encode_int3(),
+        %% Overflow path
+        {label, OverflowLbl},
         ?X86_ENC:encode_int3(),
         %% Success path
         {label, OkLbl}

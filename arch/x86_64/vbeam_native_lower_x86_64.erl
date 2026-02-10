@@ -576,12 +576,9 @@ lower_instruction({string_concat, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _
         ?ENC:encode_mov_rr(r9, rdx),
         ?ENC:encode_add_rr(r9, r8),
 
-        %% Allocate data buffer: r10 = bump alloc(total_len)
-        ?ENC:encode_mov_rr(r10, HeapReg),
-        ?ENC:encode_mov_rr(r11, r9),
-        ?ENC:encode_add_imm(r11, 7),
-        encode_and_imm_x86(r11, -8),
-        ?ENC:encode_add_rr(HeapReg, r11),
+        %% FINDING 1 FIX: Use emit_alloc_reg instead of raw bump
+        %% Allocate data buffer: r10 = alloc(total_len) with bounds check
+        vbeam_native_alloc:emit_alloc_reg(x86_64, r10, r9),
 
         %% Copy A bytes: memcpy(r10, rsi, rdx)
         ?ENC:encode_mov_imm64(r11, 0),
@@ -812,16 +809,12 @@ lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, El
         ?ENC:encode_add_rr(rdi, rdi),             %% cap *= 2
         {label, DblLbl},
 
-        %% Allocate new buffer
+        %% FINDING 1 FIX: Use emit_alloc_reg instead of raw bump
+        %% Allocate new buffer with bounds check
         ?ENC:encode_mov_imm64(r8, ElemSize),
         ?ENC:encode_mov_rr(r9, rdi),
         ?ENC:encode_imul_rr(r9, r8),              %% new_buf_size = cap * elem_size
-        %% Bump allocate
-        ?ENC:encode_mov_rr(r10, HeapReg),          %% new_buf
-        ?ENC:encode_mov_rr(r11, r9),
-        ?ENC:encode_add_imm(r11, 7),
-        encode_and_imm_x86(r11, -8),
-        ?ENC:encode_add_rr(HeapReg, r11),
+        vbeam_native_alloc:emit_alloc_reg(x86_64, r10, r9),
 
         %% Copy old data (BUG #2 FIX: byte-by-byte for arbitrary element sizes)
         ?ENC:encode_mov_rr(r11, rdx),
@@ -1234,12 +1227,9 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         ?ENC:encode_mov_imm64(rax, 48),
         ?ENC:encode_sub_rr(rax, r12),   %% rax = len
 
-        %% Allocate heap buffer: r13 = heap ptr, bump by aligned len
-        ?ENC:encode_mov_rr(r13, r15),   %% r13 = data buf start (r15=heap)
-        ?ENC:encode_mov_rr(rcx, rax),
-        ?ENC:encode_add_imm(rcx, 7),
-        encode_and_imm_x86(rcx, -8),
-        ?ENC:encode_add_rr(r15, rcx),   %% bump heap
+        %% FINDING 1 FIX: Use emit_alloc_reg instead of raw bump
+        %% Allocate heap buffer with bounds check
+        vbeam_native_alloc:emit_alloc_reg(x86_64, r13, rax),
 
         %% Copy digits from [rsp+r12..rsp+47] to [r13..r13+len-1]
         ?ENC:encode_xor_rr(rcx, rcx),   %% index = 0
@@ -1261,9 +1251,9 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         {reloc, rel32, CopyLbl, -4},
         {label, CopyDoneLbl},
 
-        %% Allocate fat pointer on heap (16 bytes)
-        ?ENC:encode_mov_rr(rdi, r15),   %% rdi = fat ptr location
-        ?ENC:encode_add_imm(r15, 16),   %% bump heap
+        %% FINDING 1 FIX: Use emit_alloc instead of raw bump
+        %% Allocate fat pointer on heap (16 bytes) with bounds check
+        vbeam_native_alloc:emit_alloc(x86_64, rdi, 16),
         %% Store {ptr, len}
         ?ENC:encode_mov_mem_store(rdi, 0, r13),   %% fat.ptr = data
         ?ENC:encode_mov_mem_store(rdi, 8, rax),    %% fat.len = length
@@ -1479,8 +1469,9 @@ build_arg_moves_x86([{imm, Val} | Rest], [ArgReg | ArgRegs]) ->
     [{ArgReg, {imm, Val}} | build_arg_moves_x86(Rest, ArgRegs)];
 build_arg_moves_x86([{stack, Slot} | Rest], [ArgReg | ArgRegs]) ->
     [{ArgReg, {stack, Slot}} | build_arg_moves_x86(Rest, ArgRegs)];
-build_arg_moves_x86([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
-    [{ArgReg, {imm, 0}} | build_arg_moves_x86(Rest, ArgRegs)];
+%% FINDING 4 FIX: Error on unresolved vreg instead of silent {imm,0} fallback
+build_arg_moves_x86([{vreg, N} | _Rest], [_ArgReg | _ArgRegs]) ->
+    error({unresolved_vreg_in_arg, N, "Register allocator failed to assign this vreg"});
 build_arg_moves_x86(_, []) -> [].
 
 break_cycles_and_emit_x86(Moves, UsedCalleeSaved) ->

@@ -44,17 +44,24 @@ parse_file(Filename) ->
 
 %% Parse BEAM binary format
 parse_binary(<<"FOR1", Size:32, "BEAM", Rest/binary>>) ->
-    ExpectedSize = Size - 4,  % Size includes "BEAM" tag (4 bytes)
-    case byte_size(Rest) of
-        ExpectedSize ->
-            case parse_chunks(Rest, #{}) of
-                {ok, Chunks} ->
-                    build_result(Chunks);
-                Error ->
-                    Error
-            end;
-        _ ->
-            {error, size_mismatch}
+    %% FINDING 10 FIX: Add same 100MB cap as parse_file
+    MaxSize = 100_000_000,
+    case Size > MaxSize of
+        true ->
+            {error, {binary_too_large, Size, max, MaxSize}};
+        false ->
+            ExpectedSize = Size - 4,  % Size includes "BEAM" tag (4 bytes)
+            case byte_size(Rest) of
+                ExpectedSize ->
+                    case parse_chunks(Rest, #{}) of
+                        {ok, Chunks} ->
+                            build_result(Chunks);
+                        Error ->
+                            Error
+                    end;
+                _ ->
+                    {error, size_mismatch}
+            end
     end;
 parse_binary(_) ->
     {error, invalid_beam_format}.
