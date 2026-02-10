@@ -43,7 +43,7 @@ emit_prologue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_mov_rr(x29, sp)] ++
     save_callee_saved(UsedCallee, 16);
 emit_prologue(FrameSize, UsedCallee) ->
-    %% Large frame: stp x29,x30,[sp,#-16]! then sub sp,sp,#(FrameSize-16)
+    %% Large frame: stp x29,x30,[sp,#-16]! then mov x29,sp then sub sp,sp,#(FrameSize-16)
     %% CRITICAL: Set x29 to point to FP/LR save slot, not bottom of frame
     %% If (FrameSize-16) > 4095, materialize in x16 and use register form
     FrameDelta = FrameSize - 16,
@@ -54,9 +54,9 @@ emit_prologue(FrameSize, UsedCallee) ->
             [?ENC:encode_mov_imm64(x16, FrameDelta),
              ?ENC:encode_sub_rrr(sp, sp, x16)]
     end,
-    [?ENC:encode_stp_pre(x29, x30, sp, -16)] ++
+    [?ENC:encode_stp_pre(x29, x30, sp, -16),
+     ?ENC:encode_mov_rr(x29, sp)] ++
     SubInstr ++
-    [?ENC:encode_add_imm(x29, sp, FrameDelta)] ++
     save_callee_saved(UsedCallee, 16).
 
 %% Epilogue: restore callee-saved; mov sp, x29; ldp x29, x30, [sp], #FrameSize; ret
@@ -67,20 +67,11 @@ emit_epilogue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_ldp_post(x29, x30, sp, FrameSize),
      ?ENC:encode_ret()];
 emit_epilogue(FrameSize, UsedCallee) ->
-    %% Large frame: add sp,sp,#(FrameSize-16) then ldp x29,x30,[sp],#16
-    %% If (FrameSize-16) > 4095, materialize in x16 and use register form
-    FrameDelta = FrameSize - 16,
-    AddInstr = case FrameDelta =< 4095 of
-        true ->
-            [?ENC:encode_add_imm(sp, sp, FrameDelta)];
-        false ->
-            [?ENC:encode_mov_imm64(x16, FrameDelta),
-             ?ENC:encode_add_rrr(sp, sp, x16)]
-    end,
+    %% Large frame: restore callee-saved, mov sp,x29, then ldp x29,x30,[sp],#16
+    %% The mov sp,x29 restores sp to where FP/LR were saved (top of frame)
     restore_callee_saved(UsedCallee, 16) ++
-    [?ENC:encode_mov_rr(sp, x29)] ++
-    AddInstr ++
-    [?ENC:encode_ldp_post(x29, x30, sp, 16),
+    [?ENC:encode_mov_rr(sp, x29),
+     ?ENC:encode_ldp_post(x29, x30, sp, 16),
      ?ENC:encode_ret()].
 
 %% Save callee-saved registers to stack frame.
@@ -1440,7 +1431,9 @@ break_cycles_and_emit_arm64(Moves, NumCalleeSaved) ->
 %% Find all register cycles in the move graph
 find_all_cycles(AdjMap) ->
     Nodes = maps:keys(AdjMap),
-    find_cycles_from_nodes(Nodes, AdjMap, []).
+    RawCycles = find_cycles_from_nodes(Nodes, AdjMap, []),
+    %% Canonicalize and deduplicate cycles (a swap [x0,x1] is same as [x1,x0])
+    deduplicate_cycles(RawCycles).
 
 find_cycles_from_nodes([], _AdjMap, Acc) -> Acc;
 find_cycles_from_nodes([Node | Rest], AdjMap, Acc) ->
@@ -1468,6 +1461,17 @@ extract_cycle(Node, [Node | _Rest], Acc) ->
     [Node | Acc];
 extract_cycle(Node, [H | Rest], Acc) ->
     extract_cycle(Node, Rest, [H | Acc]).
+
+%% Canonicalize a cycle by rotating to start with minimum element
+canonicalize_cycle(Cycle) ->
+    MinElem = lists:min(Cycle),
+    {Before, After} = lists:splitwith(fun(X) -> X =/= MinElem end, Cycle),
+    After ++ Before.
+
+%% Remove duplicate cycles (e.g., [x0,x1] and [x1,x0] are same cycle)
+deduplicate_cycles(Cycles) ->
+    Canonical = [canonicalize_cycle(C) || C <- Cycles],
+    lists:usort(Canonical).
 
 %% Break each cycle by saving first element to x16, emitting moves, then restoring
 break_each_cycle(Moves, Cycles, NumCalleeSaved) ->

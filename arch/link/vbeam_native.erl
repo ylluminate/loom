@@ -237,7 +237,10 @@ text_base(pe) -> 16#400000.
 data_base(elf64, _CodeSize) ->
     16#600000;
 data_base(macho, CodeSize) ->
-    align_up(16#100000000 + CodeSize, 16#4000);
+    %% Mach-O: x86_64 uses 4KB pages, arm64 uses 16KB pages
+    %% For now, assume x86_64 (4KB). TODO: get arch from IR or option.
+    PageSize = 16#1000,  %% 4KB for x86_64
+    align_up(16#100000000 + CodeSize, PageSize);
 data_base(pe, CodeSize) ->
     align_up(16#400000 + CodeSize, 16#1000).
 
