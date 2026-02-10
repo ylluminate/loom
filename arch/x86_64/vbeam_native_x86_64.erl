@@ -860,16 +860,13 @@ encode_xchg_rr(Dst, Src) ->
 %% @doc MOV r64, SegReg  (read segment register)
 %%      Encoding: 8C /r
 %%      SegReg in ModR/M reg field, GPR in r/m field.
+%%      CRITICAL FIX (Round 28, Finding 6): Always emit REX.W for 64-bit form
 -spec encode_mov_from_seg(reg64(), segment_reg()) -> binary().
 encode_mov_from_seg(Dst, SegReg) ->
     ModRM = modrm(2#11, seg_code(SegReg), reg_lo(Dst)),
-    case needs_rex(Dst) of
-        true ->
-            Rex = rex(0, 0, 0, reg_hi(Dst)),
-            <<Rex:8, 16#8C:8, ModRM:8>>;
-        false ->
-            <<16#8C:8, ModRM:8>>
-    end.
+    %% Always emit REX.W (0x48 + B bit) for 64-bit operand size
+    Rex = rex(1, 0, 0, reg_hi(Dst)),
+    <<Rex:8, 16#8C:8, ModRM:8>>.
 
 %% @doc SWAPGS  (swap GS base register with KernelGSBase MSR)
 %%      Encoding: 0F 01 F8

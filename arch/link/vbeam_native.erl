@@ -230,20 +230,20 @@ inject_alloc_init(CodeParts, Target, Format) ->
     inject_into_entry(CodeParts, InitCode).
 
 inject_into_entry([], _InitCode) -> [];
-inject_into_entry([{<<"main">>, Parts} | Rest], InitCode) ->
-    %% Main exists - inject into it
-    [{<<"main">>, InitCode ++ Parts} | Rest];
-inject_into_entry([First | Rest], InitCode) ->
-    %% No main found - inject into the first function (which becomes entry)
-    case Rest of
-        [] ->
-            %% Only one function - inject here
-            {Name, Parts} = First,
-            [{Name, InitCode ++ Parts}];
-        _ ->
-            %% Multiple functions, no main - inject into first
-            {Name, Parts} = First,
-            [{Name, InitCode ++ Parts} | Rest]
+inject_into_entry(CodeParts, InitCode) ->
+    %% CRITICAL FIX (Round 28, Finding 5): Search for main regardless of position
+    case lists:keyfind(<<"main">>, 1, CodeParts) of
+        {<<"main">>, Parts} ->
+            %% Found main - inject into it
+            lists:keyreplace(<<"main">>, 1, CodeParts, {<<"main">>, InitCode ++ Parts});
+        false ->
+            %% No main found - inject into first function
+            case CodeParts of
+                [{Name, Parts} | Rest] ->
+                    [{Name, InitCode ++ Parts} | Rest];
+                [] ->
+                    []
+            end
     end.
 
 %% Get the lowering module for a target architecture.
