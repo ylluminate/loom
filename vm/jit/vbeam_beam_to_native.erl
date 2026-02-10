@@ -281,6 +281,8 @@ normalize_instruction({call_ext, [{integer, Arity}, ExtFunc]}) ->
     {call_ext, Arity, ExtFunc};
 normalize_instruction({call_ext_last, [{integer, Arity}, ExtFunc, {integer, Dealloc}]}) ->
     {call_ext_last, Arity, ExtFunc, Dealloc};
+normalize_instruction({call_ext_only, [{integer, Arity}, ExtFunc]}) ->
+    {call_ext_only, Arity, ExtFunc};
 normalize_instruction({return, []}) ->
     return;
 normalize_instruction({test_heap, [{integer, Need}, {integer, Live}]}) ->
@@ -355,6 +357,12 @@ translate_opcode_normalized({call_ext_last, _Arity, {extfunc, Mod, Fun, _A}, Dea
     Code3 = <<16#C3>>,  % ret
     <<Acc/binary, Code1/binary, Code2/binary, Code3/binary>>;
 
+translate_opcode_normalized({call_ext_only, _Arity, {extfunc, Mod, Fun, _A}}, Acc) ->
+    %% Tail call without deallocation (used when no stack frame)
+    Code1 = translate_external_call(Mod, Fun),
+    Code2 = <<16#C3>>,  % ret
+    <<Acc/binary, Code1/binary, Code2/binary>>;
+
 translate_opcode_normalized(return, Acc) ->
     %% Return from function
     Code = <<16#C3>>,  % ret
@@ -427,9 +435,15 @@ translate_move({integer, Val}, {x, 0}) ->
             <<16#48, 16#B8, Val:64/little-signed>>  % movabs rax, imm64
     end;
 
-translate_move({atom, _Atom}, {x, 0}) ->
+translate_move({atom, _Atom}, {x, N}) when N >= 0, N =< 3 ->
     %% For atoms, we'd need an atom table - for now, load 0
-    <<16#48, 16#31, 16#C0>>;  % xor rax, rax
+    %% x0=RAX, x1=RBX, x2=RCX, x3=RDX
+    case N of
+        0 -> <<16#48, 16#31, 16#C0>>;  % xor rax, rax
+        1 -> <<16#48, 16#31, 16#DB>>;  % xor rbx, rbx
+        2 -> <<16#48, 16#31, 16#C9>>;  % xor rcx, rcx
+        3 -> <<16#48, 16#31, 16#D2>>   % xor rdx, rdx
+    end;
 
 %% SECURITY FIX (Finding #4): Return error instead of silently emitting NOP
 translate_move(Src, Dst) ->

@@ -62,6 +62,7 @@
 -define(SHDR_SIZE, 64).
 -define(SYM_SIZE, 24).
 -define(RELA_SIZE, 24).
+-define(REL_SIZE, 16).
 
 %% Security limits
 -define(MAX_SECTION_SIZE, 256 * 1024 * 1024).  % 256MB per section
@@ -568,11 +569,13 @@ parse_relocations(_Binary, Sections, _StrTab) ->
     %% BUG 9 FIX: Convert to tuple for O(1) access
     SectionsTuple = list_to_tuple(Sections),
 
-    %% Find all .rela.* sections
-    RelaSections = [S || S <- Sections, is_rela_section(maps:get(name, S, <<>>))],
+    %% FINDING 5 FIX: Select by section type (rela or rel), not by name prefix
+    RelaSections = [S || S <- Sections, maps:get(type, S, null) =:= rela],
+    %% FINDING 6 FIX: Add REL section support
+    RelSections = [S || S <- Sections, maps:get(type, S, null) =:= rel],
 
-    %% Parse each .rela section
-    RelocMap = lists:foldl(
+    %% Parse RELA sections
+    RelocMap1 = lists:foldl(
         fun(#{name := _Name, data := Data, entsize := EntSize, info := TargetIdx}, Acc) ->
             %% BUG 1 FIX: Validate EntSize before using as divisor
             case EntSize of
@@ -608,7 +611,42 @@ parse_relocations(_Binary, Sections, _StrTab) ->
         RelaSections
     ),
 
-    {ok, RelocMap}.
+    %% FINDING 6 FIX: Parse REL sections (no explicit addend)
+    RelocMap2 = lists:foldl(
+        fun(#{data := Data, entsize := EntSize, info := TargetIdx}, Acc) ->
+            %% Validate EntSize
+            case EntSize of
+                E when E > 0, E =:= ?REL_SIZE -> ok;
+                _ -> error({invalid_rel_entsize, EntSize, expected, ?REL_SIZE})
+            end,
+
+            %% Validate TargetIdx
+            TupleSize = tuple_size(SectionsTuple),
+            case TargetIdx of
+                Idx when Idx >= 0, Idx < TupleSize -> ok;
+                _ -> error({invalid_sh_info, TargetIdx, max, TupleSize - 1})
+            end,
+
+            NumRels = byte_size(Data) div EntSize,
+            case NumRels of
+                N when N > 500000 ->
+                    error({too_many_relocations, N, max, 500000});
+                _ ->
+                    ok
+            end,
+            Relocs = [
+                parse_rel(Data, I * ?REL_SIZE)
+                || I <- lists:seq(0, NumRels - 1)
+            ],
+
+            ExistingRelocs = maps:get(TargetIdx, Acc, []),
+            Acc#{TargetIdx => ExistingRelocs ++ Relocs}
+        end,
+        RelocMap1,
+        RelSections
+    ),
+
+    {ok, RelocMap2}.
 
 parse_rela(Data, Offset) ->
     <<_:Offset/binary,
@@ -625,8 +663,21 @@ parse_rela(Data, Offset) ->
         addend => Addend
     }.
 
-is_rela_section(<<".rela.", _/binary>>) -> true;
-is_rela_section(_) -> false.
+%% FINDING 6 FIX: Parse REL entries (addend implicit, derived from target)
+parse_rel(Data, Offset) ->
+    <<_:Offset/binary,
+      RelOffset:64/little, Info:64/little,
+      _/binary>> = Data,
+
+    Sym = Info bsr 32,
+    Type = rela_type(Info band 16#FFFFFFFF),
+
+    #{
+        offset => RelOffset,
+        type => Type,
+        symbol => Sym,
+        addend => 0  % REL format: addend derived from target (simplified as 0)
+    }.
 
 %% ============================================================================
 %% Symbol Resolution
@@ -791,6 +842,11 @@ calculate_symbol_address(#{shndx := ?SHN_UNDEF, name := Name}, _AllSections, _Se
 calculate_symbol_address(#{shndx := ?SHN_ABS, value := Value}, _AllSections, _SectionAddrs) ->
     %% Absolute symbol
     Value;
+calculate_symbol_address(#{shndx := ?SHN_COMMON, name := _Name}, _AllSections, _SectionAddrs) ->
+    %% FINDING 7 FIX: SHN_COMMON symbols (uninitialized globals)
+    %% Treat as BSS-like, resolve to 0 (or skip relocation)
+    %% In a full implementation, these would be allocated in a common pool
+    0;
 calculate_symbol_address(#{shndx := Shndx, value := Value}, _AllSections, SectionAddrs) when Shndx > 0 ->
     %% Section-relative symbol - look up the section address by Shndx (which IS the section_index)
     case maps:find(Shndx, SectionAddrs) of

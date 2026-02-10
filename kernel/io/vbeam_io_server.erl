@@ -146,16 +146,36 @@ handle_call(_Request, _From, State) ->
 
 %% @private
 handle_cast({direct_write, Data}, State) ->
-    %% FINDING 8 FIX: Protect against invalid iodata causing unicode crash
-    String = try
-        unicode:characters_to_binary(Data)
+    %% FINDING 4 FIX: Size validation before conversion
+    MaxOutputSize = 64 * 1024,
+    try
+        %% Check size based on input type
+        Size = if
+            is_binary(Data) -> byte_size(Data);
+            is_list(Data) -> iolist_size(Data);
+            true -> 0  % Non-iodata, will be caught below
+        end,
+        case Size > MaxOutputSize of
+            true ->
+                %% Reject oversized input
+                {noreply, State};
+            false ->
+                %% FINDING 8 FIX: Protect against invalid iodata causing unicode crash
+                String = try
+                    unicode:characters_to_binary(Data)
+                catch
+                    _:_ ->
+                        %% Invalid iodata - fall back to safe representation
+                        iolist_to_binary(io_lib:format("[INVALID DATA: ~p]", [Data]))
+                end,
+                NewState = output_all(String, State),
+                {noreply, NewState}
+        end
     catch
-        _:_ ->
-            %% Invalid iodata - fall back to safe representation
-            iolist_to_binary(io_lib:format("[INVALID DATA: ~p]", [Data]))
-    end,
-    NewState = output_all(String, State),
-    {noreply, NewState};
+        error:badarg ->
+            %% iolist_size failed - not valid iodata
+            {noreply, State}
+    end;
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -191,9 +211,16 @@ code_change(_OldVsn, State, _Extra) ->
 %% put_chars with explicit encoding and data
 handle_io_request({put_chars, Encoding, Chars}, State) ->
     try
-        String = encode_chars(Encoding, Chars),
-        NewState = output_all(String, State),
-        {ok, ok, NewState}
+        %% FINDING 3 FIX: Check size before materialization
+        MaxOutputSize = 64 * 1024,
+        case iolist_size(Chars) of
+            Size when Size > MaxOutputSize ->
+                {error, {output_too_large, Size, max, MaxOutputSize}, State};
+            _Size ->
+                String = encode_chars(Encoding, Chars),
+                NewState = output_all(String, State),
+                {ok, ok, NewState}
+        end
     catch
         _:Reason ->
             {error, Reason, State}

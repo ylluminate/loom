@@ -325,6 +325,7 @@ is_call_instruction({call_indirect, _}) -> true;
 is_call_instruction({method_call, _, _, _, _}) -> true;
 is_call_instruction({print_str, _}) -> true;
 is_call_instruction({print_int, _}) -> true;
+is_call_instruction({print_float, _}) -> true;
 is_call_instruction({int_to_str, _, _}) -> true;
 %% CRITICAL FIX (Finding 4): float_to_str expands to int_to_str which clobbers caller-saved regs
 is_call_instruction({float_to_str, _, _}) -> true;
@@ -486,6 +487,7 @@ needs_scratch_exclusion([Inst | Rest]) ->
 
 is_scratch_instruction({print_int, _}) -> true;
 is_scratch_instruction({print_str, _}) -> true;
+is_scratch_instruction({print_float, _}) -> true;
 is_scratch_instruction({string_lit, _, _, _}) -> true;
 is_scratch_instruction({string_lit, _, _}) -> true;
 is_scratch_instruction({string_cmp, _, _, _}) -> true;
@@ -649,15 +651,15 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
         {print_float, Src} -> {[Src], []};
         {float_to_str, Dst, Src} -> {[Src], [Dst]};
         {int_to_str, Dst, Src} -> {[Src], [Dst]};
-        {str_concat, Dst, A, B} -> {[A, B], [Dst]};
+        {string_concat, Dst, A, B} -> {[A, B], [Dst]};
         {str_len, Dst, Src} -> {[Src], [Dst]};
         {array_new, Dst, _, _} -> {[], [Dst]};
         {array_get, Dst, Arr, Idx, _} -> {[Arr, Idx], [Dst]};
         {array_set, Arr, Idx, _, Val} -> {[Arr, Idx, Val], []};
         {array_len, Dst, Arr} -> {[Arr], [Dst]};
-        {map_new, Dst, _} -> {[], [Dst]};
+        {map_new, Dst} -> {[], [Dst]};
         {map_get, Dst, Map, Key} -> {[Map, Key], [Dst]};
-        {map_put, Map, Key, Val} -> {[Map, Key, Val], []};
+        {map_put, Dst, Map, Key, Val} -> {[Map, Key, Val], [Dst]};
         _ ->
             %% CRITICAL FIX (R32): For truly unknown opcodes, use conservative
             %% uses-only fallback. This is safe — it may generate unnecessary

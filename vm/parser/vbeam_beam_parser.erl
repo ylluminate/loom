@@ -214,7 +214,14 @@ parse_chunk_data(_Other, Data) ->
 
 %% Parse atom table
 parse_atoms(<<Count:32, Rest/binary>>) ->
-    parse_atom_list(Rest, Count, []).
+    %% FINDING 8 FIX: Cap atom count to prevent memory exhaustion
+    MaxAtoms = 100000,
+    case Count of
+        N when N > MaxAtoms ->
+            error({atom_count_too_large, N, max, MaxAtoms});
+        _ ->
+            parse_atom_list(Rest, Count, [])
+    end.
 
 parse_atom_list(Rest, 0, Acc) ->
     {lists:reverse(Acc), Rest};

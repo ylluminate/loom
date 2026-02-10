@@ -713,7 +713,13 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
     lists:flatten([
         %% Bounds check: load array length from Arr+8
         ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
-        ?ENC:encode_cmp_imm(x17, Idx),                  %% compare length with index
+        %% CRITICAL FIX (Finding 5): encode_cmp_imm requires Idx < 4096
+        if Idx >= 0, Idx < 4096 ->
+            ?ENC:encode_cmp_imm(x17, Idx);
+           true ->
+            [?ENC:encode_mov_imm64(x16, Idx),
+             ?ENC:encode_cmp_rr(x17, x16)]
+        end,
         ?ENC:encode_b_cond(gtu, 0),                     %% branch if unsigned-greater-than (len > idx)
         {reloc, arm64_cond_branch19, OkLbl, -4},
         %% Out of bounds: exit with code 2 (format-aware syscall)
@@ -752,7 +758,13 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
     lists:flatten([
         %% Bounds check: load array length from Arr+8
         ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
-        ?ENC:encode_cmp_imm(x17, Idx),                  %% compare length with index
+        %% CRITICAL FIX (Finding 5): encode_cmp_imm requires Idx < 4096
+        if Idx >= 0, Idx < 4096 ->
+            ?ENC:encode_cmp_imm(x17, Idx);
+           true ->
+            [?ENC:encode_mov_imm64(x16, Idx),
+             ?ENC:encode_cmp_rr(x17, x16)]
+        end,
         ?ENC:encode_b_cond(gtu, 0),                     %% branch if unsigned-greater-than (len > idx)
         {reloc, arm64_cond_branch19, OkLbl, -4},
         %% Out of bounds: exit with code 2 (format-aware syscall)

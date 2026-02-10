@@ -1167,13 +1167,13 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         ?ENC:encode_push(rbx),
         ?ENC:encode_push(r12),
         ?ENC:encode_push(r13),
-        ?ENC:encode_push(r14),
+        ?ENC:encode_push(r9),
         %% Allocate 48 bytes on stack for digit buffer
         ?ENC:encode_sub_imm(rsp, 48),
 
-        %% rbx = input value, r14 = sign flag (0=positive, 1=negative)
+        %% rbx = input value, r9 = sign flag (0=positive, 1=negative)
         ?ENC:encode_mov_rr(rbx, Src),
-        ?ENC:encode_xor_rr(r14, r14),     %% r14 = 0 (positive)
+        ?ENC:encode_xor_rr(r9, r9),     %% r9 = 0 (positive)
         %% FIXED BUG #8: Initialize r12 = 48 (buffer size), decrement BEFORE write.
         %% This fixes off-by-one in length calculation (was 48-r12, now 48-r12 with correct r12).
         ?ENC:encode_mov_imm64(r12, 48),
@@ -1199,17 +1199,17 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         %% Negate and record sign
         %% CRITICAL FIX: INT64_MIN (-9223372036854775808) cannot be negated.
         %% Add 1 before negating, then fix the last digit after conversion.
-        %% r9 = flag: 0 = normal, 1 = was INT64_MIN (NOT r15, which is heap pointer!)
-        ?ENC:encode_mov_imm64(r9, 0),
+        %% r10 = flag: 0 = normal, 1 = was INT64_MIN (NOT r15, which is heap pointer!)
+        ?ENC:encode_mov_imm64(r10, 0),
         ?ENC:encode_mov_imm64(rax, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(rbx, rax),
         ?ENC:encode_jcc_rel32(ne, 0),
         {reloc, rel32, <<"__its_not_min_", Uid/binary>>, -4},
         ?ENC:encode_add_imm(rbx, 1),      %% rbx = INT64_MIN + 1
-        ?ENC:encode_mov_imm64(r9, 1),    %% flag: was INT64_MIN
+        ?ENC:encode_mov_imm64(r10, 1),    %% flag: was INT64_MIN
         {label, <<"__its_not_min_", Uid/binary>>},
         ?ENC:encode_neg(rbx),
-        ?ENC:encode_mov_imm64(r14, 1),    %% r14 = 1 (was negative)
+        ?ENC:encode_mov_imm64(r9, 1),    %% r9 = 1 (was negative)
 
         {label, PositiveLbl},
         {label, DivLoopLbl},
@@ -1231,8 +1231,8 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         ?ENC:encode_jcc_rel32(ne, 0),
         {reloc, rel32, DivLoopLbl, -4},
 
-        %% If r9=1, we converted INT64_MIN+1, so increment the last digit ('7'→'8')
-        ?ENC:encode_cmp_imm(r9, 0),
+        %% If r10=1, we converted INT64_MIN+1, so increment the last digit ('7'→'8')
+        ?ENC:encode_cmp_imm(r10, 0),
         ?ENC:encode_jcc_rel32(eq, 0),
         {reloc, rel32, <<"__its_no_fixup_", Uid/binary>>, -4},
         %% Last digit is at [rsp + r12], increment it
@@ -1243,8 +1243,8 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         encode_mov_byte_reg_to_mem(rsi, rdx),  %% Store back
         {label, <<"__its_no_fixup_", Uid/binary>>},
 
-        %% If original was negative (r14=1), prepend '-'
-        ?ENC:encode_cmp_imm(r14, 0),
+        %% If original was negative (r9=1), prepend '-'
+        ?ENC:encode_cmp_imm(r9, 0),
         ?ENC:encode_jcc_rel32(eq, 0),
         {reloc, rel32, DoneLbl, -4},
         ?ENC:encode_sub_imm(r12, 1),
@@ -1291,7 +1291,7 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
 
         %% Clean up stack and restore (reverse order of pushes)
         ?ENC:encode_add_imm(rsp, 48),
-        ?ENC:encode_pop(r14),
+        ?ENC:encode_pop(r9),
         ?ENC:encode_pop(r13),
         ?ENC:encode_pop(r12),
         ?ENC:encode_pop(rbx),
@@ -1461,18 +1461,11 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_pop(rbx)
     ]);
 
-%% CRITICAL FIX (Finding 4): print_float clause was missing, causing UD2 trap.
-%% Convert float to string first, then print the string.
-lower_instruction({print_float, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
-    lists:flatten([
-        %% Convert float (in Reg) to string via float_to_str IR opcode
-        %% (which the lowerer will expand to its full implementation)
-        %% Then print that string via print_str.
-        %% We need a temporary vreg for the string result, but we're in post-regalloc
-        %% lowering so all operands must be pregs. Use rax as scratch.
-        [{float_to_str, {preg, rax}, {preg, Reg}}],
-        lower_instruction({print_str, {preg, rax}}, _FnName, _UsedCalleeSaved)
-    ]);
+%% CRITICAL FIX (Finding 2): print_float not yet implemented.
+%% Emit clear error rather than crashing assembly with raw IR tuples.
+lower_instruction({print_float, {preg, _Reg}}, _FnName, _UsedCalleeSaved) ->
+    error({print_float_not_yet_implemented,
+           "print_float requires float_to_str lowering which is not yet complete"});
 
 %% Catch-all for unhandled instructions
 lower_instruction(Inst, _FnName, _UsedCalleeSaved) ->
