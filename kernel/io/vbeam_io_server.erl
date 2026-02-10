@@ -194,29 +194,35 @@ handle_io_request({put_chars, Encoding, Chars}, State) ->
 %% put_chars with encoding and MFA
 handle_io_request({put_chars, Encoding, Mod, Fun, Args}, State) ->
     %% BUG 6 FIX: Validate arity and module whitelist, enforce size limit
-    Arity = length(Args),
-    case is_safe_mfa(Mod, Fun, Arity) of
-        true when Arity >= 0, Arity =< 3 ->
-            try
-                Chars = apply(Mod, Fun, Args),
-                String = encode_chars(Encoding, Chars),
-                %% BUG 6 FIX: Truncate output to 64KB max
-                MaxOutputSize = 64 * 1024,
-                TruncatedString = case byte_size(String) of
-                    Size when Size > MaxOutputSize ->
-                        <<Prefix:MaxOutputSize/binary, _/binary>> = String,
-                        Prefix;
-                    _ ->
-                        String
-                end,
-                NewState = output_all(TruncatedString, State),
-                {ok, ok, NewState}
-            catch
-                _:Reason ->
-                    {error, Reason, State}
-            end;
-        _ ->
-            {error, {unauthorized_mfa, Mod, Fun}, State}
+    %% HIGH FIX: Check is_list(Args) before calling length to prevent crash
+    case is_list(Args) of
+        false ->
+            {error, {invalid_args, Args}, State};
+        true ->
+            Arity = length(Args),
+            case is_safe_mfa(Mod, Fun, Arity) of
+                true when Arity >= 0, Arity =< 3 ->
+                    try
+                        Chars = apply(Mod, Fun, Args),
+                        String = encode_chars(Encoding, Chars),
+                        %% BUG 6 FIX: Truncate output to 64KB max
+                        MaxOutputSize = 64 * 1024,
+                        TruncatedString = case byte_size(String) of
+                            Size when Size > MaxOutputSize ->
+                                <<Prefix:MaxOutputSize/binary, _/binary>> = String,
+                                Prefix;
+                            _ ->
+                                String
+                        end,
+                        NewState = output_all(TruncatedString, State),
+                        {ok, ok, NewState}
+                    catch
+                        _:Reason ->
+                            {error, Reason, State}
+                    end;
+                _ ->
+                    {error, {unauthorized_mfa, Mod, Fun}, State}
+            end
     end;
 
 %% Legacy put_chars (assume latin1)

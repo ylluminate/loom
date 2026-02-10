@@ -341,7 +341,7 @@ queue_work(Queue, Work) ->
 
 %% @doc Modify timer expiration
 %% Real implementation: erlang:send_after
-%% NOTE: Caller must remove timer ref when handling {timer_expired, Timer} message
+%% NOTE: Caller must remove timer ref when handling {timer_expired, Timer, Gen} message
 %% by calling remove_timer_ref(Timer) to prevent ref leak
 mod_timer(Timer, ExpiresJiffies) ->
     log_kapi_call(mod_timer, [Timer, ExpiresJiffies]),
@@ -354,14 +354,21 @@ mod_timer(Timer, ExpiresJiffies) ->
                 undefined -> ok;
                 OldTRef ->
                     erlang:cancel_timer(OldTRef),
+                    %% LOW FIX: Flush any stale messages from cancelled timer
+                    receive
+                        {timer_expired, Timer, _OldGen} -> ok
+                    after 0 -> ok
+                    end,
                     remove_timer_ref(Timer)
             end,
             %% Jiffies conversion: 1 jiffy = 1ms on most systems
             TimeoutMs = ExpiresJiffies,
             Self = self(),
-            TRef = erlang:send_after(TimeoutMs, Self, {timer_expired, Timer}),
+            %% LOW FIX: Add generation counter to timer messages
+            Gen = erlang:unique_integer([monotonic, positive]),
+            TRef = erlang:send_after(TimeoutMs, Self, {timer_expired, Timer, Gen}),
             %% BUG 2 FIX: Check if store_timer_ref succeeded
-            case store_timer_ref(Timer, TRef) of
+            case store_timer_ref(Timer, {TRef, Gen}) of
                 ok ->
                     0; %% Success
                 {error, timer_table_full} ->
@@ -380,8 +387,13 @@ del_timer(Timer) ->
     case get_timer_ref(Timer) of
         undefined ->
             0; %% Was not active
-        TRef ->
+        {TRef, _Gen} ->
             erlang:cancel_timer(TRef),
+            %% LOW FIX: Flush any stale messages from cancelled timer
+            receive
+                {timer_expired, Timer, _OldGen} -> ok
+            after 0 -> ok
+            end,
             remove_timer_ref(Timer),
             1 %% Was active, now cancelled
     end.
@@ -518,7 +530,7 @@ get_timer_ref(Timer) ->
     init_timer_storage(),
     %% BUG 11 FIX: Lookup by {self(), Timer}
     case ets:lookup(?TIMER_TABLE, {self(), Timer}) of
-        [{{_Pid, Timer}, TRef}] -> TRef;
+        [{{_Pid, Timer}, TRefAndGen}] -> TRefAndGen;
         [] -> undefined
     end.
 

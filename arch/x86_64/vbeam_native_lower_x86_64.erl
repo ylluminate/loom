@@ -643,7 +643,20 @@ lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _Fn
 %% ARRAY_GET (register index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_get_ok_", Uid/binary>>,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_mov_mem_load(r11, Arr, 8),               %% r11 = array.len
+        ?ENC:encode_cmp_rr(Idx, r11),                        %% compare index with length
+        ?ENC:encode_jcc_rel32(ltu, 0),                       %% jump if unsigned-less-than (idx < len)
+        {reloc, rel32, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(rdi, 2),
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_syscall(),
+        %% In bounds: proceed with access
+        {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),               %% rax = ptr
         ?ENC:encode_mov_imm64(rcx, ElemSize),
         ?ENC:encode_mov_rr(rdx, Idx),
@@ -655,8 +668,21 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
 %% ARRAY_GET (immediate index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_get_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_mov_mem_load(r11, Arr, 8),               %% r11 = array.len
+        ?ENC:encode_cmp_imm(r11, Idx),                       %% compare length with index
+        ?ENC:encode_jcc_rel32(gtu, 0),                       %% jump if length > index (unsigned)
+        {reloc, rel32, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(rdi, 2),
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_syscall(),
+        %% In bounds: proceed with access
+        {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
         ?ENC:encode_mov_mem_load(Dst, rax, Offset)
     ]);
@@ -664,8 +690,21 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 %% ARRAY_SET (immediate index)
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_set_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_mov_mem_load(r11, Arr, 8),               %% r11 = array.len
+        ?ENC:encode_cmp_imm(r11, Idx),                       %% compare length with index
+        ?ENC:encode_jcc_rel32(gtu, 0),                       %% jump if length > index (unsigned)
+        {reloc, rel32, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(rdi, 2),
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_syscall(),
+        %% In bounds: proceed with store
+        {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
         ?ENC:encode_mov_mem_store(rax, Offset, Val)
     ]);
@@ -673,7 +712,20 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 %% ARRAY_SET (register index)
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_set_ok_", Uid/binary>>,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_mov_mem_load(r11, Arr, 8),               %% r11 = array.len
+        ?ENC:encode_cmp_rr(Idx, r11),                        %% compare index with length
+        ?ENC:encode_jcc_rel32(ltu, 0),                       %% jump if unsigned-less-than (idx < len)
+        {reloc, rel32, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(rdi, 2),
+        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
+        ?ENC:encode_syscall(),
+        %% In bounds: proceed with store
+        {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
         ?ENC:encode_mov_imm64(rcx, ElemSize),
         ?ENC:encode_mov_rr(rdx, Idx),
@@ -1089,10 +1141,10 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         ?ENC:encode_mov_imm64(rax, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(rbx, rax),
         ?ENC:encode_jcc_rel32(ne, 0),
-        {reloc, rel32, <<"__its_not_min">>, -4},
+        {reloc, rel32, <<"__its_not_min_", Uid/binary>>, -4},
         ?ENC:encode_add_imm(rbx, 1),      %% rbx = INT64_MIN + 1
         ?ENC:encode_mov_imm64(r9, 1),    %% flag: was INT64_MIN
-        {label, <<"__its_not_min">>},
+        {label, <<"__its_not_min_", Uid/binary>>},
         ?ENC:encode_neg(rbx),
         ?ENC:encode_mov_imm64(r14, 1),    %% r14 = 1 (was negative)
 
@@ -1119,14 +1171,14 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         %% If r9=1, we converted INT64_MIN+1, so increment the last digit ('7'→'8')
         ?ENC:encode_cmp_imm(r9, 0),
         ?ENC:encode_jcc_rel32(eq, 0),
-        {reloc, rel32, <<"__its_no_fixup">>, -4},
+        {reloc, rel32, <<"__its_no_fixup_", Uid/binary>>, -4},
         %% Last digit is at [rsp + r12], increment it
         ?ENC:encode_mov_rr(rsi, rsp),
         ?ENC:encode_add_rr(rsi, r12),
         encode_movzx_byte_mem(rdx, rsi),  %% Load last digit
         ?ENC:encode_add_imm(rdx, 1),      %% '7' → '8'
         encode_mov_byte_reg_to_mem(rsi, rdx),  %% Store back
-        {label, <<"__its_no_fixup">>},
+        {label, <<"__its_no_fixup_", Uid/binary>>},
 
         %% If original was negative (r14=1), prepend '-'
         ?ENC:encode_cmp_imm(r14, 0),

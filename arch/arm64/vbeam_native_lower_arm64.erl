@@ -644,7 +644,20 @@ lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}},
 %% Element address = ptr + index * elem_size
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemSize}},
                   _FnName, _FS, _Fmt, _UC) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_get_ok_", Uid/binary>>,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
+        ?ENC:encode_cmp_rr(Idx, x17),                   %% compare index with length
+        ?ENC:encode_b_cond(ltu, 0),                     %% branch if unsigned-less-than (idx < len)
+        {reloc, arm64_cond_branch19, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(x0, 2),
+        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
+        ?ENC:encode_svc(0),
+        %% In bounds: proceed with access
+        {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr
         ?ENC:encode_mov_imm64(x17, ElemSize),
         ?ENC:encode_mul(x17, Idx, x17),                 %% x17 = idx * elem_size
@@ -655,8 +668,21 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
 %% ARRAY_GET with immediate index
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSize}},
                   _FnName, _FS, _Fmt, _UC) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_get_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
+        ?ENC:encode_cmp_imm(x17, Idx),                  %% compare length with index
+        ?ENC:encode_b_cond(gtu, 0),                     %% branch if unsigned-greater-than (len > idx)
+        {reloc, arm64_cond_branch19, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(x0, 2),
+        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
+        ?ENC:encode_svc(0),
+        %% In bounds: proceed with access
+        {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr
         if Offset >= 0, Offset < 32768, Offset rem 8 =:= 0 ->
             ?ENC:encode_ldr(Dst, x16, Offset);
@@ -670,8 +696,21 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 %% ARRAY_SET with immediate index.
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _FS, _Fmt, _UC) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_set_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
+        ?ENC:encode_cmp_imm(x17, Idx),                  %% compare length with index
+        ?ENC:encode_b_cond(gtu, 0),                     %% branch if unsigned-greater-than (len > idx)
+        {reloc, arm64_cond_branch19, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(x0, 2),
+        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
+        ?ENC:encode_svc(0),
+        %% In bounds: proceed with store
+        {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr
         if Offset >= 0, Offset < 32768, Offset rem 8 =:= 0 ->
             ?ENC:encode_str(Val, x16, Offset);
@@ -685,7 +724,20 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 %% ARRAY_SET with register index.
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _FS, _Fmt, _UC) ->
+    Uid = integer_to_binary(erlang:unique_integer([positive])),
+    OkLbl = <<"__array_set_ok_", Uid/binary>>,
     lists:flatten([
+        %% Bounds check: load array length from Arr+8
+        ?ENC:encode_ldr(x17, Arr, 8),                   %% x17 = arr.len
+        ?ENC:encode_cmp_rr(Idx, x17),                   %% compare index with length
+        ?ENC:encode_b_cond(ltu, 0),                     %% branch if unsigned-less-than (idx < len)
+        {reloc, arm64_cond_branch19, OkLbl, -4},
+        %% Out of bounds: exit with code 2
+        ?ENC:encode_mov_imm64(x0, 2),
+        ?ENC:encode_mov_imm64(x16, 1),                  %% macOS exit syscall
+        ?ENC:encode_svc(0),
+        %% In bounds: proceed with store
+        {label, OkLbl},
         ?ENC:encode_ldr(x16, Arr, 0),                   %% x16 = arr.ptr
         ?ENC:encode_mov_imm64(x17, ElemSize),
         ?ENC:encode_mul(x17, Idx, x17),                 %% x17 = idx * elem_size
@@ -1171,18 +1223,15 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         %% Nonzero
         {label, NonZeroLbl},
 
-        %% Check negative
+        %% Check negative and save sign in x14
         ?ENC:encode_cmp_imm(x19, 0),
+        %% FIXED: Initialize x14 before branching so positive path gets 0, negative gets 1
+        ?ENC:encode_mov_imm64(x14, 0),        %% x14 = 0 (assume positive)
         ?ENC:encode_b_cond(ge, 0),
         {reloc, arm64_cond_branch19, PositiveLbl, -4},
 
-        %% Save sign in x14 (before clobbering Src)
-        ?ENC:encode_cmp_imm(Src, 0),
-        ?ENC:encode_mov_imm64(x14, 0),        %% x14 = 0 (positive)
-        ?ENC:encode_b_cond(ge, 0),
-        {reloc, arm64_cond_branch19, <<"__its_signok_", Uid/binary>>, -4},
+        %% Negative path: set x14 = 1
         ?ENC:encode_mov_imm64(x14, 1),        %% x14 = 1 (negative)
-        {label, <<"__its_signok_", Uid/binary>>},
 
         %% Negate value (we'll add '-' at the end)
         %% CRITICAL FIX: INT64_MIN (-9223372036854775808) cannot be negated.

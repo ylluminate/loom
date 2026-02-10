@@ -457,8 +457,9 @@ resolve_section_name(#{name_offset := NameOff} = Hdr, ShStrTab, Binary) ->
     Data = extract_section_data(Binary, Hdr),
     Hdr#{name => Name, data => Data}.
 
-extract_section_data(_Binary, #{type := nobits}) ->
-    <<>>;
+extract_section_data(_Binary, #{type := nobits, size := Size}) ->
+    %% HIGH FIX: SHT_NOBITS sections (.bss) need allocated zeroed memory
+    <<0:(Size*8)>>;
 extract_section_data(Binary, #{offset := Offset, size := Size}) ->
     <<_:Offset/binary, Data:Size/binary, _/binary>> = Binary,
     Data.

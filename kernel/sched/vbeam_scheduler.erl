@@ -336,7 +336,8 @@ handle_call({spawn_process, Module, Function}, _From, State) ->
     end;
 
 handle_call({kill_process, Pid}, _From, State) ->
-    #state{processes = Processes, page_alloc = PageAlloc, heap_registry = HeapReg} = State,
+    #state{processes = Processes, page_alloc = PageAlloc, heap_registry = HeapReg,
+           current_pid = CurrentPid} = State,
 
     %% Protect idle process (PID 0) from being killed
     case Pid of
@@ -352,11 +353,18 @@ handle_call({kill_process, Pid}, _From, State) ->
             NewHeapReg = vbeam_heap:registry_remove(HeapReg, Pid),
             NewProcesses = maps:remove(Pid, Processes),
 
+            %% MEDIUM FIX: Clear current_pid if we're killing the running process
+            NewCurrentPid = case CurrentPid of
+                Pid -> undefined;
+                _ -> CurrentPid
+            end,
+
             %% Remove from all queues
             NewState = remove_from_queues(Pid, State#state{
                 processes = NewProcesses,
                 page_alloc = NewPageAlloc,
-                heap_registry = NewHeapReg
+                heap_registry = NewHeapReg,
+                current_pid = NewCurrentPid
             }),
 
             {reply, ok, NewState}

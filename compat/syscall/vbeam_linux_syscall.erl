@@ -229,15 +229,19 @@ sys_arch_prctl([Code, Addr]) ->
             %% SECURITY FIX: Validate Addr is page-aligned and within reasonable range
             case is_integer(Addr) andalso (Addr band 16#FFF) =:= 0 andalso Addr < 16#7FFFFFFFFFFF of
                 true ->
+                    %% MEDIUM FIX: Allow updates if key already exists
+                    KeyExists = case get({vbeam_user_mem, Addr}) of
+                        undefined -> false;
+                        _ -> true
+                    end,
                     %% SECURITY: Cap user_mem entries at 64 to prevent unbounded growth
                     CurrentCount = length([K || K <- get_keys(),
                                                is_tuple(K),
                                                tuple_size(K) =:= 2,
                                                element(1, K) =:= vbeam_user_mem]),
-                    case CurrentCount >= 64 of
+                    %% Only enforce cap for NEW keys
+                    case KeyExists orelse (CurrentCount < 64) of
                         true ->
-                            {error, ?ENOMEM};  %% Out of memory
-                        false ->
                             %% Linux writes FS base to *(unsigned long *)Addr
                             %% Simulate by storing to process dictionary key
                             FSBase = case get(vbeam_fs_base) of
@@ -245,7 +249,9 @@ sys_arch_prctl([Code, Addr]) ->
                                 Val -> Val
                             end,
                             put({vbeam_user_mem, Addr}, FSBase),
-                            {ok, 0} %% Return 0 (success), not the base address
+                            {ok, 0}; %% Return 0 (success), not the base address
+                        false ->
+                            {error, ?ENOMEM}  %% Out of memory
                     end;
                 false ->
                     {error, ?EFAULT} %% Bad address
@@ -254,22 +260,28 @@ sys_arch_prctl([Code, Addr]) ->
             %% SECURITY FIX: Validate Addr is page-aligned and within reasonable range
             case is_integer(Addr) andalso (Addr band 16#FFF) =:= 0 andalso Addr < 16#7FFFFFFFFFFF of
                 true ->
+                    %% MEDIUM FIX: Allow updates if key already exists
+                    KeyExists = case get({vbeam_user_mem, Addr}) of
+                        undefined -> false;
+                        _ -> true
+                    end,
                     %% SECURITY: Cap user_mem entries at 64 to prevent unbounded growth
                     CurrentCount = length([K || K <- get_keys(),
                                                is_tuple(K),
                                                tuple_size(K) =:= 2,
                                                element(1, K) =:= vbeam_user_mem]),
-                    case CurrentCount >= 64 of
+                    %% Only enforce cap for NEW keys
+                    case KeyExists orelse (CurrentCount < 64) of
                         true ->
-                            {error, ?ENOMEM};  %% Out of memory
-                        false ->
                             %% Linux writes GS base to *(unsigned long *)Addr
                             GSBase = case get(vbeam_gs_base) of
                                 undefined -> 0;
                                 Val -> Val
                             end,
                             put({vbeam_user_mem, Addr}, GSBase),
-                            {ok, 0} %% Return 0 (success), not the base address
+                            {ok, 0}; %% Return 0 (success), not the base address
+                        false ->
+                            {error, ?ENOMEM}  %% Out of memory
                     end;
                 false ->
                     {error, ?EFAULT} %% Bad address

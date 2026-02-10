@@ -88,7 +88,9 @@ emit_alloc_init(arm64, Format) ->
         {label, OkLbl},
         ?ARM64_ENC:encode_mov_rr(x28, x0),             %% x28 = heap_base
         ?ARM64_ENC:encode_mov_rr(x27, x0),
-        ?ARM64_ENC:encode_add_imm(x27, x27, ?HEAP_SIZE) %% x27 = heap_end
+        %% HEAP_SIZE is 1MB, too large for add_imm (max 4095), use movz+add_rrr
+        ?ARM64_ENC:encode_mov_imm64(x17, ?HEAP_SIZE),
+        ?ARM64_ENC:encode_add_rrr(x27, x27, x17)       %% x27 = heap_end
     ]);
 emit_alloc_init(x86_64, _Format) ->
     %% x86_64 Linux mmap syscall:

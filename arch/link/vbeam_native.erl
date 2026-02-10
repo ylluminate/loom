@@ -580,9 +580,9 @@ builtin_function_impl(<<"log">>, Target) ->
     }};
 
 builtin_function_impl(<<"exit">>, Target) ->
-    {RetReg, SyscallReg} = case Target of
-        x86_64 -> {rax, rax};  %% x86_64 syscall number in rax
-        arm64 -> {x0, x16}     %% arm64 syscall number in x16
+    {ArgReg, SyscallReg} = case Target of
+        x86_64 -> {rdi, rax};  %% x86_64: arg in rdi (SysV ABI), syscall number in rax
+        arm64 -> {x0, x16}     %% arm64: arg in x0 (AAPCS64), syscall number in x16
     end,
     {ok, #{
         name => <<"exit">>,
@@ -592,16 +592,16 @@ builtin_function_impl(<<"exit">>, Target) ->
         locals => 1,
         body => [
             %% exit(code): syscall 1 (exit) on macOS, 60 on Linux
-            {mov, {preg, RetReg}, {vreg, 0}},
+            {mov, {preg, ArgReg}, {vreg, 0}},
             {mov_imm, {preg, SyscallReg}, 1},  %% exit syscall (macOS)
             syscall
         ]
     }};
 
 builtin_function_impl(<<"panic">>, Target) ->
-    {RetReg, SyscallReg} = case Target of
-        x86_64 -> {rax, rax};
-        arm64 -> {x0, x16}
+    {ArgReg, SyscallReg} = case Target of
+        x86_64 -> {rdi, rax};  %% x86_64: arg in rdi (SysV ABI), syscall number in rax
+        arm64 -> {x0, x16}     %% arm64: arg in x0 (AAPCS64), syscall number in x16
     end,
     {ok, #{
         name => <<"panic">>,
@@ -611,7 +611,7 @@ builtin_function_impl(<<"panic">>, Target) ->
         locals => 1,
         body => [
             {print_str, {vreg, 0}},
-            {mov_imm, {preg, RetReg}, 1},
+            {mov_imm, {preg, ArgReg}, 1},
             {mov_imm, {preg, SyscallReg}, 1},  %% exit syscall (macOS)
             syscall
         ]
