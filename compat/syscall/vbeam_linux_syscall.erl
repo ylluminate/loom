@@ -230,7 +230,8 @@ sys_arch_prctl([Code, Addr]) ->
             {ok, 0};
         16#1003 -> % ARCH_GET_FS
             %% SECURITY FIX: Validate Addr is page-aligned and within reasonable range
-            case is_integer(Addr) andalso (Addr band 16#FFF) =:= 0 andalso Addr < 16#7FFFFFFFFFFF of
+            %% FINDING 7 FIX: Require Addr >= 0 to reject negative pointers
+            case is_integer(Addr) andalso Addr >= 0 andalso (Addr band 16#FFF) =:= 0 andalso Addr < 16#7FFFFFFFFFFF of
                 true ->
                     %% MEDIUM FIX: Allow updates if key already exists
                     KeyExists = case get({vbeam_user_mem, Addr}) of
@@ -261,7 +262,8 @@ sys_arch_prctl([Code, Addr]) ->
             end;
         16#1004 -> % ARCH_GET_GS
             %% SECURITY FIX: Validate Addr is page-aligned and within reasonable range
-            case is_integer(Addr) andalso (Addr band 16#FFF) =:= 0 andalso Addr < 16#7FFFFFFFFFFF of
+            %% FINDING 7 FIX: Require Addr >= 0 to reject negative pointers
+            case is_integer(Addr) andalso Addr >= 0 andalso (Addr band 16#FFF) =:= 0 andalso Addr < 16#7FFFFFFFFFFF of
                 true ->
                     %% MEDIUM FIX: Allow updates if key already exists
                     KeyExists = case get({vbeam_user_mem, Addr}) of

@@ -815,8 +815,17 @@ allocate_stack(N, Y) ->
             Y  % Return unchanged on error
     end.
 
+%% FINDING 5 FIX: Validate deallocate bounds before calling nthtail_bare
+deallocate_stack(N, Y) when is_integer(N), N >= 0 ->
+    YLen = length_bare(Y),
+    case N =< YLen of
+        true ->
+            nthtail_bare(N, Y);
+        false ->
+            error({invalid_deallocate, N, YLen})
+    end;
 deallocate_stack(N, Y) ->
-    nthtail_bare(N, Y).
+    error({invalid_deallocate, N, length_bare(Y)}).
 
 %% Convert term to string (minimal implementation)
 term_to_string(Atom) when is_atom(Atom) ->

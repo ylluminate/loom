@@ -32,21 +32,31 @@ lower_function(#{name := Name, body := Body, arity := _Arity,
 compute_frame_size(SpillSlots, UsedCalleeSaved) ->
     %% Each spill slot is 8 bytes
     SpillSize = SpillSlots * 8,
-    %% FIXED BUG #3: Correct alignment formula.
-    %% After entry: rsp is 16-aligned (call pushes 8-byte return address, making it 8-aligned,
-    %% then push rbp makes it 16-aligned again).
-    %% Then we push N callee-saved registers (each 8 bytes).
-    %% Then we sub rsp, FrameSize for spill slots.
-    %% For correct alignment at call sites: (1 + N) * 8 + FrameSize ≡ 0 (mod 16)
-    %% So FrameSize must have opposite parity to (1 + N).
-    TotalPushes = 1 + length(UsedCalleeSaved),  % rbp + callee-saved
-    %% If TotalPushes is odd, FrameSize must be odd multiple of 8 (add 8 if even).
-    %% If TotalPushes is even, FrameSize must be even multiple of 8 (no change if even).
-    case {TotalPushes rem 2, SpillSize rem 16} of
-        {1, 0} -> SpillSize + 8;  % Odd pushes, even SpillSize → add 8
-        {1, 8} -> SpillSize;      % Odd pushes, odd SpillSize → OK
-        {0, 0} -> SpillSize;      % Even pushes, even SpillSize → OK
-        {0, 8} -> SpillSize + 8   % Even pushes, odd SpillSize → add 8
+    %% ALIGNMENT FIX (Round 25, Finding 1):
+    %% After call: rsp at 8-mod-16 (return address pushed)
+    %% After push rbp: rsp at 16-mod-16 (back to 16-aligned)
+    %% After N callee-saved pushes: rsp at ((N * 8) mod 16)
+    %%   - If N even: rsp still 16-aligned
+    %%   - If N odd: rsp at 8-mod-16
+    %% Then sub rsp, FrameSize for locals.
+    %% For nested calls to work, AFTER sub we need 16-alignment.
+    %% So: if N is odd, FrameSize must be odd*8 to restore alignment.
+    NumCalleeSaved = length(UsedCalleeSaved),
+    case NumCalleeSaved rem 2 of
+        0 ->
+            %% Even callee-saved pushes → rsp already 16-aligned after pushes
+            %% FrameSize can be any multiple of 8, round up to 16
+            case SpillSize rem 16 of
+                0 -> SpillSize;
+                _ -> SpillSize + 8
+            end;
+        1 ->
+            %% Odd callee-saved pushes → rsp is 8-aligned after pushes
+            %% FrameSize must be 8-mod-16 to restore 16-alignment
+            case SpillSize rem 16 of
+                8 -> SpillSize;      % Already 8-mod-16, good
+                0 -> SpillSize + 8   % Make it 8-mod-16
+            end
     end.
 
 %% Emit function prologue: push rbp; mov rbp, rsp; sub rsp, FrameSize; save callee-saved

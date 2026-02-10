@@ -126,11 +126,23 @@ boot_data(Config) ->
     %% Get ISR stubs base from config or compute default
     ISRStubsBase = maps:get(isr_stubs_base, Config, PageTablesBase + 16#100000),
 
-    %% Validate config addresses are within reasonable 64MB range and monotonically increasing
-    true = GDTBase >= 0 andalso GDTBase =< 16#4000000,
-    true = IDTBase >= GDTBase andalso IDTBase =< 16#4000000,
-    true = PageTablesBase >= IDTBase andalso PageTablesBase =< 16#4000000,
-    true = ISRStubsBase >= PageTablesBase andalso ISRStubsBase =< 16#4000000,
+    %% FINDING 9 FIX: Replace hard assertions with case expressions
+    case GDTBase >= 0 andalso GDTBase =< 16#4000000 of
+        true -> ok;
+        false -> error({invalid_boot_config, {gdt_base_out_of_range, GDTBase}})
+    end,
+    case IDTBase >= GDTBase andalso IDTBase =< 16#4000000 of
+        true -> ok;
+        false -> error({invalid_boot_config, {idt_base_invalid, IDTBase, must_be_after, GDTBase}})
+    end,
+    case PageTablesBase >= IDTBase andalso PageTablesBase =< 16#4000000 of
+        true -> ok;
+        false -> error({invalid_boot_config, {page_tables_base_invalid, PageTablesBase, must_be_after, IDTBase}})
+    end,
+    case ISRStubsBase >= PageTablesBase andalso ISRStubsBase =< 16#4000000 of
+        true -> ok;
+        false -> error({invalid_boot_config, {isr_stubs_base_invalid, ISRStubsBase, must_be_after, PageTablesBase}})
+    end,
 
     %% GDT data (includes 5 entries + GDTR at end)
     GDTData = vbeam_gdt_idt:gdt_data(),

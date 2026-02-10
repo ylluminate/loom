@@ -796,18 +796,30 @@ safe_nth(N, List) ->
     error({list_index_out_of_bounds, N, length(List)}).
 
 %% BUG 1 FIX: Use SectionAddrs to compute symbol addresses correctly
+%% FINDING 4 FIX: Require symbols to be defined (shndx > 0) and preferably func type
 find_init_addr(#{symbols := Symbols, sections := _Sections}, SectionAddrs) ->
+    %% Filter to only defined symbols (shndx > 0)
+    DefinedSymbols = [S || S = #{shndx := Shndx} <- Symbols, Shndx > 0],
+
     case lists:search(
-        fun(#{name := N}) -> N =:= <<"init_module">> orelse N =:= <<"__init">> end,
-        Symbols
+        fun(#{name := N, shndx := Shndx, type := Type}) ->
+            (N =:= <<"init_module">> orelse N =:= <<"__init">>)
+            andalso Shndx > 0
+            andalso (Type =:= func orelse Type =:= notype)
+        end,
+        DefinedSymbols
     ) of
         {value, Sym} ->
             calculate_symbol_address(Sym, [], SectionAddrs);
         false ->
             %% Look for _start or main explicitly
             case lists:search(
-                fun(#{name := N}) -> N =:= <<"_start">> orelse N =:= <<"main">> end,
-                Symbols
+                fun(#{name := N, shndx := Shndx, type := Type}) ->
+                    (N =:= <<"_start">> orelse N =:= <<"main">>)
+                    andalso Shndx > 0
+                    andalso (Type =:= func orelse Type =:= notype)
+                end,
+                DefinedSymbols
             ) of
                 {value, Sym} ->
                     calculate_symbol_address(Sym, [], SectionAddrs);

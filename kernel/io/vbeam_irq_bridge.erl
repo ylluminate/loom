@@ -26,6 +26,7 @@
          get_handlers/0,
          simulate_irq/1,
          tick/1,
+         ack_irq/1,  % FINDING 8 FIX: Allow handlers to acknowledge receipt
          isr_ring_buffer_write/0]).
 
 %% Ring buffer operations
@@ -105,11 +106,15 @@ ring_size(#{head := Head, tail := Tail}) ->
 %%% gen_server State
 %%% ==========================================================================
 
+%% FINDING 8 FIX: Add max_pending tracking for backpressure
 -record(state, {
     ring_buffer :: map(),
     handlers :: #{non_neg_integer() => pid()},
-    monitors :: #{reference() => non_neg_integer()}  % monitor_ref => irq_num
+    monitors :: #{reference() => non_neg_integer()},  % monitor_ref => irq_num
+    pending_counts :: #{non_neg_integer() => non_neg_integer()}  % irq_num => pending_count
 }).
+
+-define(MAX_PENDING_PER_IRQ, 1000).
 
 %%% ==========================================================================
 %%% Public API
@@ -148,6 +153,12 @@ simulate_irq(IrqNum) when is_integer(IrqNum), IrqNum >= 0 ->
 -spec tick(pid() | atom()) -> {ok, non_neg_integer()}.
 tick(ServerRef) ->
     gen_server:call(ServerRef, tick).
+
+%% @doc Acknowledge IRQ receipt, decrementing pending count.
+%% Handlers should call this after processing each IRQ to allow more deliveries.
+-spec ack_irq(non_neg_integer()) -> ok.
+ack_irq(IrqNum) when is_integer(IrqNum), IrqNum >= 0 ->
+    gen_server:cast(?MODULE, {ack_irq, IrqNum}).
 
 %% @doc Generate x86_64 machine code for ISR stub that writes to ring buffer.
 %%
@@ -236,7 +247,7 @@ isr_ring_buffer_write() ->
 
 init([]) ->
     RingBuffer = ring_new(?DEFAULT_RING_SIZE),
-    {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}}}.
+    {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}, pending_counts = #{}}}.
 
 handle_call({register_handler, IrqNum, Pid}, From, #state{handlers = Handlers, monitors = Monitors} = State) ->
     %% BUG 10 FIX: Check ownership before allowing replacement
@@ -292,29 +303,42 @@ handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Hand
 handle_call(get_handlers, _From, #state{handlers = Handlers} = State) ->
     {reply, Handlers, State};
 
-handle_call(tick, _From, #state{ring_buffer = RingBuf, handlers = Handlers} = State) ->
+handle_call(tick, _From, #state{ring_buffer = RingBuf, handlers = Handlers, pending_counts = PendingCounts} = State) ->
     {Events, NewRingBuf} = ring_pop_all(RingBuf),
 
-    %% Deliver each event to its registered handler (only if handler is alive)
-    DeliveredCount = lists:foldl(fun({IrqNum, Timestamp}, Count) ->
-        case maps:get(IrqNum, Handlers, undefined) of
-            undefined ->
-                %% No handler registered, drop event
-                Count;
-            Pid when is_pid(Pid) ->
-                %% Only count as delivered if process is alive
-                case is_process_alive(Pid) of
-                    true ->
-                        Pid ! {irq, IrqNum, Timestamp},
-                        Count + 1;
-                    false ->
-                        %% Handler died but not yet cleaned up by monitor
-                        Count
-                end
-        end
-    end, 0, Events),
+    %% FINDING 8 FIX: Deliver with bounded mailbox tracking
+    {DeliveredCount, DroppedCount, NewPendingCounts} = lists:foldl(
+        fun({IrqNum, Timestamp}, {DeliveredAcc, DroppedAcc, PendingAcc}) ->
+            case maps:get(IrqNum, Handlers, undefined) of
+                undefined ->
+                    %% No handler registered, drop event
+                    {DeliveredAcc, DroppedAcc + 1, PendingAcc};
+                Pid when is_pid(Pid) ->
+                    %% Check pending count before delivery
+                    CurrentPending = maps:get(IrqNum, PendingAcc, 0),
+                    case is_process_alive(Pid) andalso (CurrentPending < ?MAX_PENDING_PER_IRQ) of
+                        true ->
+                            Pid ! {irq, IrqNum, Timestamp},
+                            {DeliveredAcc + 1, DroppedAcc, PendingAcc#{IrqNum => CurrentPending + 1}};
+                        false ->
+                            %% Handler dead or mailbox full, drop event
+                            {DeliveredAcc, DroppedAcc + 1, PendingAcc}
+                    end
+            end
+        end,
+        {0, 0, PendingCounts},
+        Events
+    ),
 
-    {reply, {ok, DeliveredCount}, State#state{ring_buffer = NewRingBuf}};
+    %% Log if we dropped events due to backpressure
+    case DroppedCount > 0 of
+        true ->
+            io:format("[vbeam_irq_bridge] Dropped ~p IRQ events due to backpressure~n", [DroppedCount]);
+        false ->
+            ok
+    end,
+
+    {reply, {ok, DeliveredCount}, State#state{ring_buffer = NewRingBuf, pending_counts = NewPendingCounts}};
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
@@ -322,6 +346,14 @@ handle_call(_Request, _From, State) ->
 handle_cast({simulate_irq, IrqNum, Timestamp}, #state{ring_buffer = RingBuf} = State) ->
     NewRingBuf = ring_push({IrqNum, Timestamp}, RingBuf),
     {noreply, State#state{ring_buffer = NewRingBuf}};
+
+%% FINDING 8 FIX: Handle IRQ acknowledgment
+handle_cast({ack_irq, IrqNum}, #state{pending_counts = PendingCounts} = State) ->
+    NewPendingCounts = case maps:get(IrqNum, PendingCounts, 0) of
+        0 -> PendingCounts;
+        N -> PendingCounts#{IrqNum => N - 1}
+    end,
+    {noreply, State#state{pending_counts = NewPendingCounts}};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.

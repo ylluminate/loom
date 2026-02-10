@@ -89,26 +89,30 @@ serial_putchar_code() ->
 serial_puts_code() ->
     SerialPutcharSize = byte_size(serial_putchar_code()),
 
-    %% Calculate relative call offset to serial_putchar
-    %% serial_puts comes right after serial_putchar in the layout
-    %% The call instruction is 5 bytes (E8 xx xx xx xx)
-    %% Instruction layout before call:
-    %%   +0: test rcx,rcx (3 bytes)
-    %%   +3: jz done (2 bytes)
-    %%   +5: lodsb (1 byte)
-    %%   +6: mov bl,al (2 bytes)
-    %%   +8: dec rcx (3 bytes)
-    %%   +11: call rel32 (5 bytes, ends at +16)
-    %% Target is serial_putchar at -(SerialPutcharSize + offset_from_start)
-    %% Displacement is from END of call instruction (offset 16)
-    CallOffset = -(SerialPutcharSize + 16),
+    %% DISPLACEMENT FIX (Round 25, Finding 2): Recalculated after CLD insertion
+    %% Instruction layout (byte-by-byte):
+    %%   +0: cld (1 byte)                    <<16#FC>>
+    %%   +1: test rcx,rcx (3 bytes)          <<16#48, 16#85, 16#C9>>
+    %%   +4: jz done (2 bytes)               <<16#74, disp8>>
+    %%   +6: lodsb (1 byte)                  <<16#AC>>
+    %%   +7: mov bl,al (2 bytes)             <<16#88, 16#C3>>
+    %%   +9: dec rcx (3 bytes)               <<16#48, 16#FF, 16#C9>>
+    %%   +12: call rel32 (5 bytes)           <<16#E8, disp32>>
+    %%   +17: jmp loop (2 bytes)             <<16#EB, disp8>>
+    %%   +19: ret (1 byte)                   <<16#C3>>
+    %%
+    %% Call target: serial_putchar is at -(SerialPutcharSize + 17)
+    %%   (displacement from END of call instruction at +17)
+    %% JZ target: ret at +19, from end of jz at +6 → +13 bytes
+    %% JMP target: test at +1, from end of jmp at +19 → -18 bytes
+    CallOffset = -(SerialPutcharSize + 17),
 
     iolist_to_binary([
         %% Clear direction flag before lodsb loop (CRITICAL: prevents backward reads)
         <<16#FC>>,                                % cld (clear direction flag)
         %% loop:
         <<16#48, 16#85, 16#C9>>,                  % test rcx, rcx (check counter)
-        <<16#74, 16#0C>>,                         % jz done (+12 bytes to ret)
+        <<16#74, 16#0D>>,                         % jz done (+13 bytes to ret)
         <<16#AC>>,                                % lodsb (load byte from [RSI++] to AL)
         <<16#88, 16#C3>>,                         % mov bl, al (save char)
         <<16#48, 16#FF, 16#C9>>,                  % dec rcx (decrement counter)

@@ -528,12 +528,13 @@ builtin_function_impl(<<"sqrt">>, arm64) ->
         body => [
             %% The FMOV/FSQRT/FMOV sequence needs to be raw bytes
             %% since we don't have an IR opcode for sqrt.
-            %% ARM64: FMOV D0, X0 = 0x9E270000
+            %% ENCODING FIX (Round 25, Finding 3): Corrected FMOV opcodes
+            %% ARM64: FMOV D0, X0 = 0x9E670000 (general→FP, bit 22 set)
             %%        FSQRT D0, D0 = 0x1E61C000
-            %%        FMOV X0, D0 = 0x9E260000
-            {raw, <<16#00:8, 16#00:8, 16#27:8, 16#9E:8>>},   %% FMOV D0, X0
+            %%        FMOV X0, D0 = 0x9E660000 (FP→general, bit 22 set)
+            {raw, <<16#00:8, 16#00:8, 16#67:8, 16#9E:8>>},   %% FMOV D0, X0
             {raw, <<16#00:8, 16#C0:8, 16#61:8, 16#1E:8>>},   %% FSQRT D0, D0
-            {raw, <<16#00:8, 16#00:8, 16#26:8, 16#9E:8>>},   %% FMOV X0, D0
+            {raw, <<16#00:8, 16#00:8, 16#66:8, 16#9E:8>>},   %% FMOV X0, D0
             ret
         ]
     }};
