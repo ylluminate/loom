@@ -249,10 +249,9 @@ decode_and_execute(#proc{code = Code, pc = PC} = Proc, Options) ->
             %% End of code
             {return, ok, Proc};
 
-        {UnknownOp, NextPC} when is_atom(UnknownOp) ->
-            %% Unknown opcode - skip for now
-            io:format("Warning: Unimplemented opcode ~p at PC ~p~n", [UnknownOp, PC]),
-            {continue, Proc#proc{pc = NextPC}};
+        {UnknownOp, _NextPC} when is_atom(UnknownOp) ->
+            %% SECURITY FIX (Finding #7): Fail closed on unknown opcodes
+            {error, {unknown_opcode, UnknownOp, PC}};
 
         {error, Reason} ->
             {error, Reason}

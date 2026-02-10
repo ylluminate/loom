@@ -44,15 +44,21 @@
 %% ==================================================================
 
 %% @doc Initialize LinuxKPI subsystem (ETS tables, etc.)
+%% BUG 11 FIX: Make init idempotent with try/catch
 init() ->
-    case ets:whereis(?TIMER_TABLE) of
-        undefined ->
-            %% BUG 9 FIX: Use protected instead of public
-            ets:new(?TIMER_TABLE, [named_table, protected, set]);
-        _ ->
+    try
+        case ets:whereis(?TIMER_TABLE) of
+            undefined ->
+                ets:new(?TIMER_TABLE, [named_table, protected, set]),
+                ok;
+            _ ->
+                ok
+        end
+    catch
+        error:badarg ->
+            %% Table already exists (race condition)
             ok
-    end,
-    ok.
+    end.
 
 %% ==================================================================
 %% Memory Management
@@ -317,8 +323,15 @@ mod_timer(Timer, ExpiresJiffies) ->
             TimeoutMs = ExpiresJiffies,
             Self = self(),
             TRef = erlang:send_after(TimeoutMs, Self, {timer_expired, Timer}),
-            store_timer_ref(Timer, TRef),
-            0; %% Success
+            %% BUG 2 FIX: Check if store_timer_ref succeeded
+            case store_timer_ref(Timer, TRef) of
+                ok ->
+                    0; %% Success
+                {error, timer_table_full} ->
+                    %% Storage failed - cancel the timer immediately
+                    erlang:cancel_timer(TRef),
+                    -1 %% Failure
+            end;
         false ->
             -1 %% Invalid timeout
     end.

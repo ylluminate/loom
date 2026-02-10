@@ -791,9 +791,16 @@ set_register({x, N}, Value, State) ->
     X = maps:get(x, State),
     State#{x => X#{{x, N} => Value}};
 set_register({y, N}, Value, State) ->
-    Y = maps:get(y, State),
-    NewY = set_nth_bare(N + 1, Value, Y),
-    State#{y => NewY};
+    %% SECURITY FIX (Finding #6): Validate Y index bounds before write
+    case is_integer(N) andalso N >= 0 andalso N =< 1024 of
+        true ->
+            Y = maps:get(y, State),
+            NewY = set_nth_bare(N + 1, Value, Y),
+            State#{y => NewY};
+        false ->
+            %% Invalid Y index - return state unchanged
+            State
+    end;
 set_register(_Other, _Value, State) ->
     State.
 

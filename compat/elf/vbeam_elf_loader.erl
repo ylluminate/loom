@@ -385,8 +385,11 @@ parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShSt
         || I <- lists:seq(0, ShNum - 1)
     ],
 
+    %% BUG 9 FIX: Convert list to tuple for O(1) access
+    SectionHeadersTuple = list_to_tuple(SectionHeaders),
+
     %% Get the .shstrtab section
-    ShStrTabHdr = safe_nth(ShStrNdx + 1, SectionHeaders),
+    ShStrTabHdr = element(ShStrNdx + 1, SectionHeadersTuple),
     ShStrTabData = extract_section_data(Binary, ShStrTabHdr),
 
     %% Resolve section names and add section index
@@ -433,6 +436,9 @@ extract_section_data(Binary, #{offset := Offset, size := Size}) ->
 %% ============================================================================
 
 parse_symbols(_Binary, Sections) ->
+    %% BUG 9 FIX: Convert to tuple for O(1) access
+    SectionsTuple = list_to_tuple(Sections),
+
     %% Find .symtab section
     case lists:search(fun(#{type := Type}) -> Type =:= symtab end, Sections) of
         {value, SymTabSec} ->
@@ -442,7 +448,7 @@ parse_symbols(_Binary, Sections) ->
             %% Validate EntSize before using as divisor
             case EntSize of
                 E when E > 0, E =:= ?SYM_SIZE ->
-                    StrTabSec = safe_nth(StrTabIdx + 1, Sections),
+                    StrTabSec = element(StrTabIdx + 1, SectionsTuple),
                     #{data := StrTabData} = StrTabSec,
 
                     %% Parse symbol entries
@@ -494,6 +500,9 @@ parse_symbol(SymTabData, Offset, StrTabData) ->
 %% ============================================================================
 
 parse_relocations(_Binary, Sections, _StrTab) ->
+    %% BUG 9 FIX: Convert to tuple for O(1) access
+    SectionsTuple = list_to_tuple(Sections),
+
     %% Find all .rela.* sections
     RelaSections = [S || S <- Sections, is_rela_section(maps:get(name, S, <<>>))],
 
@@ -505,8 +514,8 @@ parse_relocations(_Binary, Sections, _StrTab) ->
                 E when E > 0, E =:= ?RELA_SIZE -> ok;
                 _ -> error({invalid_rela_entsize, EntSize, expected, ?RELA_SIZE})
             end,
-            
-            TargetSec = safe_nth(TargetIdx + 1, Sections),
+
+            TargetSec = element(TargetIdx + 1, SectionsTuple),
             TargetName = maps:get(name, TargetSec),
 
             NumRelas = byte_size(Data) div EntSize,
@@ -593,8 +602,10 @@ apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) -
 
 apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := Addend},
                  Data, Symbols, AllSections, SectionAddrs, CurrentSectionAddr) ->
+    %% BUG 9 FIX: Convert to tuple for O(1) access
+    SymbolsTuple = list_to_tuple(Symbols),
     %% Get symbol address
-    Sym = safe_nth(SymIdx + 1, Symbols),
+    Sym = element(SymIdx + 1, SymbolsTuple),
     SymAddr = calculate_symbol_address(Sym, AllSections, SectionAddrs),
 
     %% Calculate relocation value
@@ -683,9 +694,12 @@ calculate_symbol_address(#{resolved_addr := ResolvedAddr, value := Value}, _AllS
   when ResolvedAddr =/= undefined ->
     %% External symbol - use resolved address
     ResolvedAddr + Value;
-calculate_symbol_address(#{shndx := ?SHN_UNDEF}, _AllSections, _SectionAddrs) ->
-    %% Unresolved external - should have been caught earlier
+calculate_symbol_address(#{shndx := ?SHN_UNDEF, bind := weak}, _AllSections, _SectionAddrs) ->
+    %% BUG 8 FIX: Weak undefined symbols can be resolved to 0
     0;
+calculate_symbol_address(#{shndx := ?SHN_UNDEF, name := Name}, _AllSections, _SectionAddrs) ->
+    %% BUG 8 FIX: Non-weak unresolved symbols should error
+    error({unresolved_symbol, Name});
 calculate_symbol_address(#{shndx := ?SHN_ABS, value := Value}, _AllSections, _SectionAddrs) ->
     %% Absolute symbol
     Value;

@@ -58,6 +58,8 @@ run_test(Test) ->
     catch
         Class:Reason:Stack ->
             io:format("FAIL~n  ~p:~p~n  ~p~n", [Class, Reason, Stack]),
+            %% Ensure scheduler is stopped even on failure to prevent cascading errors
+            stop_scheduler(),
             fail
     end.
 

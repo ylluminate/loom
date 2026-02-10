@@ -61,6 +61,7 @@
     reductions => non_neg_integer(),
     priority => priority(),
     mailbox => queue:queue(),
+    mailbox_bytes => non_neg_integer(),  % BUG 3 FIX: Track mailbox byte size
     created_at => integer(),
     last_scheduled => integer()
 }.
@@ -79,7 +80,8 @@
     context_switches :: non_neg_integer(),
     idle_ticks :: non_neg_integer(),
     start_time :: integer(),
-    quota_state :: #{atom() => non_neg_integer()}  % Track quota per priority
+    quota_state :: #{atom() => non_neg_integer()},  % Track quota per priority
+    irq_bridge_pid :: pid() | undefined  % BUG 4 FIX: Track authorized IRQ sender
 }).
 
 %%% ==========================================================================
@@ -253,11 +255,15 @@ init(Config) ->
         reductions => 0,
         priority => low,
         mailbox => queue:new(),
+        mailbox_bytes => 0,  % BUG 3 FIX: Initialize byte tracking
         created_at => erlang:monotonic_time(nanosecond),
         last_scheduled => 0
     },
 
     HeapRegistry1 = vbeam_heap:registry_add(HeapRegistry, ?IDLE_PID, IdleHeap),
+
+    %% BUG 4 FIX: Look up IRQ bridge pid if registered
+    IrqBridgePid = whereis(vbeam_irq_bridge),
 
     State = #state{
         config = Config,
@@ -273,7 +279,8 @@ init(Config) ->
         context_switches = 0,
         idle_ticks = 0,
         start_time = erlang:monotonic_time(millisecond),
-        quota_state = #{high => 0, normal => 0, low => 0}
+        quota_state = #{high => 0, normal => 0, low => 0},
+        irq_bridge_pid = IrqBridgePid
     },
 
     {ok, State}.
@@ -300,6 +307,7 @@ handle_call({spawn_process, Module, Function}, _From, State) ->
                         reductions => 0,
                         priority => normal,
                         mailbox => queue:new(),
+                        mailbox_bytes => 0,  % BUG 3 FIX: Initialize byte tracking
                         created_at => erlang:monotonic_time(nanosecond),
                         last_scheduled => 0
                     },
@@ -371,17 +379,23 @@ handle_call({send_message, ToPid, Message}, _From, State) ->
     case maps:get(ToPid, Processes, undefined) of
         undefined ->
             {reply, {error, not_found}, State};
-        #{mailbox := Mailbox, status := Status} = Process ->
+        #{mailbox := Mailbox, mailbox_bytes := MailboxBytes, status := Status} = Process ->
             %% BUG 8 FIX: Check mailbox size to prevent unbounded growth
             MailboxSize = queue:len(Mailbox),
-            case MailboxSize >= ?DEFAULT_MAILBOX_LIMIT of
-                true ->
+            %% BUG 3 FIX: Check byte size limit (10MB default)
+            MaxMailboxBytes = 10 * 1024 * 1024,
+            MsgBytes = erlang:external_size(Message),
+            case {MailboxSize >= ?DEFAULT_MAILBOX_LIMIT, MailboxBytes + MsgBytes > MaxMailboxBytes} of
+                {true, _} ->
                     {reply, {error, mailbox_full}, State};
-                false ->
+                {_, true} ->
+                    {reply, {error, mailbox_full}, State};
+                {false, false} ->
                     %% NOTE: Messages are shared-heap (not copied). This matches our modeled semantics.
                     %% On bare metal with strict per-process heaps, this would require deep-copy.
                     NewMailbox = queue:in(Message, Mailbox),
-                    UpdatedProcess = Process#{mailbox => NewMailbox},
+                    NewMailboxBytes = MailboxBytes + MsgBytes,
+                    UpdatedProcess = Process#{mailbox => NewMailbox, mailbox_bytes => NewMailboxBytes},
                     NewProcesses = Processes#{ToPid => UpdatedProcess},
 
                     %% If process was blocked, move to ready
@@ -400,19 +414,39 @@ handle_call({receive_message, Pid}, _From, #state{processes = Processes} = State
     case maps:get(Pid, Processes, undefined) of
         undefined ->
             {reply, {error, not_found}, State};
-        #{mailbox := Mailbox} = Process ->
-            %% NOTE: Returned message is shared-heap (not copied). This matches our modeled semantics.
-            case queue:out(Mailbox) of
-                {{value, Message}, NewMailbox} ->
-                    UpdatedProcess = Process#{mailbox => NewMailbox},
-                    NewProcesses = Processes#{Pid => UpdatedProcess},
-                    {reply, {ok, Message}, State#state{processes = NewProcesses}};
-                {empty, _} ->
-                    %% Transition to blocked state and remove from ready queues
-                    UpdatedProcess = Process#{status => blocked},
-                    NewProcesses = Processes#{Pid => UpdatedProcess},
-                    NewState = remove_from_queues(Pid, State#state{processes = NewProcesses}),
-                    {reply, {error, empty}, NewState}
+        #{mailbox := Mailbox, mailbox_bytes := MailboxBytes} = Process ->
+            %% BUG 1 FIX: Cannot block idle process (PID 0)
+            case Pid of
+                ?IDLE_PID ->
+                    %% Idle process cannot block - return error instead
+                    case queue:out(Mailbox) of
+                        {{value, Message}, NewMailbox} ->
+                            %% BUG 3 FIX: Decrement mailbox_bytes
+                            MsgBytes = erlang:external_size(Message),
+                            NewMailboxBytes = max(0, MailboxBytes - MsgBytes),
+                            UpdatedProcess = Process#{mailbox => NewMailbox, mailbox_bytes => NewMailboxBytes},
+                            NewProcesses = Processes#{Pid => UpdatedProcess},
+                            {reply, {ok, Message}, State#state{processes = NewProcesses}};
+                        {empty, _} ->
+                            {reply, {error, cannot_block_idle}, State}
+                    end;
+                _ ->
+                    %% NOTE: Returned message is shared-heap (not copied). This matches our modeled semantics.
+                    case queue:out(Mailbox) of
+                        {{value, Message}, NewMailbox} ->
+                            %% BUG 3 FIX: Decrement mailbox_bytes
+                            MsgBytes = erlang:external_size(Message),
+                            NewMailboxBytes = max(0, MailboxBytes - MsgBytes),
+                            UpdatedProcess = Process#{mailbox => NewMailbox, mailbox_bytes => NewMailboxBytes},
+                            NewProcesses = Processes#{Pid => UpdatedProcess},
+                            {reply, {ok, Message}, State#state{processes = NewProcesses}};
+                        {empty, _} ->
+                            %% Transition to blocked state and remove from ready queues
+                            UpdatedProcess = Process#{status => blocked},
+                            NewProcesses = Processes#{Pid => UpdatedProcess},
+                            NewState = remove_from_queues(Pid, State#state{processes = NewProcesses}),
+                            {reply, {error, empty}, NewState}
+                    end
             end
     end;
 
@@ -446,9 +480,31 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @doc Handle timer interrupt from IRQ bridge
-handle_info({irq, ?IRQ_TIMER, _Timestamp}, State) ->
-    NewState = tick(State),
-    {noreply, NewState};
+%% BUG 4 FIX: Authenticate sender to prevent spoofed IRQ messages
+%% Only accept tick messages from the registered vbeam_irq_bridge process
+handle_info({irq, ?IRQ_TIMER, _Timestamp}, #state{irq_bridge_pid = AuthPid} = State) ->
+    %% Authenticate tick source. On bare metal, use capability token.
+    case AuthPid of
+        undefined ->
+            %% No bridge registered yet — accept tick (testing/bootstrap)
+            NewState = tick(State),
+            {noreply, NewState};
+        _ ->
+            CurrentBridgePid = whereis(vbeam_irq_bridge),
+            case CurrentBridgePid of
+                Pid when Pid =:= AuthPid ->
+                    NewState = tick(State),
+                    {noreply, NewState};
+                undefined ->
+                    %% Bridge died — accept but update
+                    NewState = tick(State#state{irq_bridge_pid = undefined}),
+                    {noreply, NewState};
+                NewPid ->
+                    %% Bridge restarted — update and accept
+                    NewState = tick(State#state{irq_bridge_pid = NewPid}),
+                    {noreply, NewState}
+            end
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.

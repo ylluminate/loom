@@ -110,7 +110,7 @@ emit_alloc_init(x86_64, _Format) ->
         %% Validate mmap result: negative rax means error
         ?X86_ENC:encode_test_rr(rax, rax),
         ?X86_ENC:encode_jns(0),
-        {reloc, x86_rel32, OkLbl, -4},
+        {reloc, rel32, OkLbl, -4},
         %% Failure path
         {label, FailLbl},
         ?X86_ENC:encode_mov_imm64(rdi, 1),     %% exit code 1
@@ -169,7 +169,7 @@ emit_alloc(x86_64, DstReg, N) ->
         %% Bounds check: heap_ptr > heap_end?
         ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
         ?X86_ENC:encode_jle(0),
-        {reloc, x86_rel32, OkLbl, -4},
+        {reloc, rel32, OkLbl, -4},
         %% OOM path: trap via int3
         {label, OomLbl},
         ?X86_ENC:encode_int3(),
@@ -226,7 +226,7 @@ emit_alloc_reg(x86_64, DstReg, SizeReg) ->
         %% Bounds check
         ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
         ?X86_ENC:encode_jle(0),
-        {reloc, x86_rel32, OkLbl, -4},
+        {reloc, rel32, OkLbl, -4},
         %% OOM path
         {label, OomLbl},
         ?X86_ENC:encode_int3(),

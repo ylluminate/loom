@@ -3,6 +3,8 @@
 %%% @end
 -module(vbeam_beam_to_native).
 
+-include_lib("kernel/include/file.hrl").
+
 -export([translate_beam/1, translate_beam/2, translate_function/2]).
 -export([serial_putchar_code/0, serial_puts_code/0]).
 
@@ -22,16 +24,28 @@ translate_beam(BeamFile) ->
     {ok, #{code => binary(), data => binary(), entry => non_neg_integer()}} |
     {error, term()}.
 translate_beam(BeamFile, _Options) ->
-    case file:read_file(BeamFile) of
-        {ok, BeamBinary} ->
-            case vbeam_beam_standalone:parse_binary(BeamBinary) of
-                {ok, ParsedData} ->
-                    translate_chunks(ParsedData);
-                {error, Reason} ->
-                    {error, {beam_parse_error, Reason}}
+    %% SECURITY FIX (Finding #3): Check file size before reading (100MB max)
+    case file:read_file_info(BeamFile) of
+        {ok, FileInfo} ->
+            Size = FileInfo#file_info.size,
+            case Size > 100_000_000 of
+                true ->
+                    {error, {file_too_large, Size, max, 100_000_000}};
+                false ->
+                    case file:read_file(BeamFile) of
+                        {ok, BeamBinary} ->
+                            case vbeam_beam_standalone:parse_binary(BeamBinary) of
+                                {ok, ParsedData} ->
+                                    translate_chunks(ParsedData);
+                                {error, Reason} ->
+                                    {error, {beam_parse_error, Reason}}
+                            end;
+                        {error, Reason} ->
+                            {error, {file_read_error, Reason}}
+                    end
             end;
         {error, Reason} ->
-            {error, {file_read_error, Reason}}
+            {error, {file_info_error, Reason}}
     end.
 
 %% @doc Translate a single function's bytecode to x86_64.
@@ -351,9 +365,9 @@ translate_move({atom, _Atom}, {x, 0}) ->
     %% For atoms, we'd need an atom table - for now, load 0
     <<16#48, 16#31, 16#C0>>;  % xor rax, rax
 
-translate_move(_Src, _Dst) ->
-    %% Unhandled move - emit nop
-    <<16#90>>.
+%% SECURITY FIX (Finding #4): Return error instead of silently emitting NOP
+translate_move(Src, Dst) ->
+    error({unsupported_move, Src, Dst}).
 
 %% ============================================================================
 %% External Call Translation
@@ -365,9 +379,9 @@ translate_external_call(io, format) ->
 translate_external_call(erlang, display) ->
     translate_serial_output();
 
-translate_external_call(_Mod, _Fun) ->
-    %% Unknown external function - emit nop
-    <<16#90>>.
+%% SECURITY FIX (Finding #5): Return error instead of silently emitting NOP
+translate_external_call(Mod, Fun) ->
+    error({unknown_external, Mod, Fun}).
 
 %% Generate inline serial output code
 %% Assumes RSI points to string (loaded by caller from put_string)
@@ -398,12 +412,15 @@ translate_serial_output() ->
 %% String Embedding
 %% ============================================================================
 
+%% SECURITY FIX (Finding #8): Emit error value instead of null pointer
 translate_put_string(_Len, String, {x, 0}) ->
     %% For bare metal, we need RIP-relative addressing
-    %% Simplified: load string pointer (would embed string in data section)
-    %% For now, just load 0 (strings would need multi-pass compilation)
+    %% String data isn't available yet - emit code that loads error sentinel
+    %% instead of dereferencing null
     _ = String,  % Suppress warning
-    <<16#48, 16#31, 16#C0>>;  % xor rax, rax (placeholder)
+    %% Load error sentinel value (-1) instead of 0
+    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF>>;  % mov rax, -1
 
 translate_put_string(_Len, _String, _Dst) ->
-    <<16#90>>.  % nop
+    %% Load error sentinel instead of NOP
+    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF>>.  % mov rax, -1

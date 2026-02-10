@@ -72,6 +72,7 @@
 
     %% System
     encode_svc/1,
+    encode_brk/1,
     encode_nop/0,
 
     %% Condition codes
@@ -837,6 +838,13 @@ encode_svc(Imm16) when Imm16 >= 0, Imm16 < 65536 ->
         bor (Imm16 bsl 5)
         bor (2#000 bsl 2)                    %% op2=000
         bor 2#01,                            %% LL=01 (SVC)
+    emit(Inst).
+
+%% @doc BRK #imm16 — software breakpoint (debugger trap).
+%% Encoding: 0xD4200000 | (imm16 << 5)
+-spec encode_brk(non_neg_integer()) -> binary().
+encode_brk(Imm16) when Imm16 >= 0, Imm16 < 65536 ->
+    Inst = 16#D4200000 bor (Imm16 bsl 5),
     emit(Inst).
 
 %% @doc NOP — no operation.

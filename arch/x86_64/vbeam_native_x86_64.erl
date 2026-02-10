@@ -67,6 +67,8 @@
     %% Control flow
     encode_jmp_rel32/1,
     encode_jcc_rel32/2,
+    encode_jns/1,
+    encode_jle/1,
     encode_call_rel32/1,
     encode_call_reg/1,
     encode_ret/0,
@@ -79,6 +81,7 @@
     %% Special
     encode_syscall/0,
     encode_nop/0,
+    encode_int3/0,
 
     %% Memory
     encode_lea_rip_rel/2,
@@ -509,6 +512,20 @@ encode_jcc_rel32(Cond, Offset) ->
     CC = cond_code(Cond),
     <<16#0F:8, CC:8, Offset:32/little-signed>>.
 
+%% @doc JNS rel32 (Jump if Not Sign)
+%%      Encoding: 0F 89 cd
+%%      Offset is relative to end of this instruction (6 bytes).
+-spec encode_jns(integer()) -> binary().
+encode_jns(Offset) ->
+    <<16#0F:8, 16#89:8, Offset:32/little-signed>>.
+
+%% @doc JLE rel32 (Jump if Less or Equal)
+%%      Encoding: 0F 8E cd
+%%      Offset is relative to end of this instruction (6 bytes).
+-spec encode_jle(integer()) -> binary().
+encode_jle(Offset) ->
+    <<16#0F:8, 16#8E:8, Offset:32/little-signed>>.
+
 %% @doc CALL rel32
 %%      Encoding: E8 cd
 %%      Offset is relative to end of this instruction (5 bytes).
@@ -588,6 +605,12 @@ encode_syscall() ->
 -spec encode_nop() -> binary().
 encode_nop() ->
     <<16#90:8>>.
+
+%% @doc INT3 (Breakpoint)
+%%      Encoding: CC
+-spec encode_int3() -> binary().
+encode_int3() ->
+    <<16#CC:8>>.
 
 %%====================================================================
 %% Memory instructions

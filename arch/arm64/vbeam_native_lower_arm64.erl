@@ -44,7 +44,7 @@ emit_prologue(FrameSize, UsedCallee) when FrameSize =< 504 ->
     save_callee_saved(UsedCallee, 16);
 emit_prologue(FrameSize, UsedCallee) ->
     %% Large frame: stp x29,x30,[sp,#-16]! then sub sp,sp,#(FrameSize-16)
-    %% CRITICAL: Set x29 AFTER full stack allocation, not before
+    %% CRITICAL: Set x29 to point to FP/LR save slot, not bottom of frame
     %% If (FrameSize-16) > 4095, materialize in x16 and use register form
     FrameDelta = FrameSize - 16,
     SubInstr = case FrameDelta =< 4095 of
@@ -56,7 +56,7 @@ emit_prologue(FrameSize, UsedCallee) ->
     end,
     [?ENC:encode_stp_pre(x29, x30, sp, -16)] ++
     SubInstr ++
-    [?ENC:encode_add_imm(x29, sp, 0)] ++
+    [?ENC:encode_add_imm(x29, sp, FrameDelta)] ++
     save_callee_saved(UsedCallee, 16).
 
 %% Epilogue: restore callee-saved; mov sp, x29; ldp x29, x30, [sp], #FrameSize; ret
@@ -1161,18 +1161,19 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         %% x19 = input value
         ?ENC:encode_mov_rr(x19, Src),
 
-        %% x20 = 46 (write position in buffer at sp+0..47, working backward from 47)
-        ?ENC:encode_mov_imm64(x20, 47),
+        %% x20 = 48 (write position in buffer at sp+0..47, working backward from 47)
+        %% Initialize to buffer size so first decrement gives 47
+        ?ENC:encode_mov_imm64(x20, 48),
 
         %% Check zero
         ?ENC:encode_cmp_imm(x19, 0),
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, NonZeroLbl, -4},
 
-        %% Zero case: store '0' at sp+46
+        %% Zero case: store '0' at sp+47 (last position in buffer)
         ?ENC:encode_mov_imm64(x9, 48),    %% '0'
-        ?ENC:encode_strb(x9, sp, 46),
-        ?ENC:encode_mov_imm64(x20, 46),
+        ?ENC:encode_strb(x9, sp, 47),
+        ?ENC:encode_mov_imm64(x20, 47),
         ?ENC:encode_b(0),
         {reloc, arm64_branch26, DoneLbl, -4},
 
@@ -1463,34 +1464,40 @@ break_each_cycle(Moves, Cycles, NumCalleeSaved) ->
 
     AcyclicCode ++ CyclicCode.
 
-break_single_cycle([First | _] = Cycle, AllMoves, NumCalleeSaved) ->
-    %% Save first register to x16
+break_single_cycle([First | Rest] = Cycle, AllMoves, NumCalleeSaved) ->
+    %% Proper cycle rotation: save first element to x16, then shift each
+    %% predecessor value forward in order, finally restore x16 to last position.
+    %%
+    %% Example cycle: x0 <- x1 <- x2 <- x0
+    %% 1. Save x0 to x16
+    %% 2. Move x1 to x0
+    %% 3. Move x2 to x1
+    %% 4. Move x16 to x2
+
     SaveCode = [?ENC:encode_mov_rr(x16, First)],
 
-    %% Emit moves for this cycle (except the closing move)
-    CycleMoves = [{Dst, Src} || {Dst, Src} <- AllMoves,
-                                 lists:member(Dst, Cycle)],
+    %% Build the rotation moves in order: for each position, move predecessor to it
+    %% Cycle = [R0, R1, R2, ...], moves are R1→R0, R2→R1, ..., x16→Rn
+    RotationMoves = lists:zipwith(
+        fun(Dst, Src) ->
+            %% Find the source value for Src register
+            case lists:keyfind(Src, 1, AllMoves) of
+                {Src, SrcVal} ->
+                    emit_move_arm64(Dst, SrcVal, NumCalleeSaved);
+                false ->
+                    %% Should not happen in valid cycle
+                    []
+            end
+        end,
+        Cycle,           %% destinations in cycle order
+        Rest ++ [First]  %% sources: rotate left (second elem goes to first, etc.)
+    ),
 
-    %% Find the move that closes the cycle (dest = First)
-    {ClosingMoves, OtherMoves} = lists:partition(
-        fun({Dst, _}) -> Dst =:= First end, CycleMoves),
+    %% Final move: restore x16 to last position
+    LastReg = lists:last(Cycle),
+    CloseCode = [?ENC:encode_mov_rr(LastReg, x16)],
 
-    %% Emit other moves
-    OtherCode = [emit_move_arm64(Dst, Src, NumCalleeSaved)
-                 || {Dst, Src} <- OtherMoves],
-
-    %% Close cycle: restore x16 to the source of the closing move
-    %% (or directly to First if there's no closing move)
-    CloseCode = case ClosingMoves of
-        [{First, {preg, ClosingSrc}}] ->
-            %% Proper rotation: move x16 to the source position of closing move
-            [?ENC:encode_mov_rr(ClosingSrc, x16)];
-        _ ->
-            %% Fallback: just restore to First (should not happen in valid cycles)
-            [?ENC:encode_mov_rr(First, x16)]
-    end,
-
-    SaveCode ++ OtherCode ++ CloseCode.
+    SaveCode ++ lists:flatten(RotationMoves) ++ CloseCode.
 
 emit_move_arm64(ArgReg, {preg, Reg}, _NumCalleeSaved) ->
     ?ENC:encode_mov_rr(ArgReg, Reg);

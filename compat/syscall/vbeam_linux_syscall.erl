@@ -17,15 +17,21 @@
 
 %% @doc Initialize syscall dispatch system
 %% Creates ETS table for tracking unimplemented syscalls
+%% BUG 10 FIX: Make init idempotent with try/catch
 init() ->
-    case ets:whereis(?TRACKING_TABLE) of
-        undefined ->
-            %% BUG 4 FIX: Changed from public to protected to prevent external mutation
-            ets:new(?TRACKING_TABLE, [named_table, protected, set]);
-        _ ->
+    try
+        case ets:whereis(?TRACKING_TABLE) of
+            undefined ->
+                ets:new(?TRACKING_TABLE, [named_table, protected, set]),
+                ok;
+            _ ->
+                ok
+        end
+    catch
+        error:badarg ->
+            %% Table already exists (race condition)
             ok
-    end,
-    ok.
+    end.
 
 %% @doc Dispatch a syscall to the appropriate handler
 %% Returns {ok, Result} | {error, Errno}
@@ -256,10 +262,12 @@ stub_syscall(SyscallNr, Args) ->
                 MaxUnknownSyscalls = 10000,
                 case ets:info(?TRACKING_TABLE, size) of
                     Size when Size < MaxUnknownSyscalls ->
-                        %% First occurrence - log it
+                        %% BUG 7 FIX: Truncate args to first 3 elements, limit representation
                         Name = syscall_name(SyscallNr),
+                        TruncatedArgs = lists:sublist(Args, 3),
+                        SafeArgs = [truncate_arg(Arg) || Arg <- TruncatedArgs],
                         io:format("[vbeam] UNIMPLEMENTED SYSCALL: ~s (~p) args=~p~n",
-                                 [Name, SyscallNr, Args]),
+                                 [Name, SyscallNr, SafeArgs]),
                         ets:insert(?TRACKING_TABLE, {SyscallNr, true});
                     _ ->
                         %% Table full - don't insert
@@ -276,6 +284,16 @@ stub_syscall(SyscallNr, Args) ->
             init()
     end,
     {error, ?ENOSYS}.
+
+%% BUG 7 FIX: Truncate arg representation to 200 chars max
+truncate_arg(Arg) ->
+    Str = lists:flatten(io_lib:format("~P", [Arg, 10])),
+    case length(Str) of
+        Len when Len > 200 ->
+            lists:sublist(Str, 200) ++ "...";
+        _ ->
+            Str
+    end.
 
 %% @doc Get syscall name from number
 syscall_name(Nr) ->

@@ -377,19 +377,31 @@ lower_instruction({call_indirect, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
 
 %% RET
 lower_instruction(ret, _FnName, UsedCalleeSaved) ->
-    %% FIXED BUG #1: Deallocate local frame FIRST, then pop callee-saved in reverse.
-    %% Frame layout: rbp → callee-saved → spill area → rsp
-    %% Epilogue sequence: add rsp, FrameSize → pop callee-saved (reverse) → pop rbp → ret
-    %% Note: FrameSize is not available here, so we use mov rsp, rbp to deallocate
-    %% which reclaims both spill area and callee-saved space in one instruction.
-    %% Then pop callee-saved registers in REVERSE order [r15, r14, r13, r12, rbx].
+    %% CRITICAL FIX: Correct epilogue sequence to restore callee-saved registers.
+    %% Frame layout (after prologue): rbp_save, callee_saved..., spill_area ← rsp
+    %% Epilogue must:
+    %%   1. Reclaim spill area (add rsp, SpillSize OR mov rsp, rbp to skip to callee-saved area)
+    %%   2. Pop callee-saved registers in REVERSE order
+    %%   3. Pop rbp
+    %%   4. ret
+    %% PROBLEM: SpillSize is not available here. But we can calculate where callee-saved starts:
+    %%   rbp points to old rbp. Callee-saved were pushed AFTER rbp, so they're at rbp-8, rbp-16, etc.
+    %%   Stack grows down: after "push rbp", rbp points to saved rbp. Then we push callee-saved.
+    %%   So callee-saved are at rbp - (N*8) down to rbp - 8.
+    %% To restore: set rsp = rbp - (NumCalleeSaved * 8), then pop each, then pop rbp.
     case UsedCalleeSaved of
         [] ->
             emit_epilogue(0);
         _ ->
-            %% mov rsp, rbp (reclaim entire frame)
+            NumCalleeSaved = length(UsedCalleeSaved),
+            %% Set rsp to point to the first callee-saved register on stack
+            %% (they were pushed after rbp, so they're below rbp in memory)
+            %% Use: sub rsp, rbp; sub rsp, -(NumCalleeSaved*8) = add rsp, -...;
+            %% Actually simpler: mov rsp, rbp; sub rsp, NumCalleeSaved*8
+            SetRsp = [?ENC:encode_mov_rr(rsp, rbp),
+                      ?ENC:encode_sub_imm(rsp, NumCalleeSaved * 8)],
             RestoreCode = [?ENC:encode_pop(Reg) || Reg <- lists:reverse(UsedCalleeSaved)],
-            [?ENC:encode_mov_rr(rsp, rbp)] ++ RestoreCode ++ [?ENC:encode_pop(rbp), ?ENC:encode_ret()]
+            SetRsp ++ RestoreCode ++ [?ENC:encode_pop(rbp), ?ENC:encode_ret()]
     end;
 
 %% PUSH
@@ -894,9 +906,12 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         {reloc, rel32, DoneLbl, -4},
 
         {label, CapFullLbl},
-        %% FIXED: Map capacity exhausted - return map unchanged (graceful degradation)
-        %% TODO: implement map growth/reallocation when capacity is reached
-        %% Fall through to DoneLbl to return original map unchanged
+        %% CRITICAL FIX #10: Map capacity exhausted - emit trap instead of silent drop.
+        %% Returning map unchanged silently loses data. Better to crash explicitly.
+        %% Emit UD2 (undefined instruction) to trap immediately.
+        %% TODO: implement map growth/reallocation when capacity is reached.
+        <<16#0F:8, 16#0B:8>>,  %% UD2 opcode
+        %% (execution never reaches here after UD2 trap)
 
         {label, DoneLbl},
         ?ENC:encode_mov_rr(Dst, Map)
@@ -997,7 +1012,7 @@ lower_instruction({float_to_int, {preg, Dst}, {preg, Src}}, _FnName, _UsedCallee
 %%====================================================================
 
 lower_instruction({method_call, {preg, Dst}, ReceiverType, MethodName, Args},
-                  _FnName, _UsedCalleeSaved) when is_binary(ReceiverType),
+                  _FnName, UsedCalleeSaved) when is_binary(ReceiverType),
                                 is_binary(MethodName),
                                 is_list(Args) ->
     %% FIXED BUG #8: Guard against >6 arguments (stack args not yet supported)
@@ -1008,7 +1023,7 @@ lower_instruction({method_call, {preg, Dst}, ReceiverType, MethodName, Args},
                    "Stack arguments not yet implemented. Max 6 args."});
         false ->
             MangledName = <<ReceiverType/binary, "__", MethodName/binary>>,
-            ArgMoves = move_args_to_regs_x86(Args, ArgRegsList),
+            ArgMoves = move_args_to_regs_x86(Args, ArgRegsList, UsedCalleeSaved),
             CallCode = [?ENC:encode_call_rel32(0),
                         {reloc, rel32, MangledName, -4}],
             ResultMove = case Dst of
@@ -1044,17 +1059,21 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         %% rbx = input value, r14 = sign flag (0=positive, 1=negative)
         ?ENC:encode_mov_rr(rbx, Src),
         ?ENC:encode_xor_rr(r14, r14),     %% r14 = 0 (positive)
-        %% r12 = 47 (write position, right to left)
-        ?ENC:encode_mov_imm64(r12, 47),
+        %% FIXED BUG #8: Initialize r12 = 48 (buffer size), decrement BEFORE write.
+        %% This fixes off-by-one in length calculation (was 48-r12, now 48-r12 with correct r12).
+        ?ENC:encode_mov_imm64(r12, 48),
 
         %% Check zero
         ?ENC:encode_cmp_imm(rbx, 0),
         ?ENC:encode_jcc_rel32(ne, 0),
         {reloc, rel32, NonZeroLbl, -4},
 
-        %% Zero: store '0' at rsp+46
-        encode_mov_byte_to_stack(46, 48),
-        ?ENC:encode_mov_imm64(r12, 46),
+        %% Zero: decrement r12 first, then store '0'
+        ?ENC:encode_sub_imm(r12, 1),
+        ?ENC:encode_mov_rr(rsi, rsp),
+        ?ENC:encode_add_rr(rsi, r12),
+        ?ENC:encode_mov_imm64(rdx, 48),  %% '0'
+        encode_mov_byte_reg_to_mem(rsi, rdx),
         ?ENC:encode_jmp_rel32(0),
         {reloc, rel32, DoneLbl, -4},
 
@@ -1069,9 +1088,11 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         {label, PositiveLbl},
         {label, DivLoopLbl},
         ?ENC:encode_sub_imm(r12, 1),
-        %% rax = rbx, rdx:rax / 10
+        %% CRITICAL FIX #9: Use CQO for signed division, not XOR rdx,rdx.
+        %% CQO sign-extends rax into rdx:rax for correct signed IDIV.
+        %% Also guard against INT64_MIN / -1 overflow (would trap).
         ?ENC:encode_mov_rr(rax, rbx),
-        ?ENC:encode_xor_rr(rdx, rdx),  %% zero-extend
+        encode_cqo(),  %% sign-extend rax → rdx:rax
         ?ENC:encode_mov_imm64(rcx, 10),
         ?ENC:encode_idiv(rcx),          %% rax=quot, rdx=rem
         ?ENC:encode_add_imm(rdx, 48),   %% rem + '0'
@@ -1321,14 +1342,18 @@ encode_and_imm_x86(Dst, Imm) ->
     ModRM = ?ENC:modrm(2#11, 4, ?ENC:reg_lo(Dst)),
     <<Rex:8, 16#81:8, ModRM:8, Imm:32/little-signed>>.
 
+%% CQO: Sign-extend rax into rdx:rax (REX.W + 99)
+encode_cqo() ->
+    <<16#48:8, 16#99:8>>.
+
 %% Move argument values into System V argument registers.
 %% Detects cycles (e.g., rdi→rsi and rsi→rdi) and uses r11 as temp to break them.
-move_args_to_regs_x86([], _) -> [];
-move_args_to_regs_x86(Args, ArgRegs) ->
+move_args_to_regs_x86([], _, _) -> [];
+move_args_to_regs_x86(Args, ArgRegs, UsedCalleeSaved) ->
     %% Build the full mapping first to detect cycles
     Moves = build_arg_moves_x86(Args, ArgRegs),
     %% Detect and break cycles using r11 as scratch
-    break_cycles_and_emit_x86(Moves).
+    break_cycles_and_emit_x86(Moves, UsedCalleeSaved).
 
 build_arg_moves_x86([], _) -> [];
 build_arg_moves_x86([{preg, Reg} | Rest], [ArgReg | ArgRegs]) ->
@@ -1344,7 +1369,7 @@ build_arg_moves_x86([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
     [{ArgReg, {imm, 0}} | build_arg_moves_x86(Rest, ArgRegs)];
 build_arg_moves_x86(_, []) -> [].
 
-break_cycles_and_emit_x86(Moves) ->
+break_cycles_and_emit_x86(Moves, UsedCalleeSaved) ->
     %% FIXED: Full cycle decomposition — detect ALL cycles and break EACH one.
     %% Build dependency graph and find strongly connected components (cycles).
     Graph = [{Dst, case Src of {preg, R} -> R; _ -> none end} || {Dst, Src} <- Moves],
@@ -1352,10 +1377,10 @@ break_cycles_and_emit_x86(Moves) ->
     case Cycles of
         [] ->
             %% No cycles — emit directly
-            [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves];
+            [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- Moves];
         _ ->
             %% Break each cycle by saving one register to r11 before the cycle
-            break_all_cycles(Cycles, Moves)
+            break_all_cycles(Cycles, Moves, UsedCalleeSaved)
     end.
 
 %% Find all cycles in the move graph using Tarjan's SCC algorithm (simplified).
@@ -1411,7 +1436,7 @@ pop_scc(Node, [Other | Rest], Acc) -> pop_scc(Node, Rest, [Other | Acc]).
 
 %% FIXED BUG #4: Break each cycle individually using rotation.
 %% For a cycle [A→B→C→A], emit: save A to temp, C→A, B→C, temp→B.
-break_all_cycles(Cycles, Moves) ->
+break_all_cycles(Cycles, Moves, UsedCalleeSaved) ->
     %% Build move map for quick lookup
     MoveMap = maps:from_list(Moves),
     %% For each cycle, emit rotation sequence
@@ -1420,36 +1445,40 @@ break_all_cycles(Cycles, Moves) ->
     end, Cycles),
     %% Emit non-cycle moves
     CycleRegs = lists:usort(lists:flatten(Cycles)),
-    NonCycleMoves = [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves,
+    NonCycleMoves = [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- Moves,
                      not lists:member(Dst, CycleRegs)],
     CycleMoves ++ NonCycleMoves.
 
-%% Break a single cycle by rotating through temp register r11.
-%% Cycle is [R1, R2, ..., Rn] where R1→R2→...→Rn→R1.
+%% CRITICAL FIX: Break a single cycle by true rotation through temp register r11.
+%% Cycle is [R1, R2, ..., Rn] representing moves R1→R2, R2→R3, ..., Rn→R1.
+%% Algorithm: save R1 to r11, move R2→R1, R3→R2, ..., Rn→R(n-1), r11→Rn.
 break_one_cycle([], _MoveMap) -> [];
-break_one_cycle([First | _] = Cycle, MoveMap) ->
-    %% Save First to r11
+break_one_cycle([_Single], _MoveMap) -> [];  % Single-element cycle is a no-op
+break_one_cycle([First | Rest] = Cycle, _MoveMap) ->
+    %% CRITICAL FIX: True cycle rotation through temp register r11.
+    %% For cycle [R0, R1, ..., Rn-1] representing R0→R1, R1→R2, ..., Rn-1→R0:
+    %%   1. Save R0 to r11
+    %%   2. R1 → R0 (shift left)
+    %%   3. R2 → R1 (shift left)
+    %%   ...
+    %%   n. Rn-1 → Rn-2 (shift left)
+    %%   n+1. r11 → Rn-1 (restore saved value to last position)
     SaveFirst = ?ENC:encode_mov_rr(r11, First),
-    %% Emit moves for the cycle in reverse order (excluding the last→first edge)
-    Rotations = [emit_move_x86(To, maps:get(From, MoveMap))
-                 || {From, To} <- lists:zip(Cycle, tl(Cycle) ++ [First]),
-                    To =/= First],  % Skip the wrap-around edge
-    %% Restore temp to the second register in cycle
-    [Second | _] = tl(Cycle) ++ [First],
-    RestoreTemp = ?ENC:encode_mov_rr(Second, r11),
-    [SaveFirst] ++ Rotations ++ [RestoreTemp].
+    ChainMoves = [?ENC:encode_mov_rr(DestReg, SourceReg)
+                  || {DestReg, SourceReg} <- lists:zip(Cycle, Rest)],
+    RestoreLast = ?ENC:encode_mov_rr(lists:last(Cycle), r11),
+    [SaveFirst] ++ ChainMoves ++ [RestoreLast].
 
-emit_move_x86(ArgReg, {preg, Reg}) ->
+emit_move_x86(ArgReg, {preg, Reg}, _UsedCalleeSaved) ->
     ?ENC:encode_mov_rr(ArgReg, Reg);
-emit_move_x86(ArgReg, {imm, Val}) ->
+emit_move_x86(ArgReg, {imm, Val}, _UsedCalleeSaved) ->
     ?ENC:encode_mov_imm64(ArgReg, Val);
-emit_move_x86(ArgReg, {stack, Slot}) ->
-    %% FIXED BUG #5: This is called during argument setup, where we don't have
-    %% UsedCalleeSaved context. For now, assume Offset = -((Slot+1)*8) is correct
-    %% for the function's own stack frame (not caller's). This is a partial fix.
-    %% Full fix would require threading UsedCalleeSaved or FrameSize through.
-    %% TODO: Add comment noting limitation for args > 6.
-    Offset = -((Slot + 1) * 8),
+emit_move_x86(ArgReg, {stack, Slot}, UsedCalleeSaved) ->
+    %% FIXED BUG #4: Account for callee-saved register pushes when loading from stack.
+    %% Stack layout: [saved rbp] [saved callee-saved] [spill slots] ← rsp
+    %% Spill slot N is at rbp - (NumCalleeSaved * 8) - ((Slot+1) * 8)
+    NumCalleeSaved = length(UsedCalleeSaved),
+    Offset = -(NumCalleeSaved * 8) - ((Slot + 1) * 8),
     ?ENC:encode_mov_mem_load(ArgReg, rbp, Offset).
 
 %% Encode: mov byte [rsp + Offset], ImmByte

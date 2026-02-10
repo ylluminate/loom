@@ -397,8 +397,17 @@ parse_funs_loop(<<Function:32, Arity:32, CodePos:32, Index:32,
 parse_funs_loop(_, _, Acc) ->
     {error, {truncated_funs, lists:reverse(Acc)}}.
 
-parse_literals(<<Count:32, Rest/binary>>) ->
-    parse_literal_list(Rest, Count, []).
+%% SECURITY FIX (Finding #9): Cap literal table count at 1,000,000 entries
+parse_literals(<<Count:32, Rest/binary>>) when Count =< 1_000_000 ->
+    %% Verify Count doesn't exceed remaining bytes / minimum entry size (4 bytes)
+    case byte_size(Rest) >= Count * 4 of
+        true ->
+            parse_literal_list(Rest, Count, []);
+        false ->
+            []  % Invalid - not enough bytes for declared count
+    end;
+parse_literals(_) ->
+    [].
 
 parse_literal_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);
@@ -620,8 +629,16 @@ decode_large_value(Byte, Rest) ->
     end.
 
 %% Recursive compact value decoder for LenCode=7 case
-decode_compact_value_recursive(Binary) ->
-    decode_compact_value(Binary, Binary).
+%% SECURITY FIX (Finding #1): Extract first byte from binary, validate length
+decode_compact_value_recursive(<<FirstByte:8, Rest/binary>>) ->
+    case decode_compact_value(FirstByte, Rest) of
+        {Len, Rest2} when is_integer(Len), Len >= 0, Len =< 65536 ->
+            {Len, Rest2};
+        _ ->
+            {error, malformed_recursive_length}
+    end;
+decode_compact_value_recursive(_) ->
+    {error, truncated}.
 
 %% Build integer from big-endian bytes
 build_int_from_bytes(<<B:8, Rest/binary>>, Acc) ->
@@ -688,9 +705,19 @@ decode_extended(2, Rest, Atoms) ->
     end;
 decode_extended(3, Rest, Atoms) ->
     %% Allocation list - count as compact term, then type/val pairs
+    %% SECURITY FIX (Finding #2): Cap allocation list count at 256 entries
     case decode_operand(Rest, Atoms) of
-        {{integer, Count}, Rest2} ->
-            decode_alloc_list(Rest2, Count, Atoms, []);
+        {{integer, Count}, Rest2} when Count >= 0, Count =< 256 ->
+            %% Verify sufficient bytes remain (2 compact terms per entry, minimum 1 byte each)
+            case byte_size(Rest2) >= Count * 2 of
+                true ->
+                    decode_alloc_list(Rest2, Count, Atoms, []);
+                false ->
+                    error
+            end;
+        {{integer, _Count}, _Rest2} ->
+            %% Count exceeds maximum allowed
+            error;
         _ ->
             error
     end;

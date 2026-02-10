@@ -110,9 +110,10 @@ init(Opts) ->
     Log = maps:get(log, Opts, true),
     RawMaxLogSize = maps:get(max_log_size, Opts, ?MAX_LOG_SIZE),
 
-    %% BUG 1 FIX: Validate max_log_size
+    %% BUG 1 FIX: Validate max_log_size (positive, capped at 100MB)
+    MaxLogBytes = 100 * 1024 * 1024,  % BUG 5 FIX: Clamp to 100MB max
     MaxLogSize = case is_integer(RawMaxLogSize) andalso RawMaxLogSize > 0 of
-        true -> RawMaxLogSize;
+        true -> min(RawMaxLogSize, MaxLogBytes);
         false -> ?MAX_LOG_SIZE  %% Use default if invalid
     end,
 
@@ -192,19 +193,29 @@ handle_io_request({put_chars, Encoding, Chars}, State) ->
 
 %% put_chars with encoding and MFA
 handle_io_request({put_chars, Encoding, Mod, Fun, Args}, State) ->
-    %% BUG 9 FIX: Whitelist allowed modules to prevent arbitrary code execution
-    case is_safe_mfa(Mod, Fun, Args) of
-        true ->
+    %% BUG 6 FIX: Validate arity and module whitelist, enforce size limit
+    Arity = length(Args),
+    case is_safe_mfa(Mod, Fun, Arity) of
+        true when Arity >= 0, Arity =< 3 ->
             try
                 Chars = apply(Mod, Fun, Args),
                 String = encode_chars(Encoding, Chars),
-                NewState = output_all(String, State),
+                %% BUG 6 FIX: Truncate output to 64KB max
+                MaxOutputSize = 64 * 1024,
+                TruncatedString = case byte_size(String) of
+                    Size when Size > MaxOutputSize ->
+                        <<Prefix:MaxOutputSize/binary, _/binary>> = String,
+                        Prefix;
+                    _ ->
+                        String
+                end,
+                NewState = output_all(TruncatedString, State),
                 {ok, ok, NewState}
             catch
                 _:Reason ->
                     {error, Reason, State}
             end;
-        false ->
+        _ ->
             {error, {unauthorized_mfa, Mod, Fun}, State}
     end;
 
@@ -219,25 +230,29 @@ handle_io_request(_Request, State) ->
 %% @doc Encode characters based on encoding
 -spec encode_chars(unicode | latin1, iodata()) -> binary().
 
-%% BUG 9 FIX: Whitelist for safe MFA calls
-%% Only allow specific safe formatting functions from erlang and io_lib modules
-is_safe_mfa(erlang, Fun, _Args) when Fun =:= integer_to_list;
-                                      Fun =:= integer_to_binary;
-                                      Fun =:= float_to_list;
-                                      Fun =:= float_to_binary;
-                                      Fun =:= atom_to_list;
-                                      Fun =:= atom_to_binary;
-                                      Fun =:= list_to_binary;
-                                      Fun =:= iolist_to_binary;
-                                      Fun =:= binary_to_list ->
+%% BUG 6 FIX: Whitelist for safe MFA calls with module restriction
+%% Only allow specific safe formatting functions from whitelisted modules
+is_safe_mfa(erlang, Fun, _Arity) when Fun =:= integer_to_list;
+                                       Fun =:= integer_to_binary;
+                                       Fun =:= float_to_list;
+                                       Fun =:= float_to_binary;
+                                       Fun =:= atom_to_list;
+                                       Fun =:= atom_to_binary;
+                                       Fun =:= list_to_binary;
+                                       Fun =:= iolist_to_binary;
+                                       Fun =:= binary_to_list ->
     true;
-is_safe_mfa(io_lib, Fun, _Args) when Fun =:= format;
-                                      Fun =:= fwrite;
-                                      Fun =:= write;
-                                      Fun =:= print;
-                                      Fun =:= nl ->
+is_safe_mfa(io_lib, Fun, _Arity) when Fun =:= format;
+                                       Fun =:= fwrite;
+                                       Fun =:= write;
+                                       Fun =:= print;
+                                       Fun =:= nl ->
     true;
-is_safe_mfa(_Mod, _Fun, _Args) ->
+is_safe_mfa(lists, _Fun, _Arity) ->
+    true;  % Allow lists module functions
+is_safe_mfa(unicode, _Fun, _Arity) ->
+    true;  % Allow unicode module functions
+is_safe_mfa(_Mod, _Fun, _Arity) ->
     false.
 
 encode_chars(unicode, Chars) ->

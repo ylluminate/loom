@@ -16,7 +16,7 @@
     allocate/3,
     allocate/4,
     compute_live_intervals/1,
-    rewrite_instructions/2,
+    rewrite_instructions/3,
     used_callee_saved/2,
     needs_heap/1,
     available_regs_no_heap/1
@@ -111,7 +111,7 @@ allocate(Body, Target, NumParams, Opts) ->
         assignments = ParamAssign
     },
     State1 = linear_scan(NonParamIntervals, State0),
-    RewrittenBody0 = rewrite_instructions(Body, State1#alloc_state.assignments),
+    RewrittenBody0 = rewrite_instructions(Body, State1#alloc_state.assignments, Target),
     %% Insert parameter copies where params were reassigned to callee-saved regs
     RewrittenBody = insert_param_copies(RewrittenBody0, ParamAssign0, ParamAssign),
     {RewrittenBody, State1#alloc_state.next_spill}.
@@ -294,9 +294,10 @@ find_call_positions(Body) ->
 
 %% Detect call-like instructions that clobber caller-saved registers.
 %% FIXED: Include method_call as a call-clobbering instruction.
+%% method_call is a 5-element tuple: {method_call, Dst, ReceiverType, MethodName, Args}
 is_call_instruction({call, _}) -> true;
 is_call_instruction({call_indirect, _}) -> true;
-is_call_instruction({method_call, _, _}) -> true;
+is_call_instruction({method_call, _, _, _, _}) -> true;
 is_call_instruction(_) -> false.
 
 %% Check if a vreg's live interval spans any call position.
@@ -493,13 +494,13 @@ param_assignments(arm64, NumParams) ->
 
 %% Rewrite instructions: replace {vreg, N} with assigned physical reg or stack.
 %% FIXED BUG #2: Insert explicit load/store for spilled vregs instead of leaving {stack, Slot}.
--spec rewrite_instructions([term()], #{non_neg_integer() => atom() | {stack, integer()}}) ->
+-spec rewrite_instructions([term()], #{non_neg_integer() => atom() | {stack, integer()}}, target()) ->
     [term()].
-rewrite_instructions(Body, Assignments) ->
-    lists:flatmap(fun(I) -> rewrite_inst_with_spills(I, Assignments) end, Body).
+rewrite_instructions(Body, Assignments, Target) ->
+    lists:flatmap(fun(I) -> rewrite_inst_with_spills(I, Assignments, Target) end, Body).
 
 %% Rewrite a single instruction, inserting spill loads/stores as needed.
-rewrite_inst_with_spills(Inst, Assignments) when is_tuple(Inst) ->
+rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
     %% Identify uses and defs in this instruction
     {Uses, Defs} = analyze_inst_operands(Inst),
     %% For each USE that's spilled, collect {vreg, slot} pairs
@@ -520,17 +521,41 @@ rewrite_inst_with_spills(Inst, Assignments) when is_tuple(Inst) ->
             end;
            (_) -> false
         end, Defs),
-    %% Use scratch register r11 (x86_64) or x15 (arm64) for spill reload/store
-    ScratchReg = r11,  % TODO: make this target-aware if arm64 support is added
-    %% Generate load instructions (before the main instruction)
-    Loads = [{mov, {preg, ScratchReg}, {stack, Slot}} || {_V, Slot} <- LoadsNeeded],
-    %% Rewrite instruction operands: spilled vregs become ScratchReg uses
-    RewrittenInst = rewrite_inst_operands(Inst, Assignments, ScratchReg),
-    %% Generate store instructions (after the main instruction)
-    Stores = [{mov, {stack, Slot}, {preg, ScratchReg}} || {_V, Slot} <- StoresNeeded],
-    %% Concatenate: loads + rewritten instruction + stores
-    Loads ++ [RewrittenInst] ++ Stores;
-rewrite_inst_with_spills(Inst, _Assignments) ->
+    %% CRITICAL FIX #6: Multiple spills in one instruction need distinct scratch registers.
+    %% If >2 spills, error. For 0-2 spills, assign r11/r10 (x86_64) or x15/x14 (arm64).
+    NumLoads = length(LoadsNeeded),
+    NumStores = length(StoresNeeded),
+    case NumLoads + NumStores of
+        0 ->
+            %% No spills - just rewrite and return
+            [rewrite_inst_operands(Inst, Assignments, undefined)];
+        N when N > 2 ->
+            error({too_many_spills_in_instruction, Inst, N,
+                   "Instruction has more than 2 spilled operands - not yet supported"});
+        _ ->
+            %% 1 or 2 spills - assign scratch registers
+            {ScratchRegs, _} = case Target of
+                x86_64 -> {[r11, r10], r11};
+                arm64 -> {[x15, x14], x15}
+            end,
+            %% Assign scratch regs to each spilled vreg
+            LoadAssignments = lists:zip(LoadsNeeded, ScratchRegs),
+            StoreAssignments = lists:zip(StoresNeeded, ScratchRegs),
+            %% Generate loads with assigned scratch regs
+            Loads = [{mov, {preg, Scratch}, {stack, Slot}}
+                     || {{_V, Slot}, Scratch} <- LoadAssignments],
+            %% Build vreg-to-scratch mapping for operand rewriting
+            VregToScratch = maps:from_list([{V, Scratch}
+                                            || {{V, _Slot}, Scratch} <- LoadAssignments ++ StoreAssignments]),
+            %% Rewrite instruction operands with per-vreg scratch assignments
+            RewrittenInst = rewrite_inst_operands_multi(Inst, Assignments, VregToScratch),
+            %% Generate stores with assigned scratch regs
+            Stores = [{mov, {stack, Slot}, {preg, Scratch}}
+                      || {{_V, Slot}, Scratch} <- StoreAssignments],
+            %% Concatenate: loads + rewritten instruction + stores
+            Loads ++ [RewrittenInst] ++ Stores
+    end;
+rewrite_inst_with_spills(Inst, _Assignments, _Target) ->
     [Inst].  % atoms like ret, syscall, nop
 
 %% Analyze instruction to extract USE and DEF operands.
@@ -555,15 +580,62 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
         {cmp, A, B} -> {[A, B], []};
         {load, Dst, Base, _Off} -> {[Base], [Dst]};
         {store, Base, _Off, Src} -> {[Base, Src], []};
-        _ -> {[], []}  % conservative: no uses/defs for unknown instructions
+        _ ->
+            %% CRITICAL FIX #7: Conservative fallback for unknown opcodes.
+            %% Scan tuple elements for {vreg, _} patterns and treat as both used and defined.
+            %% This prevents silent miscompilation by ensuring vregs in unknown instructions
+            %% get allocated and have correct live ranges.
+            VregsInInst = extract_vregs_from_tuple(Inst),
+            {VregsInInst, VregsInInst}  % conservative: all vregs are both used and defined
     end;
 analyze_inst_operands(_) -> {[], []}.
 
-%% Rewrite instruction operands, replacing spilled vregs with scratch register.
+%% Extract all {vreg, N} operands from a tuple (recursively).
+extract_vregs_from_tuple(Tuple) when is_tuple(Tuple) ->
+    lists:usort(lists:flatmap(fun extract_vregs_from_term/1, tuple_to_list(Tuple)));
+extract_vregs_from_tuple(_) -> [].
+
+extract_vregs_from_term({vreg, _} = Vreg) -> [Vreg];
+extract_vregs_from_term(Tuple) when is_tuple(Tuple) ->
+    lists:flatmap(fun extract_vregs_from_term/1, tuple_to_list(Tuple));
+extract_vregs_from_term(List) when is_list(List) ->
+    lists:flatmap(fun extract_vregs_from_term/1, List);
+extract_vregs_from_term(_) -> [].
+
+%% Rewrite instruction operands, replacing spilled vregs with scratch register (single scratch).
 rewrite_inst_operands(Inst, Assignments, ScratchReg) when is_tuple(Inst) ->
     list_to_tuple([rewrite_operand_for_scratch(E, Assignments, ScratchReg)
                    || E <- tuple_to_list(Inst)]);
 rewrite_inst_operands(Inst, _, _) -> Inst.
+
+%% Rewrite instruction operands with per-vreg scratch assignments (multi-spill support).
+rewrite_inst_operands_multi(Inst, Assignments, VregToScratch) when is_tuple(Inst) ->
+    list_to_tuple([rewrite_operand_multi(E, Assignments, VregToScratch)
+                   || E <- tuple_to_list(Inst)]);
+rewrite_inst_operands_multi(Inst, _, _) -> Inst.
+
+rewrite_operand_multi({vreg, N}, Assignments, VregToScratch) ->
+    case maps:find(N, Assignments) of
+        {ok, {stack, _Slot}} ->
+            %% Spilled - use the assigned scratch for this vreg
+            case maps:find(N, VregToScratch) of
+                {ok, Scratch} -> {preg, Scratch};
+                error -> {vreg, N}  % shouldn't happen
+            end;
+        {ok, Reg} -> {preg, Reg};
+        error -> {vreg, N}
+    end;
+rewrite_operand_multi({mem, {vreg, N}, Off}, Assignments, VregToScratch) ->
+    case maps:find(N, Assignments) of
+        {ok, {stack, _Slot}} ->
+            case maps:find(N, VregToScratch) of
+                {ok, Scratch} -> {mem, {preg, Scratch}, Off};
+                error -> {mem, {vreg, N}, Off}
+            end;
+        {ok, Reg} -> {mem, {preg, Reg}, Off};
+        error -> {mem, {vreg, N}, Off}
+    end;
+rewrite_operand_multi(Other, _, _) -> Other.
 
 rewrite_operand_for_scratch({vreg, N}, Assignments, ScratchReg) ->
     case maps:find(N, Assignments) of
