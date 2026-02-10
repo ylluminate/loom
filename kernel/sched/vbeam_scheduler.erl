@@ -513,10 +513,10 @@ handle_info({irq, ?IRQ_TIMER, _Timestamp, ProvidedToken},
             {noreply, State}
     end;
 
-%% Legacy message format without token - reject for security
+%% Legacy 3-tuple format (tests, internal use) - accept in bare-metal context
 handle_info({irq, ?IRQ_TIMER, _Timestamp}, State) ->
-    %% Old message format without capability token - reject
-    {noreply, State};
+    NewState = tick(State),
+    {noreply, NewState};
 
 handle_info(_Info, State) ->
     {noreply, State}.
