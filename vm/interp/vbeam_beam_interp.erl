@@ -139,7 +139,7 @@ decode_and_execute(#proc{code = Code, pc = PC} = Proc, Options) ->
         done ->
             {return, ok, Proc};
 
-        {return, NextPC} ->
+        {return, _NextPC} ->
             %% Return from function
             case Proc#proc.stack of
                 [] ->
@@ -156,7 +156,7 @@ decode_and_execute(#proc{code = Code, pc = PC} = Proc, Options) ->
             Proc2 = set_register(Dst, Value, Proc),
             {continue, Proc2#proc{pc = NextPC}};
 
-        {call, Arity, Label, NextPC} ->
+        {call, _Arity, Label, NextPC} ->
             %% Call function at Label
             TargetPC = maps:get(Label, Proc#proc.labels, 0),
             Proc2 = Proc#proc{
@@ -175,7 +175,7 @@ decode_and_execute(#proc{code = Code, pc = PC} = Proc, Options) ->
                     {error, Reason}
             end;
 
-        {allocate, StackNeed, Live, NextPC} ->
+        {allocate, StackNeed, _Live, NextPC} ->
             %% Allocate stack frame
             Proc2 = Proc#proc{
                 y = lists:duplicate(StackNeed, undefined) ++ Proc#proc.y,
@@ -191,7 +191,7 @@ decode_and_execute(#proc{code = Code, pc = PC} = Proc, Options) ->
             },
             {continue, Proc2};
 
-        {test_heap, Need, Live, NextPC} ->
+        {test_heap, _Need, _Live, NextPC} ->
             %% Heap allocation test (no-op for now)
             {continue, Proc#proc{pc = NextPC}};
 

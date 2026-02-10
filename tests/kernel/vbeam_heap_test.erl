@@ -1,6 +1,9 @@
 %%% @doc Tests for vbeam_heap - BEAM process heap allocator
 -module(vbeam_heap_test).
--export([run_all/0]).
+-export([run_all/0, test/0]).
+
+%% Wrapper for make test-kernel compatibility
+test() -> run_all().
 
 %% Test runner
 run_all() ->

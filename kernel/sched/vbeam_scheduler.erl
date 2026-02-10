@@ -457,7 +457,7 @@ preempt(Pid, #state{processes = Processes, config = Config} = State) ->
 %% @doc Schedule next process from ready queues
 %% Priority: high (2x frequency) > normal > low (0.5x frequency)
 schedule_next(#state{ready_high = High, ready_normal = Normal, ready_low = Low,
-                     ticks = Ticks, processes = Processes,
+                     ticks = Ticks, processes = _Processes,
                      context_switches = CS, idle_ticks = IdleTicks} = State) ->
     %% Weighted scheduling: high every tick, normal every tick, low every 2 ticks
     TickMod = Ticks rem 2,

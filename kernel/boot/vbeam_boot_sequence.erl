@@ -149,69 +149,8 @@ boot_data_layout(Config) ->
 %% Internal Helpers
 %%====================================================================
 
-%% @doc Build serial print helper code.
-%%      This is the same as vbeam_nucleus_boot:build_print_string/0
-%%      Input: RDI = null-terminated string pointer
-%%      Outputs each character to COM1 (0x3F8)
--spec build_serial_print() -> binary().
-build_serial_print() ->
-    iolist_to_binary([
-        <<16#48, 16#89, 16#FE>>,                %% mov rsi, rdi
-        <<16#AC>>,                               %% lodsb
-        <<16#84, 16#C0>>,                        %% test al, al
-        <<16#74, 16#16>>,                        %% jz done (22 bytes ahead)
-        <<16#88, 16#C3>>,                        %% mov bl, al (save char)
-        <<16#BA, 16#FD, 16#03, 16#00, 16#00>>,  %% mov edx, 0x3FD (LSR)
-        <<16#EC>>,                               %% in al, dx
-        <<16#A8, 16#20>>,                        %% test al, 0x20 (TX ready?)
-        <<16#74, 16#F6>>,                        %% jnz wait_loop
-        <<16#88, 16#D8>>,                        %% mov al, bl (restore char)
-        <<16#BA, 16#F8, 16#03, 16#00, 16#00>>,  %% mov edx, 0x3F8 (THR)
-        <<16#EE>>,                               %% out dx, al
-        <<16#EB, 16#E5>>,                        %% jmp next_char
-        <<16#C3>>                                %% ret
-    ]).
-
-%% @doc Generate call to serial_print_code with RIP-relative lea.
-%%      PrintFuncOffset: offset of print function from start of code
-%%      StringOffsets: map of string label -> offset
-%%      StringLabel: which string to print
-%%      CurrentOffset: current position in code
--spec serial_print_call(non_neg_integer(), map(), atom(), non_neg_integer()) -> binary().
-serial_print_call(PrintFuncOffset, StringOffsets, StringLabel, CurrentOffset) ->
-    StringOffset = maps:get(StringLabel, StringOffsets),
-
-    %% lea rdi, [rip + offset_to_string]
-    %% Offset is: StringOffset - (CurrentOffset + InstructionSize)
-    %% lea rdi is 7 bytes, call is 5 bytes
-    LeaSize = 7,
-    CallSize = 5,
-
-    %% Position after lea instruction
-    AfterLea = CurrentOffset + LeaSize,
-    RIPRelStringOffset = StringOffset - AfterLea,
-
-    %% Position after call instruction
-    AfterCall = AfterLea + CallSize,
-    CallOffset = PrintFuncOffset - AfterCall,
-
-    iolist_to_binary([
-        %% lea rdi, [rip + RIPRelStringOffset]
-        <<16#48, 16#8D, 16#3D, RIPRelStringOffset:32/little-signed>>,
-
-        %% call print_string
-        <<16#E8, CallOffset:32/little-signed>>
-    ]).
-
-%% @doc Find offset of a string in the string list.
--spec find_string_offset(binary(), [{non_neg_integer(), binary()}]) -> non_neg_integer().
-find_string_offset(String, [{Offset, Str} | Rest]) ->
-    case Str of
-        String -> Offset;
-        _ -> find_string_offset(String, Rest)
-    end;
-find_string_offset(String, []) ->
-    error({string_not_found, String}).
+%% Dead functions removed - unused helpers for future serial print implementation
+%% build_serial_print/0, serial_print_call/4, find_string_offset/2 were not used
 
 %% @doc Build list of {Offset, String} tuples.
 -spec build_string_offsets([binary()], non_neg_integer()) -> [{non_neg_integer(), binary()}].

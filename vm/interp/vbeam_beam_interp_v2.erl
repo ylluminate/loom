@@ -168,7 +168,7 @@ execute_instr({move, Src, Dst}, Proc, _Options) ->
     Proc2 = set_register(Dst, Value, Proc),
     {continue, Proc2#proc{pc = Proc2#proc.pc + 1}};
 
-execute_instr({call, Arity, {f, Label}}, Proc, _Options) ->
+execute_instr({call, _Arity, {f, Label}}, Proc, _Options) ->
     %% Call local function
     case maps:get(Label, Proc#proc.labels, undefined) of
         undefined ->

@@ -1,6 +1,8 @@
 -module(test_decode_verification).
 -export([test/0]).
 
+%% Already exports test/0 - Makefile compatible
+
 test() ->
     %% Parse the standalone parser's own BEAM file
     case vbeam_beam_standalone:parse_file("vbeam_beam_standalone.beam") of

@@ -799,11 +799,6 @@ reverse_bare_acc([], Acc) ->
 reverse_bare_acc([H | T], Acc) ->
     reverse_bare_acc(T, [H | Acc]).
 
-append_bare([], Item) ->
-    [Item];
-append_bare([H | T], Item) ->
-    [H | append_bare(T, Item)].
-
 nth_bare(_N, []) ->
     undefined;
 nth_bare(1, [H | _]) ->

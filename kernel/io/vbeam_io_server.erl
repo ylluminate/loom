@@ -9,6 +9,8 @@
 %%% @end
 -module(vbeam_io_server).
 
+-behaviour(gen_server).
+
 %% API
 -export([
     start_link/1,

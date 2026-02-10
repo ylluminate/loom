@@ -1,4 +1,4 @@
--module(vbeam_kapi_symbols).
+-module(vbeam_kpi_symbols).
 -export([resolve/1, get_all_symbols/0, is_supported/1]).
 
 %% @doc Resolve Linux kernel symbol name to BEAM {Module, Function, Arity}
@@ -144,37 +144,4 @@ all_symbols() ->
         "napi_complete_done" => {vbeam_linuxkpi, napi_complete, 1}
     }.
 
-%% ==================================================================
-%% Symbol Categories (for documentation)
-%% ==================================================================
-
-%% @doc Get symbols by category
-symbols_by_category(memory) ->
-    ["kmalloc", "__kmalloc", "kfree", "vmalloc", "__vmalloc", "vfree",
-     "kzalloc", "dma_alloc_coherent", "dma_free_coherent"];
-symbols_by_category(logging) ->
-    ["printk", "_printk", "dev_err", "dev_warn", "dev_info", "dev_dbg"];
-symbols_by_category(sync) ->
-    ["spin_lock_init", "_raw_spin_lock", "_raw_spin_unlock", "spin_lock",
-     "spin_unlock", "spin_lock_irqsave", "spin_unlock_irqrestore",
-     "mutex_init", "__mutex_init", "mutex_lock", "mutex_unlock",
-     "init_waitqueue_head", "__init_waitqueue_head", "wake_up", "__wake_up",
-     "wake_up_interruptible"];
-symbols_by_category(pci) ->
-    ["pci_register_driver", "__pci_register_driver", "pci_unregister_driver",
-     "pci_enable_device", "pci_disable_device", "pci_set_master",
-     "pci_resource_start", "pci_resource_len", "pci_iomap", "pci_iounmap"];
-symbols_by_category(interrupts) ->
-    ["request_irq", "request_threaded_irq", "free_irq", "enable_irq", "disable_irq"];
-symbols_by_category(workqueue) ->
-    ["schedule_work", "queue_work"];
-symbols_by_category(timers) ->
-    ["mod_timer", "del_timer", "del_timer_sync"];
-symbols_by_category(dma) ->
-    ["dma_map_single", "dma_unmap_single", "dma_set_mask", "dma_set_coherent_mask"];
-symbols_by_category(network) ->
-    ["alloc_etherdev", "alloc_etherdev_mq", "register_netdev", "unregister_netdev",
-     "netif_start_queue", "netif_stop_queue", "netif_wake_queue",
-     "netif_rx", "napi_schedule", "__napi_schedule", "napi_complete", "napi_complete_done"];
-symbols_by_category(_) ->
-    [].
+%% Dead function removed: symbols_by_category/1 was unused and not exported

@@ -131,7 +131,7 @@
 parse(Binary) ->
     try
         {ok, Header} = parse_elf_header(Binary),
-        {ok, Sections, ShStrTab} = parse_section_headers(Binary, Header),
+        {ok, Sections, _ShStrTab} = parse_section_headers(Binary, Header),
         {ok, Symbols, SymStrTab} = parse_symbols(Binary, Sections),
         {ok, Relocations} = parse_relocations(Binary, Sections, SymStrTab),
 
@@ -198,7 +198,7 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
         %% Apply relocations to each section
         RelocatedSections = lists:map(
             fun(Section) ->
-                SectionAddr = maps:get(Section, SectionAddrs, 0),
+                _SectionAddr = maps:get(Section, SectionAddrs, 0),
                 apply_section_relocations(Section, Relocs, Symbols, Sections, SectionAddrs)
             end,
             Sections
@@ -373,7 +373,7 @@ extract_section_data(Binary, #{offset := Offset, size := Size}) ->
 %% Symbol Table Parsing
 %% ============================================================================
 
-parse_symbols(Binary, Sections) ->
+parse_symbols(_Binary, Sections) ->
     %% Find .symtab section
     case lists:search(fun(#{type := Type}) -> Type =:= symtab end, Sections) of
         {value, SymTabSec} ->
@@ -399,7 +399,7 @@ parse_symbols(Binary, Sections) ->
 
 parse_symbol(SymTabData, Offset, StrTabData) ->
     <<_:Offset/binary,
-      Name:32/little, Info:8, Other:8, Shndx:16/little,
+      Name:32/little, Info:8, _Other:8, Shndx:16/little,
       Value:64/little, Size:64/little, _/binary>> = SymTabData,
 
     Bind = sym_bind(Info bsr 4),
@@ -420,13 +420,13 @@ parse_symbol(SymTabData, Offset, StrTabData) ->
 %% Relocation Parsing
 %% ============================================================================
 
-parse_relocations(Binary, Sections, _StrTab) ->
+parse_relocations(_Binary, Sections, _StrTab) ->
     %% Find all .rela.* sections
     RelaSections = [S || S <- Sections, is_rela_section(maps:get(name, S, <<>>))],
 
     %% Parse each .rela section
     RelocMap = lists:foldl(
-        fun(#{name := Name, data := Data, entsize := EntSize, info := TargetIdx}, Acc) ->
+        fun(#{name := _Name, data := Data, entsize := EntSize, info := TargetIdx}, Acc) ->
             TargetSec = lists:nth(TargetIdx + 1, Sections),
             TargetName = maps:get(name, TargetSec),
 
@@ -538,6 +538,9 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
     %% Patch the data
     patch_data(Data, Offset, Value, Type).
 
+patch_data(Data, _Offset, _Value, 0) ->
+    %% R_X86_64_NONE - no patching needed
+    Data;
 patch_data(Data, Offset, Value, Type) ->
     Width = reloc_width(Type),
     WidthBytes = Width div 8,

@@ -16,7 +16,7 @@
 %%   {label, Name}      — label marker
 %%   {reloc, Type, Sym, Addend} — relocation marker
 -spec lower_function(map(), term()) -> {[term()], term()}.
-lower_function(#{name := Name, body := Body, arity := Arity,
+lower_function(#{name := Name, body := Body, arity := _Arity,
                  spill_slots := SpillSlots} = _Fn, LinkState) ->
     FrameSize = compute_frame_size(SpillSlots),
     Prologue = emit_prologue(FrameSize),
@@ -825,8 +825,8 @@ lower_instruction({map_delete, {preg, Dst}, {preg, Map}, {preg, Key}}, _FnName) 
 lower_instruction({int_to_float, {preg, Dst}, {preg, Src}}, _FnName) ->
     %% CVTSI2SD xmm0, Src; MOVQ Dst, xmm0
     %% For now, emit placeholder NOPs (TODO: proper FPU encoding)
-    SrcCode = ?ENC:reg_code(Src),
-    DstCode = ?ENC:reg_code(Dst),
+    _SrcCode = ?ENC:reg_code(Src),
+    _DstCode = ?ENC:reg_code(Dst),
     %% F2 REX.W 0F 2A /r = CVTSI2SD xmm0, r64
     Rex1 = ?ENC:rex(1, 0, 0, ?ENC:reg_hi(Src)),
     ModRM1 = ?ENC:modrm(2#11, 0, ?ENC:reg_lo(Src)),

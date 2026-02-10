@@ -286,10 +286,12 @@ exception_stubs() ->
 %%      Total must be 10 bytes, so we pad with nop if needed.
 -spec build_exception_stub(non_neg_integer(), boolean()) -> binary().
 build_exception_stub(ExcNum, HasErrorCode) ->
-    %% Common handler is at offset: 34 stubs * 10 bytes = 340
+    %% Common handler comes after all 34 stubs (32 exceptions + timer + generic)
+    %% Each stub is 10 bytes, so total stub block is 34 * 10 = 340 bytes
     %% From this stub (at ExcNum * 10), offset to common handler is:
-    %%   340 - (ExcNum * 10) - 10 (size of this stub)
-    CommonHandlerOffset = 340 - (ExcNum * 10) - 10,
+    %%   (number of remaining stubs * 10) = (34 - ExcNum) * 10 - 10 (size of this stub)
+    %%   Which simplifies to: (33 - ExcNum) * 10
+    CommonHandlerOffset = (33 - ExcNum) * 10,
 
     Base = case HasErrorCode of
         false ->

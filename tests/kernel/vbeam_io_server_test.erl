@@ -1,7 +1,10 @@
 %%% @doc Tests for vbeam_io_server
 -module(vbeam_io_server_test).
 
--export([run_all/0]).
+-export([run_all/0, test/0]).
+
+%% Wrapper for make test-kernel compatibility
+test() -> run_all().
 
 -define(TEST_FB_INFO, #{
     base => 16#B8000,

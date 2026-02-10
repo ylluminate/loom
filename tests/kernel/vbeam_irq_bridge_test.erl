@@ -2,7 +2,10 @@
 %%% @end
 -module(vbeam_irq_bridge_test).
 
--export([run_all/0]).
+-export([run_all/0, test/0]).
+
+%% Wrapper for make test-kernel compatibility
+test() -> run_all().
 
 run_all() ->
     io:format("~n=== IRQ Bridge Tests ===~n~n"),

@@ -193,11 +193,14 @@ isr_ring_buffer_write() ->
         <<16#48, 16#8B, 16#4C, 16#24, 16#18>>,                 % mov rcx, [rsp+24]
         <<16#48, 16#89, 16#0C, 16#10>>,                        % mov [rax+rdx], rcx
 
+        %% Save entry offset to R8 (rdx will be clobbered by rdtsc)
+        <<16#49, 16#89, 16#D0>>,                               % mov r8, rdx
+
         %% Write timestamp (rdtsc)
         <<16#0F, 16#31>>,                                       % rdtsc (edx:eax)
         <<16#48, 16#C1, 16#E2, 16#20>>,                        % shl rdx, 32
         <<16#48, 16#09, 16#C2>>,                               % or rdx, rax
-        <<16#48, 16#89, 16#54, 16#10, 16#08>>,                 % mov [rax+rdx+8], rdx
+        <<16#4A, 16#89, 16#54, 16#00, 16#08>>,                 % mov [rax+r8+8], rdx
 
         %% Increment tail
         <<16#48, 16#8B, 16#50, 16#08>>,                        % mov rdx, [rax+8]

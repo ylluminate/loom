@@ -196,7 +196,7 @@ sys_newfstatat([DirFd, Path, StatBuf, Flags]) ->
     vbeam_vfs:newfstatat(DirFd, Path, StatBuf, Flags).
 
 %% Architecture-specific
-sys_arch_prctl([Code, Addr]) ->
+sys_arch_prctl([Code, _Addr]) ->
     case Code of
         16#1001 -> {ok, 0};  % ARCH_SET_GS
         16#1002 -> {ok, 0};  % ARCH_SET_FS

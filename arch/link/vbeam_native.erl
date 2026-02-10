@@ -110,9 +110,6 @@ do_compile(#{target := Target, format := Format, functions := Functions,
     end.
 
 %% Register-allocate a single function.
-allocate_function(Fn, Target) ->
-    allocate_function(Fn, Target, #{}).
-
 allocate_function(#{body := Body, arity := Arity} = Fn, Target, Opts) ->
     {NewBody, SpillSlots} = vbeam_native_regalloc:allocate(Body, Target, Arity, Opts),
     UsedCallee = vbeam_native_regalloc:used_callee_saved(NewBody, Target),

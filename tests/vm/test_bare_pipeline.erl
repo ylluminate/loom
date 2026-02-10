@@ -1,6 +1,8 @@
 -module(test_bare_pipeline).
 -export([test/0]).
 
+%% Already exports test/0 - Makefile compatible
+
 test() ->
     io:format("~n=== Bare-Metal Pipeline Integration Tests ===~n~n"),
 

@@ -1,4 +1,5 @@
 -module(vbeam_native_regalloc).
+-compile({no_auto_import, [min/2]}).
 
 %% Linear scan register allocator for vbeam native backend.
 %%

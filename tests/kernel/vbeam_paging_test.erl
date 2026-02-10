@@ -1,6 +1,9 @@
 %%% @doc Tests for vbeam_paging module
 -module(vbeam_paging_test).
--export([run_all/0]).
+-export([run_all/0, test/0]).
+
+%% Wrapper for make test-kernel compatibility
+test() -> run_all().
 
 -define(PAGE_SIZE, 4096).
 -define(ENTRIES_PER_TABLE, 512).

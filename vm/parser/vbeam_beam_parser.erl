@@ -178,7 +178,7 @@ parse_atom_list(_, _, Acc) ->
     {lists:reverse(Acc), <<>>}.
 
 %% Parse import table
-parse_imports(Rest, 0, Acc) ->
+parse_imports(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_imports(<<Module:32, Function:32, Arity:32, Rest/binary>>, Count, Acc) ->
     parse_imports(Rest, Count - 1, [{Module, Function, Arity} | Acc]);
@@ -186,7 +186,7 @@ parse_imports(_, _, Acc) ->
     lists:reverse(Acc).
 
 %% Parse export table
-parse_exports(Rest, 0, Acc) ->
+parse_exports(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_exports(<<Function:32, Arity:32, Label:32, Rest/binary>>, Count, Acc) ->
     parse_exports(Rest, Count - 1, [{Function, Arity, Label} | Acc]);
@@ -194,7 +194,7 @@ parse_exports(_, _, Acc) ->
     lists:reverse(Acc).
 
 %% Parse fun table
-parse_funs(Rest, 0, Acc) ->
+parse_funs(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_funs(<<Function:32, Arity:32, CodePos:32, Index:32,
              NumFree:32, OldUniq:32, Rest/binary>>, Count, Acc) ->
@@ -212,7 +212,7 @@ parse_funs(_, _, Acc) ->
 parse_literals(<<Count:32, Rest/binary>>) ->
     parse_literal_list(Rest, Count, []).
 
-parse_literal_list(Rest, 0, Acc) ->
+parse_literal_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_literal_list(<<Size:32, Literal:Size/binary, Rest/binary>>, Count, Acc) ->
     Term = binary_to_term(Literal),

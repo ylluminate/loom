@@ -2,7 +2,10 @@
 %%% @end
 -module(vbeam_gdt_idt_test).
 
--export([run_all/0]).
+-export([run_all/0, test/0]).
+
+%% Wrapper for make test-kernel compatibility
+test() -> run_all().
 
 run_all() ->
     io:format("Running vbeam_gdt_idt tests...~n"),

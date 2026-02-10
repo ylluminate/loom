@@ -4,7 +4,10 @@
 %%% Runs on standard Erlang (not bare metal) for development.
 %%%
 -module(vbeam_page_alloc_test).
--export([run/0]).
+-export([run/0, test/0]).
+
+%% Wrapper for make test-kernel compatibility
+test() -> run().
 
 -define(MB, 1024 * 1024).
 -define(PAGE_SIZE, 4096).

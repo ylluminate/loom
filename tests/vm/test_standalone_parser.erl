@@ -1,6 +1,9 @@
 %% Test for vbeam_beam_standalone parser
 -module(test_standalone_parser).
--export([run/0, test_module/0]).
+-export([run/0, test_module/0, test/0]).
+
+%% Wrapper for make test-vm compatibility
+test() -> run().
 
 %% Simple test module to compile and parse
 test_module() ->
