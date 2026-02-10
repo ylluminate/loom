@@ -540,11 +540,19 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
             %% S + A
             S + A;
         r_x86_64_pc32 ->
-            %% S + A - P
-            (S + A - P) band 16#FFFFFFFF;
+            %% S + A - P (must fit in signed 32-bit)
+            Val32 = S + A - P,
+            case Val32 >= -2147483648 andalso Val32 =< 2147483647 of
+                true -> Val32 band 16#FFFFFFFF;
+                false -> error({reloc_overflow, r_x86_64_pc32, Val32})
+            end;
         r_x86_64_plt32 ->
-            %% L + A - P (for now, treat like PC32)
-            (S + A - P) band 16#FFFFFFFF;
+            %% L + A - P (for now, treat like PC32, must fit in signed 32-bit)
+            Val32 = S + A - P,
+            case Val32 >= -2147483648 andalso Val32 =< 2147483647 of
+                true -> Val32 band 16#FFFFFFFF;
+                false -> error({reloc_overflow, r_x86_64_plt32, Val32})
+            end;
         r_x86_64_32 ->
             %% S + A (zero-extend)
             (S + A) band 16#FFFFFFFF;
@@ -558,7 +566,7 @@ apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := A
     %% Patch the data
     patch_data(Data, Offset, Value, Type).
 
-patch_data(Data, _Offset, _Value, 0) ->
+patch_data(Data, _Offset, _Value, r_x86_64_none) ->
     %% R_X86_64_NONE - no patching needed
     Data;
 patch_data(Data, Offset, Value, Type) ->

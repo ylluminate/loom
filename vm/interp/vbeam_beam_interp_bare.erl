@@ -27,9 +27,11 @@ run(BeamBinary, Function, Args, OutputFun) ->
     case load_module(BeamBinary) of
         {ok, Module} ->
             Arity = length_bare(Args),
-            case get_function_code(Module, Function, Arity) of
+            %% Convert function atom to binary to match parser format
+            FunctionBin = atom_to_binary(Function, utf8),
+            case get_function_code(Module, FunctionBin, Arity) of
                 {ok, Instructions} ->
-                    State = init_state(Module, Function, Arity, Args, Instructions, OutputFun),
+                    State = init_state(Module, FunctionBin, Arity, Args, Instructions, OutputFun),
                     execute(State);
                 {error, Reason} ->
                     {error, Reason}
@@ -509,11 +511,14 @@ handle_local_call(Label, State, IsTailCall) ->
     end.
 
 handle_bif_call(ModIdx, FunIdx, Arity, State, IsTailCall) ->
-    %% Resolve atom indices to actual atoms
+    %% Resolve atom indices to actual names (may be binaries from parser)
     Module = maps:get(module, State),
     Atoms = maps:get(atoms, Module),
-    ModAtom = nth_bare(ModIdx, Atoms),
-    FunAtom = nth_bare(FunIdx, Atoms),
+    ModRaw = nth_bare(ModIdx, Atoms),
+    FunRaw = nth_bare(FunIdx, Atoms),
+    %% Normalize binaries to atoms for BIF dispatch
+    ModAtom = safe_to_atom(ModRaw),
+    FunAtom = safe_to_atom(FunRaw),
 
     %% Get arguments from X registers
     Args = [get_register({x, I}, State) || I <- seq_bare(0, Arity - 1)],
@@ -536,8 +541,8 @@ handle_bif_call(ModIdx, FunIdx, Arity, State, IsTailCall) ->
 
 handle_gc_bif(BifName, Args, Dst, State) ->
     BifAtom = case BifName of
-        {atom, A} -> A;
-        _ -> BifName
+        {atom, A} -> safe_to_atom(A);
+        _ -> safe_to_atom(BifName)
     end,
     ArgValues = [get_value(A, State) || A <- Args],
     case execute_bif(erlang, BifAtom, ArgValues, State) of
@@ -632,8 +637,17 @@ execute_bif(erlang, display, [Arg], State) ->
 %% Fallback for unknown BIFs
 execute_bif(Mod, Fun, Args, State) ->
     OutputFun = maps:get(output_fun, State),
-    Msg = "Unknown BIF: " ++ atom_to_list(Mod) ++ ":" ++
-          atom_to_list(Fun) ++ "/" ++ integer_to_list(length_bare(Args)) ++ "\n",
+    %% Mod and Fun are now binaries (from parser atom table)
+    ModStr = if is_binary(Mod) -> binary_to_list(Mod);
+                is_atom(Mod) -> atom_to_list(Mod);
+                true -> "unknown"
+             end,
+    FunStr = if is_binary(Fun) -> binary_to_list(Fun);
+                is_atom(Fun) -> atom_to_list(Fun);
+                true -> "unknown"
+             end,
+    Msg = "Unknown BIF: " ++ ModStr ++ ":" ++
+          FunStr ++ "/" ++ integer_to_list(length_bare(Args)) ++ "\n",
     OutputFun(Msg),
     {error, {undef, Mod, Fun, length_bare(Args)}}.
 
@@ -798,6 +812,16 @@ reverse_bare_acc([], Acc) ->
     Acc;
 reverse_bare_acc([H | T], Acc) ->
     reverse_bare_acc(T, [H | Acc]).
+
+%% Convert binary or atom to atom for BIF dispatch
+safe_to_atom(A) when is_atom(A) -> A;
+safe_to_atom(B) when is_binary(B) ->
+    try binary_to_existing_atom(B, utf8)
+    catch error:badarg ->
+        try binary_to_existing_atom(B, latin1)
+        catch error:badarg -> binary_to_atom(B, utf8)
+        end
+    end.
 
 nth_bare(_N, []) ->
     undefined;

@@ -116,8 +116,8 @@ boot_data(Config) ->
             <<>>
     end,
 
-    %% Page tables (4GB identity-mapped)
-    PageTablesData = vbeam_paging:page_tables(4),
+    %% Page tables (4GB identity-mapped) with absolute base addresses
+    PageTablesData = vbeam_paging:page_tables(PageTablesBase, 4),
 
     %% Status strings (null-terminated)
     Strings = [
@@ -149,7 +149,7 @@ boot_data_layout(Config) ->
     IDTData = vbeam_gdt_idt:idt_data(ISRStubsBase),
     IDTSize = byte_size(IDTData),
 
-    PageTablesData = vbeam_paging:page_tables(4),
+    PageTablesData = vbeam_paging:page_tables(PageTablesBase, 4),
     PageTablesSize = byte_size(PageTablesData),
 
     %% Calculate padding (same logic as boot_data/1)

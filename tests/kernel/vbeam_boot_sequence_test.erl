@@ -102,12 +102,13 @@ test_page_tables_match() ->
     Layout = vbeam_boot_sequence:boot_data_layout(Config),
 
     #{page_tables_offset := PTOffset, page_tables_size := PTSize} = Layout,
+    #{page_tables_base := PTBase} = Config,
 
     %% Extract page table portion from boot data
     <<_:PTOffset/binary, PTFromBoot:PTSize/binary, _/binary>> = Data,
 
-    %% Compare with direct page table generation
-    PTDirect = vbeam_paging:page_tables(4),
+    %% Compare with direct page table generation using same base
+    PTDirect = vbeam_paging:page_tables(PTBase, 4),
 
     PTFromBoot = PTDirect.
 

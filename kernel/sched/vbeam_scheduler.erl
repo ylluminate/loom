@@ -306,7 +306,11 @@ handle_call({spawn_process, Module, Function}, _From, State) ->
 
                     {reply, {ok, NextPid}, NewState};
 
+                {error, Reason, FailPageAlloc} ->
+                    %% Error already wrapped - don't double-wrap
+                    {reply, {error, Reason}, State#state{page_alloc = FailPageAlloc}};
                 {Error, FailPageAlloc} ->
+                    %% Legacy pattern or unwrapped error
                     {reply, {error, Error}, State#state{page_alloc = FailPageAlloc}}
             end
     end;

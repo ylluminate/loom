@@ -112,18 +112,27 @@ lower_instruction({load_byte, {preg, Dst}, {preg, Base}, Off}, _FnName) ->
     DstLo = ?ENC:reg_lo(Dst),
     BaseLo = ?ENC:reg_lo(Base),
     case {Base, Off} of
+        {rsp, _} when Off >= -128, Off =< 127 ->
+            M = ?ENC:modrm(1, DstLo, 4),
+            [<<Rex:8, 16#0F:8, 16#B6:8, M:8, 16#24:8, Off:8/signed>>];
         {rsp, _} ->
+            M = ?ENC:modrm(2, DstLo, 4),
+            [<<Rex:8, 16#0F:8, 16#B6:8, M:8, 16#24:8, Off:32/little-signed>>];
+        {r12, _} when Off >= -128, Off =< 127 ->
             M = ?ENC:modrm(1, DstLo, 4),
             [<<Rex:8, 16#0F:8, 16#B6:8, M:8, 16#24:8, Off:8/signed>>];
         {r12, _} ->
-            M = ?ENC:modrm(1, DstLo, 4),
-            [<<Rex:8, 16#0F:8, 16#B6:8, M:8, 16#24:8, Off:8/signed>>];
+            M = ?ENC:modrm(2, DstLo, 4),
+            [<<Rex:8, 16#0F:8, 16#B6:8, M:8, 16#24:8, Off:32/little-signed>>];
         {_, 0} when Base =/= rbp, Base =/= r13 ->
             M = ?ENC:modrm(0, DstLo, BaseLo),
             [<<Rex:8, 16#0F:8, 16#B6:8, M:8>>];
-        _ ->
+        {_, Off} when Off >= -128, Off =< 127 ->
             M = ?ENC:modrm(1, DstLo, BaseLo),
-            [<<Rex:8, 16#0F:8, 16#B6:8, M:8, Off:8/signed>>]
+            [<<Rex:8, 16#0F:8, 16#B6:8, M:8, Off:8/signed>>];
+        _ ->
+            M = ?ENC:modrm(2, DstLo, BaseLo),
+            [<<Rex:8, 16#0F:8, 16#B6:8, M:8, Off:32/little-signed>>]
     end;
 
 %% STORE to memory
@@ -139,9 +148,12 @@ lower_instruction({store_byte, {preg, Base}, Off, {preg, Src}}, _FnName) ->
         {_, 0} when Base =/= rbp, Base =/= r13 ->
             M = ?ENC:modrm(0, SrcLo, BaseLo),
             [<<Rex:8, 16#88:8, M:8>>];
-        _ ->
+        {_, Off} when Off >= -128, Off =< 127 ->
             M = ?ENC:modrm(1, SrcLo, BaseLo),
-            [<<Rex:8, 16#88:8, M:8, Off:8/signed>>]
+            [<<Rex:8, 16#88:8, M:8, Off:8/signed>>];
+        _ ->
+            M = ?ENC:modrm(2, SrcLo, BaseLo),
+            [<<Rex:8, 16#88:8, M:8, Off:32/little-signed>>]
     end;
 
 %% ADD
@@ -610,7 +622,7 @@ lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, El
         ?ENC:encode_mov_rr(rcx, r10),
         ?ENC:encode_add_rr(rcx, r9),
         ?ENC:encode_mov_mem_store(rcx, 0, rax),
-        ?ENC:encode_add_imm(r9, 1),
+        ?ENC:encode_add_imm(r9, 8),
         ?ENC:encode_jmp_rel32(0),
         {reloc, rel32, CopyLoopLbl, -4},
         {label, CopyDoneLbl},
@@ -768,7 +780,8 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
 
         {label, CapFullLbl},
         %% FIXME: Map capacity exhausted - should grow/reallocate here
-        %% For now: trap via ud2 (illegal instruction)
+        %% TODO: implement map growth when capacity is reached
+        %% For now: trap via ud2 (illegal instruction) - capacity-full is hard limit
         ?ENC:encode_ud2(),
 
         {label, DoneLbl},
@@ -1171,8 +1184,9 @@ lower_instruction({print_int, {preg, Reg}}, _FnName) ->
 
 %% Catch-all for unhandled instructions
 lower_instruction(Inst, _FnName) ->
-    io:format(standard_error, "warning: unhandled x86_64 instruction: ~p~n", [Inst]),
-    [].
+    io:format(standard_error, "ERROR: unhandled x86_64 instruction: ~p~n", [Inst]),
+    %% Emit ud2 (illegal instruction trap) so it crashes predictably
+    [<<16#0F:8, 16#0B:8>>].
 
 %%====================================================================
 %% Internal helpers
@@ -1195,7 +1209,7 @@ move_args_to_regs_x86([{preg, Reg} | Rest], [ArgReg | ArgRegs]) ->
 move_args_to_regs_x86([{imm, Val} | Rest], [ArgReg | ArgRegs]) ->
     [?ENC:encode_mov_imm64(ArgReg, Val) | move_args_to_regs_x86(Rest, ArgRegs)];
 move_args_to_regs_x86([{stack, Slot} | Rest], [ArgReg | ArgRegs]) ->
-    Offset = 16 + Slot * 8,
+    Offset = -(Slot + 1) * 8,
     [?ENC:encode_mov_mem_load(ArgReg, rbp, Offset) | move_args_to_regs_x86(Rest, ArgRegs)];
 move_args_to_regs_x86([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
     %% Unallocated vreg (dead code or register pressure) — load 0 as fallback

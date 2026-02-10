@@ -217,10 +217,10 @@ lower_instruction({call_indirect, {preg, Reg}}, _FnName, _FS, _Fmt, _UC) ->
 lower_instruction(ret, _FnName, FS, _Fmt, UC) ->
     emit_epilogue(FS, UC);
 
-%% PUSH (ARM64 doesn't have single push — use str + sub sp)
+%% PUSH (ARM64 doesn't have single push — use sub sp then str)
 lower_instruction({push, {preg, Reg}}, _FnName, _FS, _Fmt, _UC) ->
-    [?ENC:encode_str(Reg, sp, -16),  %% pre-decrement
-     ?ENC:encode_sub_imm(sp, sp, 16)];
+    [?ENC:encode_sub_imm(sp, sp, 16),
+     ?ENC:encode_str(Reg, sp, 0)];
 
 %% POP
 lower_instruction({pop, {preg, Reg}}, _FnName, _FS, _Fmt, _UC) ->
@@ -904,7 +904,8 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
 
         {label, CapFullLbl},
         %% FIXME: Map capacity exhausted - should grow/reallocate here
-        %% For now: trap via supervisor call with special immediate
+        %% TODO: implement map growth when capacity is reached
+        %% For now: trap via supervisor call - capacity-full is hard limit
         ?ENC:encode_svc(16#FFFF),                      %% trap: map capacity full
 
         {label, DoneLbl},
@@ -1102,6 +1103,14 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         ?ENC:encode_b_cond(ge, 0),
         {reloc, arm64_cond_branch19, PositiveLbl, -4},
 
+        %% Save sign in x14 (before clobbering Src)
+        ?ENC:encode_cmp_imm(Src, 0),
+        ?ENC:encode_mov_imm64(x14, 0),        %% x14 = 0 (positive)
+        ?ENC:encode_b_cond(ge, 0),
+        {reloc, arm64_cond_branch19, <<"__its_signok_", Uid/binary>>, -4},
+        ?ENC:encode_mov_imm64(x14, 1),        %% x14 = 1 (negative)
+        {label, <<"__its_signok_", Uid/binary>>},
+
         %% Negate value (we'll add '-' at the end)
         ?ENC:encode_neg(x19, x19),
 
@@ -1124,9 +1133,9 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, DivLoopLbl, -4},
 
-        %% If original was negative, prepend '-'
-        ?ENC:encode_cmp_imm(Src, 0),
-        ?ENC:encode_b_cond(ge, 0),
+        %% If original was negative (check saved x14), prepend '-'
+        ?ENC:encode_cmp_imm(x14, 0),
+        ?ENC:encode_b_cond(eq, 0),
         {reloc, arm64_cond_branch19, DoneLbl, -4},
         ?ENC:encode_sub_imm(x20, x20, 1),
         ?ENC:encode_mov_imm64(x9, 45),        %% '-'

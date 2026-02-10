@@ -165,10 +165,18 @@ alloc(#{size := Size, used := Used} = Heap, NumWords, _PageAllocState) ->
             NewHeap = Heap#{used => NewUsed},
             {ok, Offset, NewHeap};
         false ->
-            %% Not enough space
-            case should_grow(Heap) of
-                true -> {need_grow, Heap};
-                false -> {need_gc, Heap}
+            %% Not enough space - decide whether to GC or grow
+            %% If the request wouldn't fit even after perfect GC, must grow
+            case NumBytes > Size of
+                true ->
+                    %% Request larger than entire heap - must grow
+                    {need_grow, Heap};
+                false ->
+                    %% Request could fit if we reclaim space - use utilization heuristic
+                    case should_grow(Heap) of
+                        true -> {need_grow, Heap};
+                        false -> {need_gc, Heap}
+                    end
             end
     end.
 

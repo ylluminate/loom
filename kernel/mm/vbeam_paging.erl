@@ -22,6 +22,7 @@
 -module(vbeam_paging).
 -export([
     page_tables/1,
+    page_tables/2,
     page_tables_size/1,
     load_cr3_code/1,
     enable_paging_code/0,
@@ -33,10 +34,16 @@
 -define(ENTRIES_PER_TABLE, 512).
 
 %%% Flags
--define(FLAG_PRESENT,  16#01).
--define(FLAG_WRITABLE, 16#02).
--define(FLAG_USER,     16#04).
--define(FLAG_PS,       16#80).  %% Page Size bit (for 2MB pages)
+-define(FLAG_PRESENT,       16#01).
+-define(FLAG_WRITABLE,      16#02).
+-define(FLAG_USER,          16#04).
+-define(FLAG_WRITE_THROUGH, 16#08).  %% Bit 3
+-define(FLAG_CACHE_DISABLE, 16#10).  %% Bit 4
+-define(FLAG_ACCESSED,      16#20).  %% Bit 5
+-define(FLAG_DIRTY,         16#40).  %% Bit 6
+-define(FLAG_PS,            16#80).  %% Bit 7: Page Size (for 2MB pages)
+-define(FLAG_GLOBAL,       16#100).  %% Bit 8
+-define(FLAG_NX, 16#8000000000000000). %% Bit 63: No Execute
 
 %%%----------------------------------------------------------------------------
 %%% Public API
@@ -44,19 +51,24 @@
 
 %% @doc Generate complete page table hierarchy for MaxPhysicalGB
 %% Identity-mapped (virtual = physical) using 2MB pages
+%% Uses base address 0 (caller relocates if needed)
 -spec page_tables(pos_integer()) -> binary().
 page_tables(MaxPhysicalGB) when MaxPhysicalGB >= 1, MaxPhysicalGB =< 512 ->
+    page_tables(0, MaxPhysicalGB).
+
+%% @doc Generate page tables with explicit base address
+%% All internal pointers are absolute (Base + offset)
+-spec page_tables(non_neg_integer(), pos_integer()) -> binary().
+page_tables(Base, MaxPhysicalGB) when MaxPhysicalGB >= 1, MaxPhysicalGB =< 512 ->
     %% Calculate how many PD tables we need (one per GB)
     NumPDs = MaxPhysicalGB,
 
-    %% Calculate base addresses (assume tables are laid out contiguously)
-    %% Base is where we'll place these tables in physical memory
-    %% For now, use offset 0 — caller will relocate
-    PML4Base = 0,
+    %% Calculate absolute addresses for each level
+    PML4Base = Base,
     PDPTBase = PML4Base + ?PAGE_SIZE,
     PDBase   = PDPTBase + ?PAGE_SIZE,
 
-    %% Build each level
+    %% Build each level with absolute addresses
     PML4 = build_pml4(PDPTBase),
     PDPT = build_pdpt(PDBase, NumPDs),
     PDs  = build_pds(NumPDs),
@@ -209,8 +221,14 @@ build_pd(GBIndex) ->
 flags_to_bits(Flags) ->
     lists:foldl(fun flag_to_bit/2, 0, Flags).
 
-flag_to_bit(present,  Acc) -> Acc bor ?FLAG_PRESENT;
-flag_to_bit(writable, Acc) -> Acc bor ?FLAG_WRITABLE;
-flag_to_bit(user,     Acc) -> Acc bor ?FLAG_USER;
-flag_to_bit(ps,       Acc) -> Acc bor ?FLAG_PS;
-flag_to_bit(_, Acc)        -> Acc.  %% Ignore unknown flags
+flag_to_bit(present,       Acc) -> Acc bor ?FLAG_PRESENT;
+flag_to_bit(writable,      Acc) -> Acc bor ?FLAG_WRITABLE;
+flag_to_bit(user,          Acc) -> Acc bor ?FLAG_USER;
+flag_to_bit(write_through, Acc) -> Acc bor ?FLAG_WRITE_THROUGH;
+flag_to_bit(cache_disable, Acc) -> Acc bor ?FLAG_CACHE_DISABLE;
+flag_to_bit(accessed,      Acc) -> Acc bor ?FLAG_ACCESSED;
+flag_to_bit(dirty,         Acc) -> Acc bor ?FLAG_DIRTY;
+flag_to_bit(ps,            Acc) -> Acc bor ?FLAG_PS;
+flag_to_bit(global,        Acc) -> Acc bor ?FLAG_GLOBAL;
+flag_to_bit(nx,            Acc) -> Acc bor ?FLAG_NX;
+flag_to_bit(_, Acc)             -> Acc.  %% Ignore unknown flags

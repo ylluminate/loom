@@ -128,8 +128,10 @@ gdt_load_code(GDTBaseAddr) ->
         encode_push_imm32(16#08),
 
         %% lea rax, [rip + reload_segments_label]
-        %% Calculate offset: after this lea (7 bytes) + push rax (1 byte) + retfq (2 bytes) = 10 bytes
-        encode_lea_rip_rel(rax, 10),
+        %% RIP-relative displacement = target - (lea_end_address)
+        %% lea is 7 bytes, push rax is 1 byte, retfq is 2 bytes
+        %% Target is right after retfq, so displacement = 1 + 2 = 3
+        encode_lea_rip_rel(rax, 3),
 
         %% push rax  (return address)
         encode_push(rax),
@@ -297,17 +299,7 @@ build_exception_stub(ExcNum, HasErrorCode) ->
     %% Generic stub: variable size (measure it)
     GenericStubSize = byte_size(build_generic_stub()),
 
-    %% From END of this stub's jmp instruction to common handler start
-    %% This stub is at offset: ExcNum * 10
-    %% This stub ends at: (ExcNum * 10) + 10
-    %% Jmp instruction is the last 5 bytes of stub, so jmp ends at: (ExcNum * 10) + 10
-    %% Common handler starts at: 320 + TimerStubSize + GenericStubSize
-    %% Relative offset from after jmp = target - (current_position + 5)
-    %% Since we're building the jmp and it's at the end, offset is measured from stub end
-    ThisStubEnd = (ExcNum + 1) * 10,
-    CommonHandlerStart = 320 + TimerStubSize + GenericStubSize,
-    CommonHandlerOffset = CommonHandlerStart - ThisStubEnd,
-
+    %% Build stub first to know its actual size
     Base = case HasErrorCode of
         false ->
             %% CPU doesn't push error code, so we push dummy 0
@@ -318,13 +310,25 @@ build_exception_stub(ExcNum, HasErrorCode) ->
             []
     end,
 
-    Stub = iolist_to_binary([
-        Base,
-        %% push exception number (2 bytes: 6A <num>)
-        <<16#6A, ExcNum:8>>,
-        %% jmp rel32 to common handler (5 bytes: E9 <offset>)
-        <<16#E9, CommonHandlerOffset:32/little-signed>>
-    ]),
+    %% push exception number (2 bytes: 6A <num>)
+    PushVector = <<16#6A, ExcNum:8>>,
+
+    %% Calculate jmp displacement BEFORE building jmp instruction
+    %% This stub starts at: ExcNum * 10
+    %% The jmp instruction starts at: (ExcNum * 10) + byte_size(Base) + 2
+    %% The jmp ends at (instruction starts after the jmp): jmp_start + 5
+    %% Common handler starts at: 320 + TimerStubSize + GenericStubSize
+    %% Displacement = target - (jmp_address + 5)
+    ThisStubStart = ExcNum * 10,
+    JmpInsnStart = ThisStubStart + iolist_size(Base) + 2,
+    JmpInsnEnd = JmpInsnStart + 5,
+    CommonHandlerStart = 320 + TimerStubSize + GenericStubSize,
+    Displacement = CommonHandlerStart - JmpInsnEnd,
+
+    %% jmp rel32 to common handler (5 bytes: E9 <offset>)
+    JmpInsn = <<16#E9, Displacement:32/little-signed>>,
+
+    Stub = iolist_to_binary([Base, PushVector, JmpInsn]),
 
     %% Pad to exactly 10 bytes
     PadSize = 10 - byte_size(Stub),
@@ -450,17 +454,40 @@ encode_mov_mem_store(Base, Offset, Src) ->
 encode_mov_mem_imm16(Base, Offset, Imm) ->
     %% mov word [Base+Offset], Imm
     %% Encoding: 66 [REX] C7 /0 iw
+    %% ModR/M for memory indirect:
+    %%   mod=00 (no disp) + rm=base → [base]
+    %%   mod=01 (disp8) + rm=base → [base+disp8]
+    %%   mod=10 (disp32) + rm=base → [base+disp32]
+    %%   EXCEPT: rbp/r13 (rm=101) with mod=00 means disp32, so use mod=01 disp8=0
+    %%   EXCEPT: rsp/r12 (rm=100) requires SIB byte
     Rex = rex(0, 0, 0, reg_hi(Base)),
-    ModRM = modrm(2#11, 0, reg_lo(Base)),
-    case Offset of
-        0 ->
+    BaseRM = reg_lo(Base),
+
+    case {Offset, BaseRM} of
+        {0, 5} ->  %% rbp/r13 special case: mod=00 means disp32, use mod=01 disp8=0
+            ModRM = modrm(2#01, 0, BaseRM),
+            <<16#66, Rex:8, 16#C7, ModRM:8, 0:8, Imm:16/little>>;
+        {0, 4} ->  %% rsp/r12 special case: need SIB
+            ModRM = modrm(2#00, 0, 2#100),
+            SIB = 16#24,  %% base=rsp, index=none
+            <<16#66, Rex:8, 16#C7, ModRM:8, SIB:8, Imm:16/little>>;
+        {0, _} ->  %% Normal case: [base], mod=00
+            ModRM = modrm(2#00, 0, BaseRM),
             <<16#66, Rex:8, 16#C7, ModRM:8, Imm:16/little>>;
-        _ when Offset >= -128, Offset =< 127 ->
-            ModRM2 = modrm(2#01, 0, reg_lo(Base)),
-            <<16#66, Rex:8, 16#C7, ModRM2:8, Offset:8/little-signed, Imm:16/little>>;
-        _ ->
-            ModRM2 = modrm(2#10, 0, reg_lo(Base)),
-            <<16#66, Rex:8, 16#C7, ModRM2:8, Offset:32/little-signed, Imm:16/little>>
+        {Disp, 4} when Disp >= -128, Disp =< 127 ->  %% rsp/r12 with disp8
+            ModRM = modrm(2#01, 0, 2#100),
+            SIB = 16#24,
+            <<16#66, Rex:8, 16#C7, ModRM:8, SIB:8, Disp:8/little-signed, Imm:16/little>>;
+        {Disp, _} when Disp >= -128, Disp =< 127 ->  %% disp8
+            ModRM = modrm(2#01, 0, BaseRM),
+            <<16#66, Rex:8, 16#C7, ModRM:8, Disp:8/little-signed, Imm:16/little>>;
+        {Disp, 4} ->  %% rsp/r12 with disp32
+            ModRM = modrm(2#10, 0, 2#100),
+            SIB = 16#24,
+            <<16#66, Rex:8, 16#C7, ModRM:8, SIB:8, Disp:32/little-signed, Imm:16/little>>;
+        {Disp, _} ->  %% disp32
+            ModRM = modrm(2#10, 0, BaseRM),
+            <<16#66, Rex:8, 16#C7, ModRM:8, Disp:32/little-signed, Imm:16/little>>
     end.
 
 encode_lea_rip_rel(Dst, Offset) ->

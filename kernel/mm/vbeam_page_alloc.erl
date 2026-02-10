@@ -86,16 +86,15 @@ free_page(State, PhysAddr) ->
 
     %% Validate page alignment
     case PhysAddr rem ?PAGE_SIZE of
-        0 -> ok;
-        _ -> error({error, invalid_address})
-    end,
-
-    PageNum = PhysAddr div ?PAGE_SIZE,
-
-    %% Validate page number is within allocator range
-    case PageNum >= 0 andalso PageNum < TotalPages of
-        false -> {error, invalid_address};
-        true -> free_page_checked(State, PageNum)
+        0 ->
+            PageNum = PhysAddr div ?PAGE_SIZE,
+            %% Validate page number is within allocator range
+            case PageNum >= 0 andalso PageNum < TotalPages of
+                false -> {error, invalid_address};
+                true -> free_page_checked(State, PageNum)
+            end;
+        _ ->
+            {error, invalid_address}
     end.
 
 free_page_checked(State, PageNum) ->
@@ -177,7 +176,8 @@ alloc_contiguous(State, Count) ->
 
 %% @doc Mark a range of pages as reserved
 mark_reserved_pages(State, StartPage, EndPage) ->
-    #{bitmap := Bitmap, free_count := FreeCount, total_pages := Total} = State,
+    #{bitmap := Bitmap, free_count := FreeCount, total_pages := Total,
+      reserved_end := OldReservedEnd} = State,
 
     %% Clamp EndPage to valid range
     ClampedEnd = min(EndPage, Total - 1),
@@ -191,9 +191,14 @@ mark_reserved_pages(State, StartPage, EndPage) ->
 
             NumPages = ClampedEnd - StartPage + 1,
             NewBitmap = mark_pages_allocated(Bitmap, StartPage, NumPages),
+
+            %% Update reserved_end to protect all reserved pages
+            NewReservedEnd = max(OldReservedEnd, ClampedEnd),
+
             State#{
                 bitmap := NewBitmap,
-                free_count := FreeCount - FreeInRange
+                free_count := FreeCount - FreeInRange,
+                reserved_end := NewReservedEnd
             }
     end.
 

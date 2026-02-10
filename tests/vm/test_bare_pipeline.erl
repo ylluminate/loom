@@ -70,14 +70,14 @@ test_simple_return() ->
         %% Run with bare-metal interpreter
         Result = vbeam_beam_interp_bare:run(BeamBin, OutputFun),
 
-        %% Verify return value
+        %% Verify return value (atoms are now binaries for safety)
         case Result of
-            {ok, 'Hello from V-on-BEAM on Loom!'} ->
+            {ok, <<"Hello from V-on-BEAM on Loom!">>} ->
                 io:format("\e[32m✓ PASS\e[0m~n"),
                 pass;
             Other ->
                 io:format("\e[31m✗ FAIL\e[0m~n"),
-                io:format("  Expected: {ok, 'Hello from V-on-BEAM on Loom!'}~n"),
+                io:format("  Expected: {ok, <<\"Hello from V-on-BEAM on Loom!\">>}~n"),
                 io:format("  Got: ~p~n", [Other]),
                 fail
         end
@@ -132,9 +132,10 @@ test_io_output_capture() ->
             _ -> true
         end,
 
-        %% Verify return value
+        %% Verify return value (parser may return atoms as binaries)
         ReturnOk = case Result of
             {ok, ok} -> true;
+            {ok, <<"ok">>} -> true;
             _ -> false
         end,
 
@@ -182,9 +183,9 @@ test_standalone_parser() ->
         %% Parse with standalone parser
         {ok, ParsedBeam} = vbeam_beam_standalone:parse_binary(BeamBin),
 
-        %% Verify atoms list contains module name
+        %% Verify atoms list contains module name (atoms stored as binaries for safety)
         Atoms = maps:get(atoms, ParsedBeam),
-        ModuleName = loom_hello,
+        ModuleName = <<"loom_hello">>,
         AtomsOk = lists:member(ModuleName, Atoms),
 
         %% Verify exports are non-empty

@@ -50,23 +50,23 @@ run() ->
             io:format("4. Atoms found: ~p~n", [length(Atoms)]),
             io:format("   First 10 atoms: ~p~n~n", [lists:sublist(Atoms, 10)]),
 
-            %% Verify our module name is there
-            case lists:member(simple_test, Atoms) of
+            %% Verify our module name is there (atoms stored as binaries for safety)
+            case lists:member(<<"simple_test">>, Atoms) of
                 true -> io:format("   ✓ Module name 'simple_test' found~n");
                 false ->
                     io:format("   ✗ ERROR: Module name not found~n"),
                     error(module_name_not_found)
             end,
 
-            %% Verify function names
-            case lists:member(add, Atoms) of
+            %% Verify function names (atoms stored as binaries for safety)
+            case lists:member(<<"add">>, Atoms) of
                 true -> io:format("   ✓ Function 'add' found~n");
                 false ->
                     io:format("   ✗ ERROR: Function 'add' not found~n"),
                     error(function_add_not_found)
             end,
 
-            case lists:member(factorial, Atoms) of
+            case lists:member(<<"factorial">>, Atoms) of
                 true -> io:format("   ✓ Function 'factorial' found~n~n");
                 false ->
                     io:format("   ✗ ERROR: Function 'factorial' not found~n~n"),

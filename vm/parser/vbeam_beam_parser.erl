@@ -195,7 +195,8 @@ parse_atoms(<<Count:32, Rest/binary>>) ->
 parse_atom_list(Rest, 0, Acc) ->
     {lists:reverse(Acc), Rest};
 parse_atom_list(<<Len:8, Atom:Len/binary, Rest/binary>>, Count, Acc) ->
-    parse_atom_list(Rest, Count - 1, [binary_to_atom(Atom, utf8) | Acc]);
+    %% Keep atoms as binaries to avoid exhausting atom table
+    parse_atom_list(Rest, Count - 1, [Atom | Acc]);
 parse_atom_list(_, _, Acc) ->
     {lists:reverse(Acc), <<>>}.
 

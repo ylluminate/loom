@@ -242,8 +242,8 @@ parse_atom_list(Binary, Count, Acc) ->
         {Len, Rest} when Len > 0 ->
             case Rest of
                 <<Atom:Len/binary, Rest2/binary>> ->
-                    AtomName = binary_to_atom(Atom, utf8),
-                    parse_atom_list(Rest2, Count - 1, [AtomName | Acc]);
+                    %% Keep atoms as binaries to avoid exhausting atom table
+                    parse_atom_list(Rest2, Count - 1, [Atom | Acc]);
                 _ ->
                     lists:reverse(Acc)
             end;

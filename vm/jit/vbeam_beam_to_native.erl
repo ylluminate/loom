@@ -75,9 +75,18 @@ serial_puts_code() ->
 
     %% Calculate relative call offset to serial_putchar
     %% serial_puts comes right after serial_putchar in the layout
-    %% At the call instruction (offset 7), we need to call back to serial_putchar
-    %% which is at offset -(SerialPutcharSize + 7)
-    CallOffset = -(SerialPutcharSize + 7),
+    %% The call instruction is 5 bytes (E8 xx xx xx xx)
+    %% Instruction layout before call:
+    %%   +0: lodsb (1 byte)
+    %%   +1: test al,al (2 bytes)
+    %%   +3: jz done (2 bytes)
+    %%   +5: mov bl,al (2 bytes)
+    %%   +7: call rel32 (5 bytes, ends at +12)
+    %% At offset 7, the call instruction starts. It ends at 7+5=12.
+    %% Target is serial_putchar, which is at -(SerialPutcharSize + 7)
+    %% But displacement is from END of call instruction, so from position 12
+    %% Displacement = target - instruction_end = -(SerialPutcharSize + 7) - 5
+    CallOffset = -(SerialPutcharSize + 12),
 
     iolist_to_binary([
         %% loop:
@@ -138,9 +147,14 @@ extract_functions(Instructions) ->
     split_functions(Instructions, [], []).
 
 %% Split instruction list by func_info markers
-split_functions([], _CurrentFun, Acc) ->
+split_functions([], CurrentFun, Acc) ->
+    %% Save final function if exists
+    NewAcc = case CurrentFun of
+        [] -> Acc;
+        _ -> [lists:reverse(CurrentFun) | Acc]
+    end,
     %% Return accumulated functions (in original order)
-    lists:reverse(Acc);
+    lists:reverse(NewAcc);
 
 split_functions([{func_info, [_Mod, _Fun, _Arity]} | Rest], CurrentFun, Acc) ->
     %% New function starts - save previous if exists, start new

@@ -224,22 +224,52 @@ test_exception_stubs_exist() ->
         false -> error({exception_stubs_too_small, expected_min, MinSize, got, byte_size(Stubs)})
     end,
 
-    %% Verify jump displacements in stub stubs
-    %% Each stub: push imm8 (2 bytes) + jmp rel8/rel32 (2 or 5 bytes) = 10 bytes fixed
-    %% For first stub (vector 0) at offset 0, common handler is at 34*10 = 340
-    CommonHandlerOffset = 34 * 10,
+    %% Verify jump displacements in exception stubs
+    %% Timer and generic stubs are variable size, so measure them
+    %% Common handler starts AFTER: 32 exception stubs + timer stub + generic stub
+    TimerStubBinary = build_timer_stub_for_test(),
+    GenericStubBinary = build_generic_stub_for_test(),
+    CommonHandlerOffset = (32 * 10) + byte_size(TimerStubBinary) + byte_size(GenericStubBinary),
 
     %% Check first stub (vector 0) at offset 0
-    <<_Push0:2/binary, JmpOpcode0:8, Displacement0:8/signed, _Rest0/binary>> = Stubs,
-    case JmpOpcode0 of
-        16#EB ->  % jmp rel8
-            ExpectedDisp0 = CommonHandlerOffset - 4,  % 4 = size of stub up to end of jmp
-            case Displacement0 of
-                ExpectedDisp0 -> ok;
-                _ -> error({stub0_jump_mismatch, expected, ExpectedDisp0, got, Displacement0})
+    %% Stub 0 layout: push 0 (2 bytes) + push 0 (2 bytes) + jmp rel32 (5 bytes) + nop (1 byte) = 10 bytes
+    %% Exception 0 has no CPU error code, so pushes dummy 0
+    <<_PushDummy:2/binary, _PushVector:2/binary, JmpOpcode:8, Displacement:32/little-signed, _Pad:1/binary, _RestStubs/binary>> = Stubs,
+
+    case JmpOpcode of
+        16#E9 ->  % jmp rel32
+            %% jmp instruction is at offset 4 (after two push instructions)
+            %% jmp ends at offset 4 + 5 = 9
+            %% Displacement = target - jmp_end = CommonHandlerOffset - 9
+            ExpectedDisp = CommonHandlerOffset - 9,
+            case Displacement of
+                ExpectedDisp -> ok;
+                _ -> error({stub0_jump_mismatch, expected, ExpectedDisp, got, Displacement, common_handler_at, CommonHandlerOffset})
             end;
-        _ -> ok  % If not rel8, might be rel32 - more complex to verify
+        _ ->
+            error({unexpected_jmp_opcode, expected, 16#E9, got, JmpOpcode})
     end.
+
+%% Helper functions to measure stub sizes (duplicated from vbeam_gdt_idt internals)
+build_timer_stub_for_test() ->
+    %% Copy of build_timer_stub logic for testing
+    CounterAddr = 16#7000,
+    iolist_to_binary([
+        <<16#50>>,  % push rax
+        <<16#48, 16#B8, CounterAddr:64/little>>,  % mov rax, CounterAddr
+        <<16#48, 16#FF, 16#00>>,  % inc qword [rax]
+        <<16#B0, 16#20>>,  % mov al, 0x20
+        <<16#E6, 16#20>>,  % out 0x20, al
+        <<16#58>>,  % pop rax
+        <<16#48, 16#CF>>  % iretq
+    ]).
+
+build_generic_stub_for_test() ->
+    %% Copy of build_generic_stub logic
+    iolist_to_binary([
+        <<16#F4>>,  % hlt
+        <<16#EB, 16#FE>>  % jmp -2
+    ]).
 
 test_timer_isr_exists() ->
     %% timer_isr/0 was removed - functionality is in build_timer_stub/0

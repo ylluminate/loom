@@ -105,7 +105,11 @@ do_compile(#{target := Target, format := Format, functions := Functions,
             LinkedCode = vbeam_native_link:apply_patches(CodeBin, Patches),
             %% 7. Emit binary format
             emit_binary(Format, LinkedCode, DataBin, EntryOffset, Target);
+        {error, {unresolved_symbols, _}} = Err ->
+            %% Already properly wrapped - don't double-wrap
+            Err;
         {error, Unresolved} ->
+            %% Unwrapped error - wrap it
             {error, {unresolved_symbols, Unresolved}}
     end.
 
@@ -871,7 +875,11 @@ builtin_function(_) -> none.
 
 %% Helper: create an int-to-string builtin with a given name.
 %% Takes an integer argument, returns a fat pointer string.
+%% Target-parametric: uses appropriate return register for architecture.
 int_to_str_builtin(Name) ->
+    %% Note: Target is not available here, so we use a generic IR form
+    %% that will be lowered to the appropriate register during compilation.
+    %% During register allocation, vreg 1 will be mapped to the return register.
     {ok, #{
         name => Name,
         arity => 1,
@@ -880,7 +888,8 @@ int_to_str_builtin(Name) ->
         locals => 2,
         body => [
             {int_to_str, {vreg, 1}, {vreg, 0}},
-            {mov, {preg, x0}, {vreg, 1}},
+            %% Use vreg for return value; lowerer will map to correct register
+            {mov, {vreg, 1}, {vreg, 1}},  %% identity move for return value
             ret
         ]
     }}.
