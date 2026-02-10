@@ -480,8 +480,12 @@ execute_instr({gc_bif, Operands}, State) when is_list(Operands) ->
             handle_gc_bif(BifName, Args, Dst, State);
         [BifName, _FailLabel, _Live | Rest] ->
             %% Args not in list - take all remaining except last
-            {Args, [Dst]} = split_at_last(Rest),
-            handle_gc_bif(BifName, Args, Dst, State);
+            case split_at_last(Rest) of
+                {Args, [Dst]} ->
+                    handle_gc_bif(BifName, Args, Dst, State);
+                _ ->
+                    {error, {bad_gc_bif_format, Operands}}
+            end;
         _ ->
             {error, {bad_gc_bif_format, Operands}}
     end;

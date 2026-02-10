@@ -91,7 +91,7 @@ restore_callee_saved([Reg | Rest], Offset) ->
 -define(MAX_SCALED_OFFSET, 32760).
 
 emit_stack_load(Dst, Offset) when Offset =< ?MAX_SCALED_OFFSET ->
-    ?ENC:encode_ldr(Dst, x29, Offset);
+    [?ENC:encode_ldr(Dst, x29, Offset)];
 emit_stack_load(Dst, Offset) ->
     %% Large offset: x17 = offset; x17 = x29 + x17; ldr Dst, [x17, #0]
     [?ENC:encode_mov_imm64(x17, Offset),
@@ -99,7 +99,7 @@ emit_stack_load(Dst, Offset) ->
      ?ENC:encode_ldr(Dst, x17, 0)].
 
 emit_stack_store(Src, Offset) when Offset =< ?MAX_SCALED_OFFSET ->
-    ?ENC:encode_str(Src, x29, Offset);
+    [?ENC:encode_str(Src, x29, Offset)];
 emit_stack_store(Src, Offset) ->
     %% Large offset: x17 = offset; x17 = x29 + x17; str Src, [x17, #0]
     [?ENC:encode_mov_imm64(x17, Offset),

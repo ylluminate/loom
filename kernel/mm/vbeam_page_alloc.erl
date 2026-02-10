@@ -148,13 +148,18 @@ free_pages(State, PhysAddrs) ->
 
 %% @doc Mark a physical address range as reserved
 -spec mark_reserved(state(), phys_addr(), phys_addr()) -> state().
-mark_reserved(State, StartAddr, EndAddr) when StartAddr > EndAddr ->
-    %% Invalid range - return state unchanged
-    State;
-mark_reserved(State, StartAddr, EndAddr) ->
-    StartPage = StartAddr div ?PAGE_SIZE,
-    EndPage = EndAddr div ?PAGE_SIZE,
-    mark_reserved_pages(State, StartPage, EndPage).
+mark_reserved(State, StartAddr, EndAddr) when StartAddr >= 0, EndAddr >= 0 ->
+    case StartAddr > EndAddr of
+        true ->
+            %% Invalid range - return state unchanged
+            State;
+        false ->
+            StartPage = StartAddr div ?PAGE_SIZE,
+            EndPage = EndAddr div ?PAGE_SIZE,
+            mark_reserved_pages(State, StartPage, EndPage)
+    end;
+mark_reserved(_, _, _) ->
+    {error, {invalid_address, negative}}.
 
 %% @doc Get allocator statistics
 -spec stats(state()) -> #{atom() => non_neg_integer()}.
@@ -199,21 +204,22 @@ mark_reserved_pages(State, StartPage, EndPage) ->
     #{bitmap := Bitmap, free_count := FreeCount, total_pages := Total,
       reserved_pages := ReservedPages} = State,
 
-    %% Clamp EndPage to valid range
+    %% Clamp StartPage and EndPage to valid ranges
+    ClampedStart = max(0, StartPage),
     ClampedEnd = min(EndPage, Total - 1),
 
     %% If StartPage is beyond total, nothing to do
-    case StartPage >= Total of
+    case ClampedStart >= Total of
         true -> State;
         false ->
             %% Count how many were actually free before marking
-            FreeInRange = count_free_in_range(Bitmap, StartPage, ClampedEnd),
+            FreeInRange = count_free_in_range(Bitmap, ClampedStart, ClampedEnd),
 
-            NumPages = ClampedEnd - StartPage + 1,
-            NewBitmap = mark_pages_allocated(Bitmap, StartPage, NumPages),
+            NumPages = ClampedEnd - ClampedStart + 1,
+            NewBitmap = mark_pages_allocated(Bitmap, ClampedStart, NumPages),
 
             %% Add this range to reserved_pages map
-            NewReservedPages = ReservedPages#{StartPage => ClampedEnd},
+            NewReservedPages = ReservedPages#{ClampedStart => ClampedEnd},
 
             State#{
                 bitmap := NewBitmap,

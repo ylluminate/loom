@@ -984,9 +984,12 @@ builtin_function_impl(_, _) -> none.
 %% Helper: create an int-to-string builtin with a given name.
 %% Takes an integer argument, returns a fat pointer string.
 %% Target-parametric: uses appropriate return register for architecture.
-int_to_str_builtin(Name, _Target) ->
-    %% Note: int_to_str lowering is target-aware and will use the correct
-    %% return register. We use vregs here and let register allocation handle it.
+int_to_str_builtin(Name, Target) ->
+    %% CRITICAL FIX (Round 28, Finding 4): Explicitly move result to return register
+    RetReg = case Target of
+        x86_64 -> rax;
+        arm64 -> x0
+    end,
     {ok, #{
         name => Name,
         arity => 1,
@@ -995,8 +998,8 @@ int_to_str_builtin(Name, _Target) ->
         locals => 2,
         body => [
             {int_to_str, {vreg, 1}, {vreg, 0}},
-            %% Use vreg for return value; lowerer will map to correct register
-            {mov, {vreg, 1}, {vreg, 1}},  %% identity move for return value
+            %% Move result to ABI return register
+            {mov, {preg, RetReg}, {vreg, 1}},
             ret
         ]
     }}.

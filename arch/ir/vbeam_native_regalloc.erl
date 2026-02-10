@@ -339,9 +339,9 @@ spans_call(#interval{start = Start, stop = Stop}, CallPositions) ->
 %% Builtins explicitly mutate them (string__to_upper, get_raw_line), so
 %% saving/restoring them would ROLL BACK heap bumps.
 callee_saved_regs(arm64) ->
-    [x19, x20, x21, x22, x23, x24, x25, x26, x27];  % x28 EXCLUDED
+    [x19, x20, x21, x22, x23, x24, x25, x26];  % x28 EXCLUDED (heap ptr), x27 EXCLUDED (heap end)
 callee_saved_regs(x86_64) ->
-    [rbx, r12, r13, r14].  % r15 EXCLUDED
+    [rbx, r12, r13].  % r15 EXCLUDED (heap ptr), r14 EXCLUDED (heap end)
 
 caller_saved_regs(arm64) ->
     [x0, x1, x2, x3, x4, x5, x6, x7,
@@ -428,17 +428,21 @@ available_regs(x86_64) ->
     %% The x86_64 lowerer uses r11 as implicit scratch for shift/div operations.
     %% Without this exclusion, the allocator freely assigns r11 to live values,
     %% which get silently clobbered by these operations.
+    %% CRITICAL FIX (Round 28, Finding 1): Exclude r14 as heap-end register.
+    %% r14 holds the heap bound for bounds checks; r15 is heap pointer.
     %% Put callee-saved last (prefer caller-saved to minimize saves)
     [rax, rcx, rdx, rsi, rdi, r8, r9, r10,
-     rbx, r12, r13, r14, r15];
+     rbx, r12, r13];
 available_regs(arm64) ->
     %% Exclude x29 (frame pointer), x30 (link register), sp (stack pointer)
     %% Exclude x16, x17 (scratch/IP0/IP1 - used by lowering pseudo-ops)
     %% Exclude x18 (platform register on macOS)
+    %% CRITICAL FIX (Round 28, Finding 1): Exclude x27 as heap-end register.
+    %% x27 holds the heap bound for bounds checks; x28 is heap pointer.
     %% Put callee-saved last
     [x0, x1, x2, x3, x4, x5, x6, x7,
      x8, x9, x10, x11, x12, x13, x14, x15,
-     x19, x20, x21, x22, x23, x24, x25, x26, x27, x28].
+     x19, x20, x21, x22, x23, x24, x25, x26].
 
 %% Available registers excluding the heap pointer register.
 available_regs_no_heap(x86_64) ->
@@ -577,8 +581,9 @@ rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
                 arm64 -> {[x15, x14], x15}
             end,
             %% Assign scratch regs to each spilled vreg
-            LoadAssignments = lists:zip(LoadsNeeded, ScratchRegs),
-            StoreAssignments = lists:zip(StoresNeeded, ScratchRegs),
+            %% CRITICAL FIX (Round 28, Finding 3): Trim scratch list to match spill count
+            LoadAssignments = lists:zip(LoadsNeeded, lists:sublist(ScratchRegs, length(LoadsNeeded))),
+            StoreAssignments = lists:zip(StoresNeeded, lists:sublist(ScratchRegs, length(StoresNeeded))),
             %% Generate loads with assigned scratch regs
             Loads = [{mov, {preg, Scratch}, {stack, Slot}}
                      || {{_V, Slot}, Scratch} <- LoadAssignments],

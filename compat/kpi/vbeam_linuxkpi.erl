@@ -146,7 +146,12 @@ printk(Fmt, Args) ->
     catch
         error:badarg ->
             %% Fallback: Linux format string not compatible with Erlang - output safely
-            io_lib:format("~s ~p", [Fmt, Args])
+            try
+                io_lib:format("~tp ~tp", [Fmt, Args])
+            catch
+                _:_ ->
+                    "[printk: format error]"
+            end
     end,
     logger:notice("[KAPI printk] ~s", [Message]),
     ok.

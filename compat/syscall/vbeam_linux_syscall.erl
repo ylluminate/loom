@@ -39,9 +39,10 @@ dispatch(SyscallNr, Args) when is_integer(SyscallNr), is_list(Args) ->
     try
         dispatch_impl(SyscallNr, Args)
     catch
-        _:_ ->
-            %% Catch all errors to isolate handler failures
-            {error, ?EINVAL}
+        error:function_clause -> {error, ?ENOSYS};
+        error:badarg -> {error, ?EINVAL};
+        error:{invalid_args, _} -> {error, ?EINVAL}
+        %% Let exit/throw/other errors propagate
     end;
 %% FINDING 11 FIX: Fallback clause for malformed dispatch calls
 dispatch(_, _) ->
