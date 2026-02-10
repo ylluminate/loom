@@ -340,20 +340,15 @@ build_exception_stub(ExcNum, HasErrorCode) ->
 %%      Calls the timer handler code (which is separate).
 -spec build_timer_stub() -> binary().
 build_timer_stub() ->
-    %% For now, just increment a counter and iret
-    %% We'll put the counter at a known memory location
-    %% Let's use address 0x7000 (arbitrary low memory)
-    CounterAddr = 16#7000,
+    %% CRITICAL FIX (Round 27, Finding 2): Removed hardcoded counter write to 0x7000.
+    %% That address is not reserved/owned, so periodic timer IRQs were corrupting
+    %% whatever data lived there. The timer stub's job is just to acknowledge the
+    %% interrupt and return. If a counter is needed, it should be at a properly
+    %% reserved address passed as a parameter.
 
     iolist_to_binary([
-        %% push rax
+        %% push rax (save register for EOI sequence)
         encode_push(rax),
-
-        %% mov rax, CounterAddr
-        encode_mov_imm64(rax, CounterAddr),
-
-        %% inc qword [rax]
-        encode_inc_mem64(rax, 0),
 
         %% Send EOI to PIC (out 0x20, 0x20)
         %% mov al, 0x20

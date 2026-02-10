@@ -17,9 +17,13 @@
 %%   {reloc, Type, Sym, Addend} — relocation marker
 -spec lower_function(map(), term()) -> {[term()], term()}.
 lower_function(#{name := Name, body := Body, arity := _Arity,
-                 spill_slots := SpillSlots} = _Fn, LinkState) ->
-    %% Scan body to find which callee-saved registers are actually used
-    UsedCalleeSaved = find_used_callee_saved(Body),
+                 spill_slots := SpillSlots,
+                 used_callee_saved := UsedCalleeSaved} = _Fn, LinkState) ->
+    %% CRITICAL FIX (Round 27, Finding 4): Use the used_callee_saved field computed
+    %% by the register allocator, instead of recomputing with extract_regs/1.
+    %% The extract_regs function is incomplete (misses instruction variants), causing
+    %% some callee-saved registers to not be saved/restored in prologue/epilogue.
+    %% The regalloc already computed this correctly from the allocated body.
     FrameSize = compute_frame_size(SpillSlots, UsedCalleeSaved),
     Prologue = emit_prologue(FrameSize, UsedCalleeSaved),
     %% Thread UsedCalleeSaved through body lowering for ret instruction

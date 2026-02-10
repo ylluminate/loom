@@ -323,8 +323,12 @@ execute_instr({call_only, [_Arity, {f, Label}]}, State) ->
 execute_instr({call_last, [_Arity, {f, Label}, Dealloc]}, State) ->
     %% Apply deallocation before tail call
     Y = maps:get(y, State),
-    NewY = deallocate_stack(unwrap_int(Dealloc), Y),
-    handle_local_call(Label, State#{y => NewY}, true);
+    case deallocate_stack(unwrap_int(Dealloc), Y) of
+        {ok, NewY} ->
+            handle_local_call(Label, State#{y => NewY}, true);
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 %% External calls (BIFs)
 execute_instr({call_ext, Arity, {extfunc_idx, ModIdx, FunIdx, _}}, State) ->
@@ -346,8 +350,12 @@ execute_instr({allocate_zero, [StackNeed, _Live]}, State) ->
 
 execute_instr({deallocate, [N]}, State) ->
     Y = maps:get(y, State),
-    NewY = deallocate_stack(unwrap_int(N), Y),
-    {continue, advance_pc(State#{y => NewY})};
+    case deallocate_stack(unwrap_int(N), Y) of
+        {ok, NewY} ->
+            {continue, advance_pc(State#{y => NewY})};
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 execute_instr({test_heap, [_Need, _Live]}, State) ->
     %% No-op - we use Erlang's heap
@@ -815,17 +823,17 @@ allocate_stack(N, Y) ->
             Y  % Return unchanged on error
     end.
 
-%% FINDING 5 FIX: Validate deallocate bounds before calling nthtail_bare
+%% FINDING 7 FIX: Return {ok, Stack} or {error, Reason} instead of raising error()
 deallocate_stack(N, Y) when is_integer(N), N >= 0 ->
     YLen = length_bare(Y),
     case N =< YLen of
         true ->
-            nthtail_bare(N, Y);
+            {ok, nthtail_bare(N, Y)};
         false ->
-            error({invalid_deallocate, N, YLen})
+            {error, {invalid_deallocate, N, YLen}}
     end;
 deallocate_stack(N, Y) ->
-    error({invalid_deallocate, N, length_bare(Y)}).
+    {error, {invalid_deallocate, N, length_bare(Y)}}.
 
 %% Convert term to string (minimal implementation)
 term_to_string(Atom) when is_atom(Atom) ->

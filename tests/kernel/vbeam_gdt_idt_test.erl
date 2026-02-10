@@ -253,11 +253,9 @@ test_exception_stubs_exist() ->
 %% Helper functions to measure stub sizes (duplicated from vbeam_gdt_idt internals)
 build_timer_stub_for_test() ->
     %% Copy of build_timer_stub logic for testing
-    CounterAddr = 16#7000,
+    %% R27 fix: removed hardcoded counter write to 0x7000
     iolist_to_binary([
         <<16#50>>,  % push rax
-        <<16#48, 16#B8, CounterAddr:64/little>>,  % mov rax, CounterAddr
-        <<16#48, 16#FF, 16#00>>,  % inc qword [rax]
         <<16#B0, 16#20>>,  % mov al, 0x20
         <<16#E6, 16#20>>,  % out 0x20, al
         <<16#58>>,  % pop rax

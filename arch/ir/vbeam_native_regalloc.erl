@@ -347,7 +347,9 @@ caller_saved_regs(arm64) ->
     [x0, x1, x2, x3, x4, x5, x6, x7,
      x8, x9, x10, x11, x12, x13, x14, x15, x16, x17, x18];
 caller_saved_regs(x86_64) ->
-    [rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11].
+    %% CRITICAL FIX (Round 27, Finding 3): r11 excluded from caller-saved list.
+    %% r11 is reserved as scratch for lowerer (shift/div ops), not available for allocation.
+    [rax, rcx, rdx, rsi, rdi, r8, r9, r10].
 
 %% Build available register list with callee-saved first.
 %% When vregs span calls, callee-saved regs should be preferred so the
@@ -422,8 +424,12 @@ insert_param_copies(Body, OrigAssign, NewAssign) ->
 %% checked by the caller (allocate/3 passes the full body).
 available_regs(x86_64) ->
     %% Exclude rsp (stack pointer), rbp (frame pointer)
+    %% CRITICAL FIX (Round 27, Finding 3): Exclude r11 as scratch register.
+    %% The x86_64 lowerer uses r11 as implicit scratch for shift/div operations.
+    %% Without this exclusion, the allocator freely assigns r11 to live values,
+    %% which get silently clobbered by these operations.
     %% Put callee-saved last (prefer caller-saved to minimize saves)
-    [rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11,
+    [rax, rcx, rdx, rsi, rdi, r8, r9, r10,
      rbx, r12, r13, r14, r15];
 available_regs(arm64) ->
     %% Exclude x29 (frame pointer), x30 (link register), sp (stack pointer)

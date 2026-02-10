@@ -138,9 +138,16 @@ dma_free_coherent(_Dev, _Size, Ptr, _DmaHandle) ->
 %% ==================================================================
 
 %% @doc Kernel print - route to BEAM logger
+%% FINDING 6 FIX: Handle Linux-style format strings (%s, %d, etc.) that crash io_lib:format
 printk(Fmt, Args) ->
     %% Don't log this call itself to avoid infinite recursion
-    Message = io_lib:format(Fmt, Args),
+    Message = try
+        io_lib:format(Fmt, Args)
+    catch
+        error:badarg ->
+            %% Fallback: Linux format string not compatible with Erlang - output safely
+            io_lib:format("~s ~p", [Fmt, Args])
+    end,
     logger:notice("[KAPI printk] ~s", [Message]),
     ok.
 
@@ -395,6 +402,7 @@ mod_timer(Timer, ExpiresJiffies) ->
     end.
 
 %% @doc Delete timer
+%% FINDING 9 FIX: Handle both {TRef, Gen} and legacy bare TRef formats
 del_timer(Timer) ->
     log_kapi_call(del_timer, [Timer]),
     %% BUG 7 FIX: Actually cancel the timer
@@ -404,6 +412,15 @@ del_timer(Timer) ->
         {TRef, _Gen} ->
             erlang:cancel_timer(TRef),
             %% LOW FIX: Flush any stale messages from cancelled timer
+            receive
+                {timer_expired, Timer, _OldGen} -> ok
+            after 0 -> ok
+            end,
+            remove_timer_ref(Timer),
+            1; %% Was active, now cancelled
+        TRef when is_reference(TRef) ->
+            %% Legacy bare timer ref (not wrapped in tuple)
+            erlang:cancel_timer(TRef),
             receive
                 {timer_expired, Timer, _OldGen} -> ok
             after 0 -> ok

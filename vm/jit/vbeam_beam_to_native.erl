@@ -345,10 +345,15 @@ translate_opcode_normalized({call_ext, _Arity, {extfunc, Mod, Fun, _A}}, Acc) ->
     <<Acc/binary, Code/binary>>;
 
 translate_opcode_normalized({call_ext_last, _Arity, {extfunc, Mod, Fun, _A}, Dealloc}, Acc) ->
-    %% Tail call - deallocate then call
+    %% Tail call - deallocate then call then ret
+    %% CRITICAL FIX (Round 27, Finding 1): call_ext_last MUST be terminal.
+    %% The external call lowering (translate_external_call) is inline code without ret.
+    %% Since functions are concatenated, falling through executes the next function's bytes.
+    %% Append ret (0xC3) to make this function properly terminal.
     Code1 = translate_opcode_normalized({deallocate, Dealloc}, <<>>),
     Code2 = translate_external_call(Mod, Fun),
-    <<Acc/binary, Code1/binary, Code2/binary>>;
+    Code3 = <<16#C3>>,  % ret
+    <<Acc/binary, Code1/binary, Code2/binary, Code3/binary>>;
 
 translate_opcode_normalized(return, Acc) ->
     %% Return from function

@@ -261,26 +261,38 @@ execute_instr({call_only, Arity, {Module, Function, Arity}}, Proc, _Options) ->
     end;
 
 execute_instr({call_ext, Arity, {extfunc, Mod, Fun, Arity}}, Proc, Options) ->
-    %% Call external function (BIF)
-    Args = [get_register({x, I}, Proc) || I <- lists:seq(0, Arity - 1)],
-    case execute_bif(Mod, Fun, Args, Options) of
-        {ok, Result} ->
-            Proc2 = set_register({x, 0}, Result, Proc),
-            {continue, Proc2#proc{pc = Proc2#proc.pc + 1}};
-        {error, Reason} ->
-            {error, {bif_error, Mod, Fun, Arity, Reason}}
+    %% FINDING 10 FIX: Validate arity before building argument list
+    case is_integer(Arity) andalso Arity >= 0 andalso Arity =< 255 of
+        true ->
+            %% Call external function (BIF)
+            Args = [get_register({x, I}, Proc) || I <- lists:seq(0, Arity - 1)],
+            case execute_bif(Mod, Fun, Args, Options) of
+                {ok, Result} ->
+                    Proc2 = set_register({x, 0}, Result, Proc),
+                    {continue, Proc2#proc{pc = Proc2#proc.pc + 1}};
+                {error, Reason} ->
+                    {error, {bif_error, Mod, Fun, Arity, Reason}}
+            end;
+        false ->
+            {error, {invalid_arity, Arity}}
     end;
 
 execute_instr({call_ext_only, Arity, {extfunc, Mod, Fun, Arity}}, Proc, Options) ->
-    %% Tail call to external function
-    Args = [get_register({x, I}, Proc) || I <- lists:seq(0, Arity - 1)],
-    case execute_bif(Mod, Fun, Args, Options) of
-        {ok, Result} ->
-            %% Put result in x0 and let return instruction handle stack unwinding
-            Proc2 = set_register({x, 0}, Result, Proc),
-            execute_instr(return, Proc2, Options);
-        {error, Reason} ->
-            {error, {bif_error, Mod, Fun, Arity, Reason}}
+    %% FINDING 10 FIX: Validate arity before building argument list
+    case is_integer(Arity) andalso Arity >= 0 andalso Arity =< 255 of
+        true ->
+            %% Tail call to external function
+            Args = [get_register({x, I}, Proc) || I <- lists:seq(0, Arity - 1)],
+            case execute_bif(Mod, Fun, Args, Options) of
+                {ok, Result} ->
+                    %% Put result in x0 and let return instruction handle stack unwinding
+                    Proc2 = set_register({x, 0}, Result, Proc),
+                    execute_instr(return, Proc2, Options);
+                {error, Reason} ->
+                    {error, {bif_error, Mod, Fun, Arity, Reason}}
+            end;
+        false ->
+            {error, {invalid_arity, Arity}}
     end;
 
 execute_instr({allocate, StackNeed, _Live}, Proc, _Options) ->

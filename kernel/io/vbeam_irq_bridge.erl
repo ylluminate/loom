@@ -421,5 +421,8 @@ register_handler_impl(IrqNum, Pid, Handlers, Monitors, State) ->
     MonitorRef = monitor(process, Pid),
     NewHandlers = CleanedHandlers#{IrqNum => Pid},
     NewMonitors = CleanedMonitors#{MonitorRef => IrqNum},
-    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}}.
+    %% FINDING 5 FIX: Reset pending count when replacing handler
+    PendingCounts = State#state.pending_counts,
+    NewPendingCounts = maps:put(IrqNum, 0, PendingCounts),
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts}}.
 
