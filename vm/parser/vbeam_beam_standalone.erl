@@ -96,8 +96,13 @@ parse_chunk(<<Name:4/binary, Size:32, Data:Size/binary, Rest/binary>>) ->
     case Rest of
         <<_:Padding/binary, AlignedRest/binary>> ->
             ChunkName = chunk_id_to_atom(Name),
-            ParsedData = parse_chunk_data(ChunkName, Data),
-            {ok, ChunkName, ParsedData, AlignedRest};
+            %% FINDING 7 FIX: Propagate errors from parse_chunk_data
+            case parse_chunk_data(ChunkName, Data) of
+                {error, Reason} ->
+                    {error, Reason};
+                ParsedData ->
+                    {ok, ChunkName, ParsedData, AlignedRest}
+            end;
         _ ->
             {error, truncated_chunk}
     end;
@@ -141,7 +146,8 @@ parse_chunk_data('Code', Data) ->
               function_count => FunctionCount,
               code => Code};
         _ ->
-            Data
+            %% FINDING 7 FIX: Return error for malformed Code chunk
+            {error, invalid_code_chunk}
     end;
 
 parse_chunk_data('Atom', Data) ->
@@ -440,18 +446,23 @@ build_result(Chunks) ->
     Funs = maps:get('FunT', Chunks, []),
 
     CodeChunk = maps:get('Code', Chunks, #{}),
-    CodeBinary = maps:get(code, CodeChunk, <<>>),
-
-    {ok, #{
-        atoms => Atoms,
-        exports => Exports,
-        imports => Imports,
-        code => CodeBinary,
-        code_info => maps:remove(code, CodeChunk),
-        literals => Literals,
-        strings => Strings,
-        funs => Funs
-    }}.
+    %% FINDING 7 FIX: Validate CodeChunk is a map before accessing
+    case is_map(CodeChunk) of
+        true ->
+            CodeBinary = maps:get(code, CodeChunk, <<>>),
+            {ok, #{
+                atoms => Atoms,
+                exports => Exports,
+                imports => Imports,
+                code => CodeBinary,
+                code_info => maps:remove(code, CodeChunk),
+                literals => Literals,
+                strings => Strings,
+                funs => Funs
+            }};
+        false ->
+            {error, {invalid_code_chunk_format, CodeChunk}}
+    end.
 
 %% ============================================================================
 %% Compact Term Decoder (used in atom table and instruction operands)

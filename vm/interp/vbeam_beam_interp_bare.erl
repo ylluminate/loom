@@ -324,12 +324,18 @@ execute_instr({call_only, [_Arity, {f, Label}]}, State) ->
 
 execute_instr({call_last, [_Arity, {f, Label}, Dealloc]}, State) ->
     %% Apply deallocation before tail call
-    Y = maps:get(y, State),
-    case deallocate_stack(unwrap_int(Dealloc), Y) of
-        {ok, NewY} ->
-            handle_local_call(Label, State#{y => NewY}, true);
+    %% FINDING 13 FIX: Check unwrap_int return
+    case unwrap_int(Dealloc) of
         {error, Reason} ->
-            {error, Reason}
+            {error, Reason};
+        DeallocInt ->
+            Y = maps:get(y, State),
+            case deallocate_stack(DeallocInt, Y) of
+                {ok, NewY} ->
+                    handle_local_call(Label, State#{y => NewY}, true);
+                {error, Reason} ->
+                    {error, Reason}
+            end
     end;
 
 %% External calls (BIFs)
@@ -340,23 +346,39 @@ execute_instr({call_ext_only, Arity, {extfunc_idx, ModIdx, FunIdx, _}}, State) -
     handle_bif_call(ModIdx, FunIdx, Arity, State, true);
 
 %% Stack management (operands are tagged — unwrap to raw integers)
+%% FINDING 13 FIX: Check unwrap_int return and propagate errors
 execute_instr({allocate, [StackNeed, _Live]}, State) ->
-    Y = maps:get(y, State),
-    NewY = allocate_stack(unwrap_int(StackNeed), Y),
-    {continue, advance_pc(State#{y => NewY})};
+    case unwrap_int(StackNeed) of
+        {error, Reason} ->
+            {error, Reason};
+        StackNeedInt ->
+            Y = maps:get(y, State),
+            NewY = allocate_stack(StackNeedInt, Y),
+            {continue, advance_pc(State#{y => NewY})}
+    end;
 
 execute_instr({allocate_zero, [StackNeed, _Live]}, State) ->
-    Y = maps:get(y, State),
-    NewY = allocate_stack(unwrap_int(StackNeed), Y),
-    {continue, advance_pc(State#{y => NewY})};
+    case unwrap_int(StackNeed) of
+        {error, Reason} ->
+            {error, Reason};
+        StackNeedInt ->
+            Y = maps:get(y, State),
+            NewY = allocate_stack(StackNeedInt, Y),
+            {continue, advance_pc(State#{y => NewY})}
+    end;
 
 execute_instr({deallocate, [N]}, State) ->
-    Y = maps:get(y, State),
-    case deallocate_stack(unwrap_int(N), Y) of
-        {ok, NewY} ->
-            {continue, advance_pc(State#{y => NewY})};
+    case unwrap_int(N) of
         {error, Reason} ->
-            {error, Reason}
+            {error, Reason};
+        NInt ->
+            Y = maps:get(y, State),
+            case deallocate_stack(NInt, Y) of
+                {ok, NewY} ->
+                    {continue, advance_pc(State#{y => NewY})};
+                {error, Reason} ->
+                    {error, Reason}
+            end
     end;
 
 execute_instr({test_heap, [_Need, _Live]}, State) ->
@@ -767,9 +789,10 @@ jump_to_label(Label, State) ->
     end.
 
 %% Unwrap tagged integer to raw value
-unwrap_int({integer, N}) -> N;
+%% FINDING 13 FIX: Return {error, ...} for invalid operands instead of silently converting to 0
+unwrap_int({integer, N}) when is_integer(N) -> N;
 unwrap_int(N) when is_integer(N) -> N;
-unwrap_int(_) -> 0.
+unwrap_int(Invalid) -> {error, {invalid_integer_operand, Invalid}}.
 
 %% Get value from source operand
 get_value({x, N}, State) ->

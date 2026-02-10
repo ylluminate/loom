@@ -146,9 +146,14 @@ emit_alloc(arm64, DstReg, N) ->
         end,
     lists:flatten([
         AdvanceCode,
+        %% CRITICAL FIX (Finding 10): Add wraparound check before bounds check
+        %% If new_ptr < old_ptr, unsigned overflow occurred
+        ?ARM64_ENC:encode_cmp_rr(x16, HeapReg),
+        ?ARM64_ENC:encode_b_cond(lo, 0),  % unsigned: new < old
+        {reloc, arm64_cond_branch19, OomLbl, -4},
         %% Bounds check: new_ptr > heap_end?
         ?ARM64_ENC:encode_cmp_rr(x16, HeapEndReg),
-        ?ARM64_ENC:encode_b_cond(le, 0),
+        ?ARM64_ENC:encode_b_cond(ls, 0),  % unsigned: new <= end (FIXED from 'le')
         {reloc, arm64_cond_branch19, OkLbl, -4},
         %% OOM path: trap
         {label, OomLbl},
@@ -168,9 +173,14 @@ emit_alloc(x86_64, DstReg, N) ->
     lists:flatten([
         ?X86_ENC:encode_mov_rr(DstReg, HeapReg),       %% return current ptr
         ?X86_ENC:encode_add_imm(HeapReg, AlignedN),    %% advance heap pointer
+        %% CRITICAL FIX (Finding 10): Add wraparound check before bounds check
+        %% If heap_ptr < dst_reg after add, unsigned overflow occurred
+        ?X86_ENC:encode_cmp_rr(HeapReg, DstReg),
+        ?X86_ENC:encode_jb(0),  % unsigned: new < old
+        {reloc, rel32, OomLbl, -4},
         %% Bounds check: heap_ptr > heap_end?
         ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
-        ?X86_ENC:encode_jle(0),
+        ?X86_ENC:encode_jbe(0),  % FIXED: unsigned below-or-equal
         {reloc, rel32, OkLbl, -4},
         %% OOM path: trap via int3
         {label, OomLbl},
@@ -193,21 +203,22 @@ emit_alloc_reg(arm64, DstReg, SizeReg) ->
     lists:flatten([
         %% Align SizeReg to 8: size = (size + 7) & ~7
         ?ARM64_ENC:encode_add_imm(x16, SizeReg, 7),
-        %% FINDING 2 FIX: Check for overflow after add (x16 < SizeReg means unsigned carry)
+        %% CRITICAL FIX (Finding 4): Use unsigned condition 'lo' (lower-than) instead of 'lt'
+        %% Overflow after add: x16 < SizeReg means unsigned carry
         ?ARM64_ENC:encode_cmp_rr(x16, SizeReg),
-        ?ARM64_ENC:encode_b_cond(lt, 0),
+        ?ARM64_ENC:encode_b_cond(lo, 0),  % unsigned: below (carry set)
         {reloc, arm64_cond_branch19, OverflowLbl, -4},
         ?ARM64_ENC:encode_mov_imm64(x17, -8),         %% ~7 = 0xFFF...F8
         ?ARM64_ENC:encode_and_rrr(x16, x16, x17),     %% x16 = aligned size
         %% Calculate new heap pointer
         ?ARM64_ENC:encode_add_rrr(x17, HeapReg, x16), %% x17 = new_heap_ptr
-        %% FINDING 2 FIX: Check for wraparound (new_ptr < old_ptr)
+        %% CRITICAL FIX (Finding 4): Wraparound check uses unsigned 'lo'
         ?ARM64_ENC:encode_cmp_rr(x17, HeapReg),
-        ?ARM64_ENC:encode_b_cond(lt, 0),
+        ?ARM64_ENC:encode_b_cond(lo, 0),  % unsigned: new_ptr < old_ptr
         {reloc, arm64_cond_branch19, OverflowLbl, -4},
-        %% Bounds check
+        %% CRITICAL FIX (Finding 4): Bounds check uses unsigned 'ls' (lower-or-same)
         ?ARM64_ENC:encode_cmp_rr(x17, HeapEndReg),
-        ?ARM64_ENC:encode_b_cond(le, 0),
+        ?ARM64_ENC:encode_b_cond(ls, 0),  % unsigned: new_ptr <= heap_end
         {reloc, arm64_cond_branch19, OkLbl, -4},
         %% OOM path
         {label, OomLbl},
@@ -223,8 +234,18 @@ emit_alloc_reg(arm64, DstReg, SizeReg) ->
 emit_alloc_reg(x86_64, DstReg, SizeReg) ->
     HeapReg = heap_reg(x86_64),
     HeapEndReg = r14,
-    %% We need a temp; use rax if DstReg isn't rax, else use rcx
-    TmpReg = case DstReg of rax -> rcx; _ -> rax end,
+    %% CRITICAL FIX (Finding 9): Choose temp distinct from both DstReg and SizeReg.
+    %% If temp aliases SizeReg, self-compare disables overflow check.
+    %% Use r11 (reserved scratch) if both DstReg and SizeReg conflict with rax/rcx.
+    TmpReg = case {DstReg, SizeReg} of
+        {rax, rcx} -> r11;  % both taken
+        {rcx, rax} -> r11;  % both taken
+        {rax, _} -> rcx;    % rax taken by dst
+        {_, rax} -> rcx;    % rax taken by size
+        {rcx, _} -> rax;    % rcx taken by dst
+        {_, rcx} -> rax;    % rcx taken by size
+        _ -> rax            % default
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__alloc_reg_x64_ok_", Uid/binary>>,
     OomLbl = <<"__alloc_reg_x64_oom_", Uid/binary>>,
@@ -234,22 +255,23 @@ emit_alloc_reg(x86_64, DstReg, SizeReg) ->
         ?X86_ENC:encode_mov_rr(TmpReg, SizeReg),
         %% Align: tmp = (size + 7) & ~7
         ?X86_ENC:encode_add_imm(TmpReg, 7),
-        %% FINDING 2 FIX: Check for overflow after add (tmp < SizeReg means carry)
+        %% CRITICAL FIX (Finding 4): Use unsigned 'jb' (below) instead of 'jl' (less)
+        %% Overflow after add: tmp < SizeReg means unsigned carry
         ?X86_ENC:encode_cmp_rr(TmpReg, SizeReg),
-        ?X86_ENC:encode_jl(0),
+        ?X86_ENC:encode_jb(0),  % unsigned: below (carry set)
         {reloc, rel32, OverflowLbl, -4},
         encode_and_imm64(TmpReg, -8),
         %% Save current heap pointer in DstReg
         ?X86_ENC:encode_mov_rr(DstReg, HeapReg),
         %% Advance heap pointer
         ?X86_ENC:encode_add_rr(HeapReg, TmpReg),
-        %% FINDING 2 FIX: Check for wraparound (HeapReg < DstReg means overflow)
+        %% CRITICAL FIX (Finding 4): Wraparound check uses unsigned 'jb'
         ?X86_ENC:encode_cmp_rr(HeapReg, DstReg),
-        ?X86_ENC:encode_jl(0),
+        ?X86_ENC:encode_jb(0),  % unsigned: new < old
         {reloc, rel32, OverflowLbl, -4},
-        %% Bounds check
+        %% CRITICAL FIX (Finding 4): Bounds check uses unsigned 'jbe' (below-or-equal)
         ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
-        ?X86_ENC:encode_jle(0),
+        ?X86_ENC:encode_jbe(0),  % unsigned: heap_ptr <= heap_end
         {reloc, rel32, OkLbl, -4},
         %% OOM path
         {label, OomLbl},

@@ -435,10 +435,11 @@ build_common_handler() ->
 
 %% Import from vbeam_native_x86_64 where available, or define locally
 
+%% FINDING 11 FIX: Use unsigned encoding for canonical addresses
 encode_mov_imm64(Reg, Imm) ->
     Rex = rex(1, 0, 0, reg_hi(Reg)),
     Opcode = 16#B8 + reg_lo(Reg),
-    <<Rex:8, Opcode:8, Imm:64/little-signed>>.
+    <<Rex:8, Opcode:8, Imm:64/little-unsigned>>.
 
 encode_mov_mem_load(Dst, Base, Offset) ->
     encode_mem_op(16#8B, Dst, Base, Offset).

@@ -46,11 +46,12 @@
 
 %% @doc Initialize LinuxKPI subsystem (ETS tables, etc.)
 %% BUG 11 FIX: Make init idempotent with try/catch
+%% FINDING 12 FIX: Create protected table (only owner writes)
 init() ->
     try
         case ets:whereis(?TIMER_TABLE) of
             undefined ->
-                ets:new(?TIMER_TABLE, [named_table, public, set]),
+                ets:new(?TIMER_TABLE, [named_table, protected, set]),
                 ok;
             _ ->
                 ok
@@ -591,10 +592,12 @@ remove_timer_ref(Timer) ->
     ok.
 
 %% Prune timer refs where owner process is dead
+%% FINDING 12 FIX: Add is_pid guard to prevent crashes on malformed keys
 prune_dead_timers() ->
     init_timer_storage(),
     AllKeys = ets:match(?TIMER_TABLE, {{'$1', '_'}, '_'}),
-    DeadPids = [Pid || [Pid] <- AllKeys, not is_process_alive(Pid)],
+    %% Filter to only valid PIDs before calling is_process_alive
+    DeadPids = [Pid || [Pid] <- AllKeys, is_pid(Pid), not is_process_alive(Pid)],
     lists:foreach(fun(DeadPid) ->
         ets:match_delete(?TIMER_TABLE, {{DeadPid, '_'}, '_'})
     end, DeadPids),

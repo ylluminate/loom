@@ -397,10 +397,13 @@ reassign_params_for_calls(ParamAssign, Intervals, CallPositions,
 reassign_params([], _FreeCallee, Assign) -> Assign;
 reassign_params([{Vreg, _OldReg} | Rest], [NewReg | FreeRest], Assign) ->
     reassign_params(Rest, FreeRest, maps:put(Vreg, NewReg, Assign));
-reassign_params([{Vreg, _OldReg} | Rest], [], Assign) ->
-    %% No more callee-saved regs — remove the caller-saved assignment
-    %% so linear scan will handle it (likely spilling to stack)
-    reassign_params(Rest, [], maps:remove(Vreg, Assign)).
+reassign_params([{Vreg, OldReg} | Rest], [], Assign) ->
+    %% CRITICAL FIX (Finding 3): When callee-saved regs are exhausted, don't drop
+    %% the param assignment silently. That causes params to get spilled to
+    %% uninitialized stack slots. Instead, keep the original caller-saved assignment
+    %% and let linear scan handle the conflict (will spill and generate entry copy).
+    %% This preserves param liveness from function entry.
+    reassign_params(Rest, [], maps:put(Vreg, OldReg, Assign)).
 
 %% Insert MOV instructions at function entry to copy parameter values
 %% from their original arg registers to their reassigned callee-saved registers.

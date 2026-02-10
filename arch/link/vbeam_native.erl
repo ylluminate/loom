@@ -57,6 +57,28 @@ main(Args) ->
 compile(Module) ->
     compile(Module, #{}).
 
+%% CRITICAL FIX (Finding 1): Scan IR body for direct heap-register usage.
+%% Injected builtins (string_to_upper, get_raw_line) mutate {preg, r15}/{preg, x28}
+%% directly but aren't in needs_heap/1 whitelist. This recursive scan catches them.
+uses_heap_register([], _HeapReg) -> false;
+uses_heap_register([Inst | Rest], HeapReg) ->
+    case mentions_heap_register(Inst, HeapReg) of
+        true -> true;
+        false -> uses_heap_register(Rest, HeapReg)
+    end.
+
+mentions_heap_register(Inst, HeapReg) when is_tuple(Inst) ->
+    lists:any(fun(E) -> is_heap_preg(E, HeapReg) end, tuple_to_list(Inst));
+mentions_heap_register(_, _) -> false.
+
+is_heap_preg({preg, R}, HeapReg) -> R =:= HeapReg;
+is_heap_preg({mem, {preg, R}, _}, HeapReg) -> R =:= HeapReg;
+is_heap_preg(List, HeapReg) when is_list(List) ->
+    lists:any(fun(E) -> is_heap_preg(E, HeapReg) end, List);
+is_heap_preg(Tuple, HeapReg) when is_tuple(Tuple) ->
+    lists:any(fun(E) -> is_heap_preg(E, HeapReg) end, tuple_to_list(Tuple));
+is_heap_preg(_, _) -> false.
+
 -spec compile(vbeam_native_ir:ir_module(), map()) -> {ok, binary()} | {error, term()}.
 compile(Module, _Opts) ->
     case vbeam_native_ir:validate_module(Module) of
@@ -71,8 +93,16 @@ compile(Module, _Opts) ->
 do_compile(#{target := Target, format := Format, functions := Functions,
              data := DataEntries} = _Module) ->
     %% Check if any function needs heap allocation
+    %% CRITICAL FIX (Finding 1): Also scan for direct heap-register usage
+    %% Injected builtins (string_to_upper, get_raw_line) mutate {preg, r15}/{preg, x28}
+    %% directly but aren't in the needs_heap whitelist. Without this scan, alloc_init
+    %% can be skipped → uninitialized heap pointer.
+    HeapReg = vbeam_native_alloc:heap_reg(Target),
     NeedsHeap = lists:any(
-        fun(#{body := Body}) -> vbeam_native_regalloc:needs_heap(Body) end,
+        fun(#{body := Body}) ->
+            vbeam_native_regalloc:needs_heap(Body) orelse
+            uses_heap_register(Body, HeapReg)
+        end,
         Functions),
 
     %% 1. Register allocate each function (reserve heap reg if needed)

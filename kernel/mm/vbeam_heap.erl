@@ -154,8 +154,10 @@ shrink_heap(#{pages := Pages, used := Used} = Heap, PageAllocState) ->
 -spec alloc(heap(), pos_integer(), alloc_state()) ->
     {ok, non_neg_integer(), heap()} |
     {need_gc, heap()} |
-    {need_grow, heap()}.
-alloc(#{size := Size, used := Used} = Heap, NumWords, _PageAllocState) ->
+    {need_grow, heap()} |
+    {error, term()}.
+alloc(#{size := Size, used := Used} = Heap, NumWords, _PageAllocState)
+        when is_integer(NumWords), NumWords > 0 ->
     NumBytes = NumWords * ?WORD_SIZE,
     NewUsed = Used + NumBytes,
 
@@ -178,7 +180,10 @@ alloc(#{size := Size, used := Used} = Heap, NumWords, _PageAllocState) ->
                         false -> {need_gc, Heap}
                     end
             end
-    end.
+    end;
+alloc(_Heap, NumWords, _PageAllocState) ->
+    %% Invalid NumWords (non-positive or non-integer)
+    {error, invalid_alloc_size}.
 
 %% @doc Update used counter after GC (marks new watermark)
 -spec mark_used(heap(), non_neg_integer()) -> heap().

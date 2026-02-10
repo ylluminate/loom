@@ -63,6 +63,10 @@
 -define(SYM_SIZE, 24).
 -define(RELA_SIZE, 24).
 
+%% Security limits
+-define(MAX_SECTION_SIZE, 256 * 1024 * 1024).  % 256MB per section
+-define(MAX_TOTAL_NOBITS, 512 * 1024 * 1024).  % 512MB total .bss allocation
+
 %% ============================================================================
 %% Types
 %% ============================================================================
@@ -388,24 +392,17 @@ parse_elf_header(_) ->
 parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShStrNdx}) ->
     %% BUG 3 FIX: Validate shnum to prevent memory exhaustion
     MaxShNum = 65536,
-    ShNum > MaxShNum andalso error({shnum_too_large, ShNum, max, MaxShNum}),
-    
-    %% Validate that section headers fit within the binary
-    RequiredSize = ShOff + (ShNum * ?SHDR_SIZE),
-    RequiredSize > byte_size(Binary) andalso error({section_headers_out_of_bounds, ShOff, ShNum, binary_size, byte_size(Binary)}),
-
-    %% BUG 3 FIX: Validate shnum to prevent memory exhaustion
-    MaxShNum = 65536,
     case ShNum of
         N when N > MaxShNum ->
             error({shnum_too_large, N, max, MaxShNum});
         _ ->
             ok
     end,
-    
+
     %% Validate that section headers fit within the binary
-    case ShOff + (ShNum * ?SHDR_SIZE) of
-        RequiredSize when RequiredSize > byte_size(Binary) ->
+    RequiredSize = ShOff + (ShNum * ?SHDR_SIZE),
+    case RequiredSize of
+        Size when Size > byte_size(Binary) ->
             error({section_headers_out_of_bounds, ShOff, ShNum, binary_size, byte_size(Binary)});
         _ ->
             ok
@@ -429,6 +426,21 @@ parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShSt
         (resolve_section_name(Hdr, ShStrTabData, Binary))#{section_index => I}
         || {I, Hdr} <- lists:zip(lists:seq(0, ShNum - 1), SectionHeaders)
     ],
+
+    %% FINDING 8 FIX: Track cumulative NOBITS allocation to enforce total cap
+    TotalNobitsSize = lists:foldl(
+        fun(#{type := nobits, size := Size}, Acc) -> Acc + Size;
+           (_, Acc) -> Acc
+        end,
+        0,
+        Sections
+    ),
+    case TotalNobitsSize > ?MAX_TOTAL_NOBITS of
+        true ->
+            error({total_nobits_too_large, TotalNobitsSize, max, ?MAX_TOTAL_NOBITS});
+        false ->
+            ok
+    end,
 
     {ok, Sections, ShStrTabData}.
 
@@ -457,11 +469,10 @@ resolve_section_name(#{name_offset := NameOff} = Hdr, ShStrTab, Binary) ->
     Data = extract_section_data(Binary, Hdr),
     Hdr#{name => Name, data => Data}.
 
-%% CRITICAL FIX (Finding #7): Cap .bss section size to prevent OOM from crafted ELF
--define(MAX_SECTION_SIZE, 256 * 1024 * 1024).  % 256MB
-
+%% FINDING 8 FIX: Check per-section and cumulative NOBITS size limits
 extract_section_data(_Binary, #{type := nobits, size := Size}) when Size =< ?MAX_SECTION_SIZE ->
     %% HIGH FIX: SHT_NOBITS sections (.bss) need allocated zeroed memory
+    %% FINDING 8 FIX: Caller must track cumulative NOBITS allocation
     <<0:(Size*8)>>;
 extract_section_data(_Binary, #{type := nobits, size := Size}) ->
     %% Size exceeds maximum - error instead of OOM

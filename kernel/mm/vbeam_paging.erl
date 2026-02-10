@@ -92,19 +92,25 @@ page_tables_size(MaxPhysicalGB) when MaxPhysicalGB > 0 ->
 %%   3. Returns
 -spec load_cr3_code(non_neg_integer()) -> binary() | {error, term()}.
 load_cr3_code(PageTableAddr) ->
-    %% FINDING 8 FIX: Validate CR3 is 4KB-aligned (bits 0-11 must be zero)
+    %% Validate CR3 is 4KB-aligned (bits 0-11 must be zero)
     case (PageTableAddr band 16#FFF) =:= 0 of
-        true ->
-            iolist_to_binary([
-                %% mov rax, imm64 (48 B8 followed by 8-byte address)
-                <<16#48, 16#B8, PageTableAddr:64/little>>,
-                %% mov cr3, rax (0F 22 D8)
-                <<16#0F, 16#22, 16#D8>>,
-                %% ret
-                <<16#C3>>
-            ]);
         false ->
-            {error, {misaligned_cr3, PageTableAddr}}
+            {error, {misaligned_cr3, PageTableAddr}};
+        true ->
+            %% FINDING 5 FIX: Validate reserved high bits (bits 52-63 must be zero)
+            case (PageTableAddr band bnot(16#000FFFFFFFFFF000)) =/= 0 of
+                true ->
+                    {error, {invalid_cr3_bits, PageTableAddr}};
+                false ->
+                    iolist_to_binary([
+                        %% mov rax, imm64 (48 B8 followed by 8-byte address)
+                        <<16#48, 16#B8, PageTableAddr:64/little>>,
+                        %% mov cr3, rax (0F 22 D8)
+                        <<16#0F, 16#22, 16#D8>>,
+                        %% ret
+                        <<16#C3>>
+                    ])
+            end
     end.
 
 %% @doc Generate x86_64 machine code to enable/verify paging
@@ -133,6 +139,16 @@ page_table_entry(PhysAddr, Flags, Level) ->
     case UnknownFlags of
         [] -> ok;
         _ -> error({unknown_flags, UnknownFlags})
+    end,
+
+    %% FINDING 6 FIX: Reject 'ps' flag unless level is 'pd'
+    case {Level, lists:member(ps, Flags)} of
+        {pd, _} ->
+            ok;  %% 'ps' allowed at pd level
+        {_, false} ->
+            ok;  %% No 'ps' flag at non-pd level
+        {NonPdLevel, true} ->
+            error({ps_flag_invalid_at_level, NonPdLevel})
     end,
 
     %% Validate alignment: 2MB for 2MB pages, 4KB for others
