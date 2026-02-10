@@ -360,11 +360,10 @@ reassign_params_for_calls(ParamAssign, Intervals, CallPositions,
 reassign_params([], _FreeCallee, Assign) -> Assign;
 reassign_params([{Vreg, _OldReg} | Rest], [NewReg | FreeRest], Assign) ->
     reassign_params(Rest, FreeRest, maps:put(Vreg, NewReg, Assign));
-reassign_params([{_Vreg, _OldReg} | _Rest], [], _Assign) ->
-    %% No more callee-saved regs — would need to spill.
-    %% For now, leave as-is (the value will be wrong across calls).
-    %% A full implementation would spill to stack here.
-    _Assign.
+reassign_params([{Vreg, _OldReg} | Rest], [], Assign) ->
+    %% No more callee-saved regs — remove the caller-saved assignment
+    %% so linear scan will handle it (likely spilling to stack)
+    reassign_params(Rest, [], maps:remove(Vreg, Assign)).
 
 %% Insert MOV instructions at function entry to copy parameter values
 %% from their original arg registers to their reassigned callee-saved registers.

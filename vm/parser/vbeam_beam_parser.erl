@@ -5,6 +5,9 @@
 -module(vbeam_beam_parser).
 -export([parse_file/1, parse_beam/1]).
 
+%% SECURITY: Maximum decompressed LitT size (64MB)
+-define(MAX_LITT_SIZE, 64 * 1024 * 1024).
+
 %% Parse a .beam file from disk
 parse_file(Path) ->
     case file:read_file(Path) of
@@ -137,15 +140,24 @@ parse_chunk_data('FunT', Data) ->
 
 parse_chunk_data('LitT', Data) ->
     %% Literal table - compressed with zlib
+    %% SECURITY: Limit decompressed size to 64MB to prevent memory exhaustion
     case Data of
-        <<UncompressedSize:32, Compressed/binary>> ->
+        <<UncompressedSize:32, Compressed/binary>> when UncompressedSize =< ?MAX_LITT_SIZE ->
             case catch zlib:uncompress(Compressed) of
                 Uncompressed when is_binary(Uncompressed) ->
-                    parse_literals(Uncompressed);
+                    %% Verify decompressed size matches declared size
+                    case byte_size(Uncompressed) of
+                        UncompressedSize ->
+                            parse_literals(Uncompressed);
+                        ActualSize ->
+                            {error, {litt_size_mismatch, declared, UncompressedSize, actual, ActualSize}}
+                    end;
                 _ ->
                     #{uncompressed_size => UncompressedSize,
                       compressed => Compressed}
             end;
+        <<UncompressedSize:32, _/binary>> ->
+            {error, {litt_too_large, UncompressedSize, max, ?MAX_LITT_SIZE}};
         _ ->
             Data
     end;

@@ -575,16 +575,38 @@ encode_test_al_imm(Imm) ->
 encode_inc_mem64(Base, Offset) ->
     %% inc qword [Base+Offset]: REX.W FF /0
     Rex = rex(1, 0, 0, reg_hi(Base)),
-    case Offset of
-        0 ->
-            ModRM = modrm(2#00, 0, reg_lo(Base)),
+    BaseRM = reg_lo(Base),
+    case {Offset, BaseRM} of
+        %% rbp/r13 (rm=5) at offset 0 requires disp8 to avoid meaning disp32
+        {0, 5} ->
+            ModRM = modrm(2#01, 0, BaseRM),
+            <<Rex:8, 16#FF, ModRM:8, 0:8>>;
+        %% rsp/r12 (rm=4) requires SIB byte
+        {0, 4} ->
+            ModRM = modrm(2#00, 0, 2#100),
+            SIB = 16#24,  %% base=rsp/r12, index=none
+            <<Rex:8, 16#FF, ModRM:8, SIB:8>>;
+        {0, _} ->
+            ModRM = modrm(2#00, 0, BaseRM),
             <<Rex:8, 16#FF, ModRM:8>>;
-        _ when Offset >= -128, Offset =< 127 ->
-            ModRM = modrm(2#01, 0, reg_lo(Base)),
-            <<Rex:8, 16#FF, ModRM:8, Offset:8/little-signed>>;
-        _ ->
-            ModRM = modrm(2#10, 0, reg_lo(Base)),
-            <<Rex:8, 16#FF, ModRM:8, Offset:32/little-signed>>
+        %% rsp/r12 with disp8
+        {Disp, 4} when Disp >= -128, Disp =< 127 ->
+            ModRM = modrm(2#01, 0, 2#100),
+            SIB = 16#24,
+            <<Rex:8, 16#FF, ModRM:8, SIB:8, Disp:8/little-signed>>;
+        %% Other registers with disp8
+        {Disp, _} when Disp >= -128, Disp =< 127 ->
+            ModRM = modrm(2#01, 0, BaseRM),
+            <<Rex:8, 16#FF, ModRM:8, Disp:8/little-signed>>;
+        %% rsp/r12 with disp32
+        {Disp, 4} ->
+            ModRM = modrm(2#10, 0, 2#100),
+            SIB = 16#24,
+            <<Rex:8, 16#FF, ModRM:8, SIB:8, Disp:32/little-signed>>;
+        %% Other registers with disp32
+        {Disp, _} ->
+            ModRM = modrm(2#10, 0, BaseRM),
+            <<Rex:8, 16#FF, ModRM:8, Disp:32/little-signed>>
     end.
 
 encode_inb_dx() ->

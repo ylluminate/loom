@@ -177,18 +177,19 @@ resolve_symbols(#{symbols := Symbols} = ElfInfo, SymbolTable) ->
     {ok, binary()} | {error, term()}.
 apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Relocs} = _ElfInfo, BaseAddr) ->
     try
-        %% Build section address map by section index
+        %% Build section address map by section index (integer), not full map
         %% We need to assign addresses to each allocated section
         {SectionAddrs, _NextAddr} = lists:foldl(
             fun(Section, {AddrMap, Addr}) ->
+                SectionIdx = maps:get(section_index, Section),
                 case maps:get(flags, Section, 0) band ?SHF_ALLOC of
                     0 ->
                         %% Not allocated
                         {AddrMap, Addr};
                     _ ->
-                        %% Allocate this section
+                        %% Allocate this section - key by section_index
                         Size = maps:get(size, Section, 0),
-                        {AddrMap#{Section => Addr}, align(Addr + Size, 16)}
+                        {AddrMap#{SectionIdx => Addr}, align(Addr + Size, 16)}
                 end
             end,
             {#{}, BaseAddr},
@@ -198,7 +199,6 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
         %% Apply relocations to each section
         RelocatedSections = lists:map(
             fun(Section) ->
-                _SectionAddr = maps:get(Section, SectionAddrs, 0),
                 apply_section_relocations(Section, Relocs, Symbols, Sections, SectionAddrs)
             end,
             Sections
@@ -207,6 +207,7 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
         %% Concatenate all allocated sections WITH ALIGNMENT PADDING
         {Code, _FinalOffset} = lists:foldl(
             fun(S, {Acc, CurrentOffset}) ->
+                SectionIdx = maps:get(section_index, S),
                 case maps:get(flags, S, 0) band ?SHF_ALLOC of
                     0 ->
                         %% Not allocated, skip
@@ -215,7 +216,7 @@ apply_relocations(#{sections := Sections, symbols := Symbols, relocations := Rel
                         %% Get section data and target address
                         SectionData = maps:get(data, S, <<>>),
                         SectionSize = byte_size(SectionData),
-                        TargetAddr = maps:get(S, SectionAddrs, 0),
+                        TargetAddr = maps:get(SectionIdx, SectionAddrs, 0),
 
                         %% Calculate padding needed to match aligned virtual address
                         Padding = max(0, (TargetAddr - BaseAddr) - CurrentOffset),
@@ -347,13 +348,13 @@ parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShSt
     ],
 
     %% Get the .shstrtab section
-    ShStrTabHdr = lists:nth(ShStrNdx + 1, SectionHeaders),
+    ShStrTabHdr = safe_nth(ShStrNdx + 1, SectionHeaders),
     ShStrTabData = extract_section_data(Binary, ShStrTabHdr),
 
-    %% Resolve section names
+    %% Resolve section names and add section index
     Sections = [
-        resolve_section_name(Hdr, ShStrTabData, Binary)
-        || Hdr <- SectionHeaders
+        (resolve_section_name(Hdr, ShStrTabData, Binary))#{section_index => I}
+        || {I, Hdr} <- lists:zip(lists:seq(0, ShNum - 1), SectionHeaders)
     ],
 
     {ok, Sections, ShStrTabData}.
@@ -399,20 +400,27 @@ parse_symbols(_Binary, Sections) ->
         {value, SymTabSec} ->
             %% Find .strtab section (linked from .symtab)
             #{link := StrTabIdx, data := SymTabData, entsize := EntSize} = SymTabSec,
-            StrTabSec = lists:nth(StrTabIdx + 1, Sections),
-            #{data := StrTabData} = StrTabSec,
 
-            %% Parse symbol entries
-            NumSyms = byte_size(SymTabData) div EntSize,
-            Symbols = [
-                parse_symbol(SymTabData, I * ?SYM_SIZE, StrTabData)
-                || I <- lists:seq(0, NumSyms - 1)
-            ],
+            %% Validate EntSize before using as divisor
+            case EntSize of
+                E when E > 0, E =:= ?SYM_SIZE ->
+                    StrTabSec = safe_nth(StrTabIdx + 1, Sections),
+                    #{data := StrTabData} = StrTabSec,
 
-            %% Build string table map
-            StrTab = build_string_table(StrTabData),
+                    %% Parse symbol entries
+                    NumSyms = byte_size(SymTabData) div EntSize,
+                    Symbols = [
+                        parse_symbol(SymTabData, I * ?SYM_SIZE, StrTabData)
+                        || I <- lists:seq(0, NumSyms - 1)
+                    ],
 
-            {ok, Symbols, StrTab};
+                    %% Build string table map
+                    StrTab = build_string_table(StrTabData),
+
+                    {ok, Symbols, StrTab};
+                _ ->
+                    error({invalid_entsize, symtab, EntSize, expected, ?SYM_SIZE})
+            end;
         false ->
             {ok, [], #{}}
     end.
@@ -447,7 +455,7 @@ parse_relocations(_Binary, Sections, _StrTab) ->
     %% Parse each .rela section
     RelocMap = lists:foldl(
         fun(#{name := _Name, data := Data, entsize := EntSize, info := TargetIdx}, Acc) ->
-            TargetSec = lists:nth(TargetIdx + 1, Sections),
+            TargetSec = safe_nth(TargetIdx + 1, Sections),
             TargetName = maps:get(name, TargetSec),
 
             NumRelas = byte_size(Data) div EntSize,
@@ -506,10 +514,11 @@ resolve_symbol(Sym, _SymbolTable) ->
 
 apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) ->
     Name = maps:get(name, Section),
+    SectionIdx = maps:get(section_index, Section),
     case maps:find(Name, Relocs) of
         {ok, RelocList} ->
             Data = maps:get(data, Section),
-            SectionAddr = maps:get(Section, SectionAddrs, 0),
+            SectionAddr = maps:get(SectionIdx, SectionAddrs, 0),
 
             RelocatedData = lists:foldl(
                 fun(Reloc, Acc) ->
@@ -527,7 +536,7 @@ apply_section_relocations(Section, Relocs, Symbols, AllSections, SectionAddrs) -
 apply_relocation(#{offset := Offset, type := Type, symbol := SymIdx, addend := Addend},
                  Data, Symbols, AllSections, SectionAddrs, CurrentSectionAddr) ->
     %% Get symbol address
-    Sym = lists:nth(SymIdx + 1, Symbols),
+    Sym = safe_nth(SymIdx + 1, Symbols),
     SymAddr = calculate_symbol_address(Sym, AllSections, SectionAddrs),
 
     %% Calculate relocation value
@@ -621,10 +630,9 @@ calculate_symbol_address(#{shndx := ?SHN_UNDEF}, _AllSections, _SectionAddrs) ->
 calculate_symbol_address(#{shndx := ?SHN_ABS, value := Value}, _AllSections, _SectionAddrs) ->
     %% Absolute symbol
     Value;
-calculate_symbol_address(#{shndx := Shndx, value := Value}, AllSections, SectionAddrs) when Shndx > 0 ->
-    %% Section-relative symbol - look up the section by index
-    TargetSection = lists:nth(Shndx + 1, AllSections),
-    SectionAddr = maps:get(TargetSection, SectionAddrs, 0),
+calculate_symbol_address(#{shndx := Shndx, value := Value}, _AllSections, SectionAddrs) when Shndx > 0 ->
+    %% Section-relative symbol - look up the section address by Shndx (which IS the section_index)
+    SectionAddr = maps:get(Shndx, SectionAddrs, 0),
     SectionAddr + Value;
 calculate_symbol_address(_Sym, _AllSections, _SectionAddrs) ->
     0.
@@ -632,6 +640,12 @@ calculate_symbol_address(_Sym, _AllSections, _SectionAddrs) ->
 %% ============================================================================
 %% Helper Functions
 %% ============================================================================
+
+%% Safe list nth with bounds checking
+safe_nth(N, List) when N > 0, N =< length(List) ->
+    lists:nth(N, List);
+safe_nth(N, List) ->
+    error({list_index_out_of_bounds, N, length(List)}).
 
 find_init_addr(#{symbols := Symbols}, BaseAddr) ->
     case lists:search(

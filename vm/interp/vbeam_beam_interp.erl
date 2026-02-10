@@ -176,12 +176,16 @@ decode_and_execute(#proc{code = Code, pc = PC} = Proc, Options) ->
 
         {call, _Arity, Label, NextPC} ->
             %% Call function at Label
-            TargetPC = maps:get(Label, Proc#proc.labels, 0),
-            Proc2 = Proc#proc{
-                pc = TargetPC,
-                stack = [NextPC | Proc#proc.stack]
-            },
-            {continue, Proc2};
+            case maps:find(Label, Proc#proc.labels) of
+                {ok, TargetPC} ->
+                    Proc2 = Proc#proc{
+                        pc = TargetPC,
+                        stack = [NextPC | Proc#proc.stack]
+                    },
+                    {continue, Proc2};
+                error ->
+                    {error, {label_not_found, Label}}
+            end;
 
         {call_ext, Arity, Import, NextPC} ->
             %% Call external function
@@ -311,8 +315,8 @@ decode_opcode(Op, _Rest, PC) ->
 %% Returns {Value, Rest2} where Rest2 is remaining bytes
 decode_int(<<Value:8, Rest2/binary>>, PC) ->
     {Value, Rest2, PC + 1};
-decode_int(Rest, PC) ->
-    {0, Rest, PC}.
+decode_int(_Rest, _PC) ->
+    {error, truncated_operand}.
 
 %% Decode argument (register, literal, etc.)
 %% Returns {Arg, Rest2} where Rest2 is remaining bytes
@@ -326,8 +330,8 @@ decode_arg(<<Tag:4, Value:4, Rest2/binary>>, PC) ->
         _ -> {unknown, Value}
     end,
     {Arg, Rest2, PC + 1};
-decode_arg(Rest, PC) ->
-    {{x, 0}, Rest, PC}.
+decode_arg(_Rest, _PC) ->
+    {error, truncated_operand}.
 
 %% Get value from source
 get_value({x, N}, #proc{x = X}) ->

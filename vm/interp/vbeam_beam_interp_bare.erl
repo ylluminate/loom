@@ -306,8 +306,11 @@ execute_instr({call, [_Arity, {f, Label}]}, State) ->
 execute_instr({call_only, [_Arity, {f, Label}]}, State) ->
     handle_local_call(Label, State, true);
 
-execute_instr({call_last, [_Arity, {f, Label}, _Dealloc]}, State) ->
-    handle_local_call(Label, State, true);
+execute_instr({call_last, [_Arity, {f, Label}, Dealloc]}, State) ->
+    %% Apply deallocation before tail call
+    Y = maps:get(y, State),
+    NewY = deallocate_stack(unwrap_int(Dealloc), Y),
+    handle_local_call(Label, State#{y => NewY}, true);
 
 %% External calls (BIFs)
 execute_instr({call_ext, Arity, {extfunc_idx, ModIdx, FunIdx, _}}, State) ->

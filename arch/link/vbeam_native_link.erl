@@ -247,12 +247,18 @@ patch_binary(Bin, Offset, 8, Value) ->
 
 %% ARM64 ADRP instruction patching: modify immhi:immlo fields.
 patch_adrp(Bin, Offset, PageDelta) ->
-    <<Before:Offset/binary, OldInsn:32/little, After/binary>> = Bin,
-    ImmLo = PageDelta band 3,
-    ImmHi = (PageDelta bsr 2) band 16#7FFFF,
-    Masked = OldInsn band (bnot ((3 bsl 29) bor (16#7FFFF bsl 5))),
-    NewInsn = Masked bor (ImmLo bsl 29) bor (ImmHi bsl 5),
-    <<Before/binary, NewInsn:32/little, After/binary>>.
+    %% Validate 21-bit signed range: PageDelta must fit in [-2^20, 2^20-1]
+    case (PageDelta >= -(1 bsl 20)) andalso (PageDelta < (1 bsl 20)) of
+        true ->
+            <<Before:Offset/binary, OldInsn:32/little, After/binary>> = Bin,
+            ImmLo = PageDelta band 3,
+            ImmHi = (PageDelta bsr 2) band 16#7FFFF,
+            Masked = OldInsn band (bnot ((3 bsl 29) bor (16#7FFFF bsl 5))),
+            NewInsn = Masked bor (ImmLo bsl 29) bor (ImmHi bsl 5),
+            <<Before/binary, NewInsn:32/little, After/binary>>;
+        false ->
+            error({adrp_overflow, PageDelta})
+    end.
 
 %% ARM64 ADD immediate patching: modify imm12 field.
 patch_add_imm12(Bin, Offset, PageOff) ->

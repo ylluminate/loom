@@ -65,9 +65,47 @@ boot_code(Config) ->
         %% mov rsp, StackBase + StackSize
         encode_mov_rsp_imm64(StackBase + StackSize),
 
-        %% Halt loop
-        <<16#F4>>,       %% hlt
-        <<16#EB, 16#FD>> %% jmp -3 (infinite loop)
+        %% === Initialize PIC (8259A) ===
+        %% Remap IRQs to vectors 32-47 (avoid conflicts with exceptions 0-31)
+        %% ICW1: Start initialization
+        <<16#B0, 16#11>>,           %% mov al, 0x11 (ICW1: init + ICW4 needed)
+        <<16#E6, 16#20>>,           %% out 0x20, al (master PIC command)
+        <<16#E6, 16#A0>>,           %% out 0xA0, al (slave PIC command)
+        %% ICW2: Vector offsets
+        <<16#B0, 16#20>>,           %% mov al, 0x20 (master base vector)
+        <<16#E6, 16#21>>,           %% out 0x21, al (master PIC data)
+        <<16#B0, 16#28>>,           %% mov al, 0x28 (slave base vector)
+        <<16#E6, 16#A1>>,           %% out 0xA1, al (slave PIC data)
+        %% ICW3: Cascade
+        <<16#B0, 16#04>>,           %% mov al, 0x04 (master: slave on IRQ2)
+        <<16#E6, 16#21>>,           %% out 0x21, al
+        <<16#B0, 16#02>>,           %% mov al, 0x02 (slave: cascade identity)
+        <<16#E6, 16#A1>>,           %% out 0xA1, al
+        %% ICW4: Mode
+        <<16#B0, 16#01>>,           %% mov al, 0x01 (8086 mode)
+        <<16#E6, 16#21>>,           %% out 0x21, al
+        <<16#E6, 16#A1>>,           %% out 0xA1, al
+        %% Unmask all IRQs (OCW1)
+        <<16#B0, 16#00>>,           %% mov al, 0x00
+        <<16#E6, 16#21>>,           %% out 0x21, al (master mask)
+        <<16#E6, 16#A1>>,           %% out 0xA1, al (slave mask)
+
+        %% === Initialize PIT (8254) for ~100Hz timer ===
+        %% Channel 0, mode 2 (rate generator), binary
+        <<16#B0, 16#34>>,           %% mov al, 0x34 (cmd: ch0, lobyte/hibyte, mode 2)
+        <<16#E6, 16#43>>,           %% out 0x43, al (PIT command port)
+        %% Divisor = 1193182 / 100 ≈ 11932 (0x2E9C)
+        <<16#B0, 16#9C>>,           %% mov al, 0x9C (low byte)
+        <<16#E6, 16#40>>,           %% out 0x40, al (ch0 data)
+        <<16#B0, 16#2E>>,           %% mov al, 0x2E (high byte)
+        <<16#E6, 16#40>>,           %% out 0x40, al
+
+        %% === Enable interrupts ===
+        <<16#FB>>,                  %% sti
+
+        %% === Idle loop (halt with interrupts enabled) ===
+        <<16#F4>>,                  %% hlt
+        <<16#EB, 16#FD>>            %% jmp -3 (infinite loop: hlt again after interrupt)
     ]).
 
 %% @doc Generate boot data section containing GDT, IDT, IDTR, ISR stubs, page tables, and strings.

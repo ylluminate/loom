@@ -172,10 +172,14 @@ isr_ring_buffer_write() ->
     RingBufferBase = ?RING_BUFFER_ADDR,
 
     iolist_to_binary([
-        %% Save registers
+        %% Save registers (all GPRs that may be clobbered)
         <<16#50>>,                                              % push rax
-        <<16#52>>,                                              % push rdx
         <<16#51>>,                                              % push rcx
+        <<16#52>>,                                              % push rdx
+        <<16#41, 16#50>>,                                       % push r8
+        <<16#41, 16#51>>,                                       % push r9
+        <<16#41, 16#52>>,                                       % push r10
+        <<16#41, 16#53>>,                                       % push r11
 
         %% Load ring buffer pointers
         <<16#48, 16#B8>>, <<RingBufferBase:64/little>>,        % mov rax, RingBufferBase
@@ -191,8 +195,8 @@ isr_ring_buffer_write() ->
         <<16#48, 16#C1, 16#E2, 16#04>>,                        % shl rdx, 4 (multiply by 16)
         <<16#48, 16#83, 16#C2, 16#18>>,                        % add rdx, 24
 
-        %% Write IRQ number (from stack at [rsp+24], pushed by exception_stubs)
-        <<16#48, 16#8B, 16#4C, 16#24, 16#18>>,                 % mov rcx, [rsp+24]
+        %% Write IRQ number (from stack at [rsp+56], after 7 pushed regs)
+        <<16#48, 16#8B, 16#4C, 16#24, 16#38>>,                 % mov rcx, [rsp+56]
         <<16#4A, 16#89, 16#0C, 16#1A>>,                        % mov [r11+rdx], rcx (use r11 base)
 
         %% Save entry offset to R8 (rdx will be clobbered by rdtsc)
@@ -213,9 +217,13 @@ isr_ring_buffer_write() ->
         <<16#48, 16#B8, 16#B0, 16#00, 16#E0, 16#FE, 16#00, 16#00, 16#00, 16#00>>,  % mov rax, 0xFEE000B0
         <<16#C7, 16#00, 16#00, 16#00, 16#00, 16#00>>,          % mov dword [rax], 0
 
-        %% Restore registers
-        <<16#59>>,                                              % pop rcx
+        %% Restore registers (in reverse order)
+        <<16#41, 16#5B>>,                                       % pop r11
+        <<16#41, 16#5A>>,                                       % pop r10
+        <<16#41, 16#59>>,                                       % pop r9
+        <<16#41, 16#58>>,                                       % pop r8
         <<16#5A>>,                                              % pop rdx
+        <<16#59>>,                                              % pop rcx
         <<16#58>>,                                              % pop rax
 
         %% Return from interrupt

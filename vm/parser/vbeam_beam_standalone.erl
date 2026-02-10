@@ -18,6 +18,9 @@
 -module(vbeam_beam_standalone).
 -export([parse_file/1, parse_binary/1, decode_instructions/2]).
 
+%% SECURITY: Maximum decompressed LitT size (64MB)
+-define(MAX_LITT_SIZE, 64 * 1024 * 1024).
+
 %% ============================================================================
 %% Public API
 %% ============================================================================
@@ -157,12 +160,22 @@ parse_chunk_data('FunT', Data) ->
     end;
 
 parse_chunk_data('LitT', Data) ->
+    %% SECURITY: Limit decompressed size to 64MB to prevent memory exhaustion
     case Data of
-        <<UncompressedSize:32, Compressed/binary>> ->
+        <<UncompressedSize:32, Compressed/binary>> when UncompressedSize =< ?MAX_LITT_SIZE ->
             %% Try zlib decompression first (standard OTP BEAM files)
             case catch zlib:uncompress(Compressed) of
                 Uncompressed when is_binary(Uncompressed) ->
-                    parse_literals(Uncompressed);
+                    %% Verify decompressed size matches declared size
+                    case byte_size(Uncompressed) of
+                        UncompressedSize ->
+                            parse_literals(Uncompressed);
+                        _ActualSize when UncompressedSize =:= 0 ->
+                            %% Size 0 means not compressed or size not declared
+                            parse_literals(Uncompressed);
+                        ActualSize ->
+                            {error, {litt_size_mismatch, declared, UncompressedSize, actual, ActualSize}}
+                    end;
                 _ ->
                     %% Decompression failed — data may be uncompressed
                     %% (V compiler and some tools write uncompressed LitT)
@@ -180,6 +193,8 @@ parse_chunk_data('LitT', Data) ->
                             end
                     end
             end;
+        <<UncompressedSize:32, _/binary>> ->
+            {error, {litt_too_large, UncompressedSize, max, ?MAX_LITT_SIZE}};
         _ ->
             Data
     end;
@@ -285,7 +300,10 @@ parse_literals(<<Count:32, Rest/binary>>) ->
 parse_literal_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_literal_list(<<Size:32, Literal:Size/binary, Rest/binary>>, Count, Acc) ->
-    Term = binary_to_term(Literal, [safe]),
+    Term = try binary_to_term(Literal, [safe])
+           catch
+               error:Reason -> {error, {bad_literal, Reason}}
+           end,
     parse_literal_list(Rest, Count - 1, [Term | Acc]);
 parse_literal_list(_, _, Acc) ->
     lists:reverse(Acc).
@@ -459,20 +477,48 @@ decode_compact_value(Byte, Rest) ->
 %% Decode large (multi-byte) integer values
 decode_large_value(Byte, Rest) ->
     LenCode = Byte bsr 5,
-    Len = LenCode + 2,  %% 2-8 bytes (LenCode 0-6; 7 = recursive, rare)
-    case Rest of
-        <<Bytes:Len/binary, Rest2/binary>> ->
-            N = build_int_from_bytes(Bytes, 0),
-            %% Check for negative (signed integer)
-            <<FirstByte:8, _/binary>> = Bytes,
-            Val = case FirstByte > 127 of
-                true -> N - (1 bsl (Len * 8));
-                false -> N
-            end,
-            {Val, Rest2};
+    case LenCode of
+        7 ->
+            %% LenCode=7: Recursive length encoding (rare, used for very large integers)
+            %% Next byte(s) encode the length itself as a compact term
+            case decode_compact_value_recursive(Rest) of
+                {Len, Rest2} when Len > 0 ->
+                    case Rest2 of
+                        <<Bytes:Len/binary, Rest3/binary>> ->
+                            N = build_int_from_bytes(Bytes, 0),
+                            <<FirstByte:8, _/binary>> = Bytes,
+                            Val = case FirstByte > 127 of
+                                true -> N - (1 bsl (Len * 8));
+                                false -> N
+                            end,
+                            {Val, Rest3};
+                        _ ->
+                            {0, Rest}
+                    end;
+                _ ->
+                    {0, Rest}
+            end;
         _ ->
-            {0, Rest}
+            %% LenCode 0-6: Fixed length (2-8 bytes)
+            Len = LenCode + 2,
+            case Rest of
+                <<Bytes:Len/binary, Rest2/binary>> ->
+                    N = build_int_from_bytes(Bytes, 0),
+                    %% Check for negative (signed integer)
+                    <<FirstByte:8, _/binary>> = Bytes,
+                    Val = case FirstByte > 127 of
+                        true -> N - (1 bsl (Len * 8));
+                        false -> N
+                    end,
+                    {Val, Rest2};
+                _ ->
+                    {0, Rest}
+            end
     end.
+
+%% Recursive compact value decoder for LenCode=7 case
+decode_compact_value_recursive(Binary) ->
+    decode_compact_value(Binary, Binary).
 
 %% Build integer from big-endian bytes
 build_int_from_bytes(<<B:8, Rest/binary>>, Acc) ->

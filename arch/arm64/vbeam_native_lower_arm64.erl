@@ -44,9 +44,10 @@ emit_prologue(FrameSize, UsedCallee) when FrameSize =< 504 ->
     save_callee_saved(UsedCallee, 16);
 emit_prologue(FrameSize, UsedCallee) ->
     %% Large frame: stp x29,x30,[sp,#-16]! then sub sp,sp,#(FrameSize-16)
+    %% CRITICAL: Set x29 AFTER full stack allocation, not before
     [?ENC:encode_stp_pre(x29, x30, sp, -16),
-     ?ENC:encode_mov_rr(x29, sp),
-     ?ENC:encode_sub_imm(sp, sp, FrameSize - 16)] ++
+     ?ENC:encode_sub_imm(sp, sp, FrameSize - 16),
+     ?ENC:encode_add_imm(x29, sp, 0)] ++
     save_callee_saved(UsedCallee, 16).
 
 %% Epilogue: restore callee-saved; mov sp, x29; ldp x29, x30, [sp], #FrameSize; ret
@@ -97,12 +98,17 @@ lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _FS, _Fmt, _UC) when is_
     [?ENC:encode_mov_imm64(Dst, Imm)];
 
 %% MOV with stack slots
-lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _FS, _Fmt, _UC) ->
+lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _FS, _Fmt, UC) ->
     %% Store to [x29 + offset]
-    Offset = 16 + Slot * 8,  %% after saved x29+x30
+    %% Offset must account for callee-saved registers after x29+x30
+    NumCalleeSaved = length(UC),
+    Offset = 16 + NumCalleeSaved * 8 + Slot * 8,
     [?ENC:encode_str(Src, x29, Offset)];
-lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _FS, _Fmt, _UC) ->
-    Offset = 16 + Slot * 8,
+lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _FS, _Fmt, UC) ->
+    %% Load from [x29 + offset]
+    %% Offset must account for callee-saved registers after x29+x30
+    NumCalleeSaved = length(UC),
+    Offset = 16 + NumCalleeSaved * 8 + Slot * 8,
     [?ENC:encode_ldr(Dst, x29, Offset)];
 
 %% LOAD from memory
@@ -1304,20 +1310,53 @@ emit_float_binop(Dst, A, B, OpBits) ->
      <<FloatOp:32/little>>, <<FmovDst:32/little>>].
 
 %% Move argument values into AAPCS64 argument registers.
+%% Detects cycles (e.g., x0→x1 and x1→x0) and uses x16 as temp to break them.
 move_args_to_regs([], _) -> [];
-move_args_to_regs([{preg, Reg} | Rest], [ArgReg | ArgRegs]) ->
-    Move = case Reg of
-        ArgReg -> [];
-        _ -> [?ENC:encode_mov_rr(ArgReg, Reg)]
-    end,
-    Move ++ move_args_to_regs(Rest, ArgRegs);
-move_args_to_regs([{imm, Val} | Rest], [ArgReg | ArgRegs]) ->
-    [?ENC:encode_mov_imm64(ArgReg, Val) | move_args_to_regs(Rest, ArgRegs)];
-move_args_to_regs([{stack, Slot} | Rest], [ArgReg | ArgRegs]) ->
+move_args_to_regs(Args, ArgRegs) ->
+    %% Build the full mapping first to detect cycles
+    Moves = build_arg_moves_arm64(Args, ArgRegs),
+    %% Detect and break cycles using x16 as scratch
+    break_cycles_and_emit_arm64(Moves).
+
+build_arg_moves_arm64([], _) -> [];
+build_arg_moves_arm64([{preg, Reg} | Rest], [ArgReg | ArgRegs]) ->
+    case Reg of
+        ArgReg -> build_arg_moves_arm64(Rest, ArgRegs);
+        _ -> [{ArgReg, {preg, Reg}} | build_arg_moves_arm64(Rest, ArgRegs)]
+    end;
+build_arg_moves_arm64([{imm, Val} | Rest], [ArgReg | ArgRegs]) ->
+    [{ArgReg, {imm, Val}} | build_arg_moves_arm64(Rest, ArgRegs)];
+build_arg_moves_arm64([{stack, Slot} | Rest], [ArgReg | ArgRegs]) ->
+    [{ArgReg, {stack, Slot}} | build_arg_moves_arm64(Rest, ArgRegs)];
+build_arg_moves_arm64([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
+    [{ArgReg, {imm, 0}} | build_arg_moves_arm64(Rest, ArgRegs)];
+build_arg_moves_arm64(_, []) -> [].
+
+break_cycles_and_emit_arm64(Moves) ->
+    %% Detect cycles: if a destination is used as a source later
+    Dsts = [Dst || {Dst, _} <- Moves],
+    Srcs = [{Src, Dst} || {Dst, {preg, Src}} <- Moves],
+    Cycles = [{Src, Dst} || {Src, Dst} <- Srcs, lists:member(Src, Dsts)],
+    case Cycles of
+        [] ->
+            %% No cycles — emit directly
+            [emit_move_arm64(Dst, Src) || {Dst, Src} <- Moves];
+        _ ->
+            %% Break cycle: use x16 as temp for first conflicting move
+            [{FirstSrc, FirstDst} | _] = Cycles,
+            %% Save first source to x16
+            PreMoves = [?ENC:encode_mov_rr(x16, FirstSrc)],
+            %% Emit other moves (excluding the one we saved)
+            OtherMoves = [emit_move_arm64(Dst, Src) || {Dst, Src} <- Moves, Dst =/= FirstDst],
+            %% Restore from x16 to first destination
+            PostMoves = [?ENC:encode_mov_rr(FirstDst, x16)],
+            PreMoves ++ OtherMoves ++ PostMoves
+    end.
+
+emit_move_arm64(ArgReg, {preg, Reg}) ->
+    ?ENC:encode_mov_rr(ArgReg, Reg);
+emit_move_arm64(ArgReg, {imm, Val}) ->
+    ?ENC:encode_mov_imm64(ArgReg, Val);
+emit_move_arm64(ArgReg, {stack, Slot}) ->
     Offset = 16 + Slot * 8,
-    [?ENC:encode_ldr(ArgReg, x29, Offset) | move_args_to_regs(Rest, ArgRegs)];
-move_args_to_regs([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
-    %% Unallocated vreg (dead code or register pressure) — load 0 as fallback
-    [?ENC:encode_mov_imm64(ArgReg, 0) | move_args_to_regs(Rest, ArgRegs)];
-move_args_to_regs(_, []) ->
-    [].  %% Too many args — would need stack passing
+    ?ENC:encode_ldr(ArgReg, x29, Offset).

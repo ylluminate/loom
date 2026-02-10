@@ -144,6 +144,15 @@ stats() ->
 -spec pit_init_code(pos_integer()) -> binary().
 pit_init_code(FreqHz) when FreqHz > 0 ->
     Divisor = 1193182 div FreqHz,
+
+    %% Validate divisor range
+    case Divisor >= 1 andalso Divisor =< 65535 of
+        false ->
+            erlang:error({invalid_frequency, FreqHz, Divisor});
+        true ->
+            ok
+    end,
+
     LowByte = Divisor band 16#FF,
     HighByte = (Divisor bsr 8) band 16#FF,
 

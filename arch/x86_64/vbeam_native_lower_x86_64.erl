@@ -102,21 +102,24 @@ lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _UsedCalleeSaved) when i
     end;
 
 %% MOV with stack operands (spilled registers)
-lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, UsedCalleeSaved) ->
     %% Store to stack: MOV [rbp - offset], Src
-    Offset = -(Slot + 1) * 8,
+    %% Offset must account for pushed callee-saved registers
+    Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_store(rbp, Offset, Src)];
-lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, UsedCalleeSaved) ->
     %% Load from stack: MOV Dst, [rbp - offset]
-    Offset = -(Slot + 1) * 8,
+    %% Offset must account for pushed callee-saved registers
+    Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_load(Dst, rbp, Offset)];
 
 %% LOAD from memory
 lower_instruction({load, {preg, Dst}, {preg, Base}, Off}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_mov_mem_load(Dst, Base, Off)];
-lower_instruction({load, {preg, Dst}, {stack, Slot}, Off}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({load, {preg, Dst}, {stack, Slot}, Off}, _FnName, UsedCalleeSaved) ->
     %% Load base from stack first, then load from it
-    BaseOff = -(Slot + 1) * 8,
+    %% Offset must account for pushed callee-saved registers
+    BaseOff = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_load(Dst, rbp, BaseOff),
      ?ENC:encode_mov_mem_load(Dst, Dst, Off)];
 
@@ -1231,23 +1234,56 @@ encode_and_imm_x86(Dst, Imm) ->
     <<Rex:8, 16#81:8, ModRM:8, Imm:32/little-signed>>.
 
 %% Move argument values into System V argument registers.
+%% Detects cycles (e.g., rdi→rsi and rsi→rdi) and uses r11 as temp to break them.
 move_args_to_regs_x86([], _) -> [];
-move_args_to_regs_x86([{preg, Reg} | Rest], [ArgReg | ArgRegs]) ->
-    Move = case Reg of
-        ArgReg -> [];
-        _ -> [?ENC:encode_mov_rr(ArgReg, Reg)]
-    end,
-    Move ++ move_args_to_regs_x86(Rest, ArgRegs);
-move_args_to_regs_x86([{imm, Val} | Rest], [ArgReg | ArgRegs]) ->
-    [?ENC:encode_mov_imm64(ArgReg, Val) | move_args_to_regs_x86(Rest, ArgRegs)];
-move_args_to_regs_x86([{stack, Slot} | Rest], [ArgReg | ArgRegs]) ->
+move_args_to_regs_x86(Args, ArgRegs) ->
+    %% Build the full mapping first to detect cycles
+    Moves = build_arg_moves_x86(Args, ArgRegs),
+    %% Detect and break cycles using r11 as scratch
+    break_cycles_and_emit_x86(Moves).
+
+build_arg_moves_x86([], _) -> [];
+build_arg_moves_x86([{preg, Reg} | Rest], [ArgReg | ArgRegs]) ->
+    case Reg of
+        ArgReg -> build_arg_moves_x86(Rest, ArgRegs);
+        _ -> [{ArgReg, {preg, Reg}} | build_arg_moves_x86(Rest, ArgRegs)]
+    end;
+build_arg_moves_x86([{imm, Val} | Rest], [ArgReg | ArgRegs]) ->
+    [{ArgReg, {imm, Val}} | build_arg_moves_x86(Rest, ArgRegs)];
+build_arg_moves_x86([{stack, Slot} | Rest], [ArgReg | ArgRegs]) ->
+    [{ArgReg, {stack, Slot}} | build_arg_moves_x86(Rest, ArgRegs)];
+build_arg_moves_x86([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
+    [{ArgReg, {imm, 0}} | build_arg_moves_x86(Rest, ArgRegs)];
+build_arg_moves_x86(_, []) -> [].
+
+break_cycles_and_emit_x86(Moves) ->
+    %% Detect cycles: if a destination is used as a source later
+    Dsts = [Dst || {Dst, _} <- Moves],
+    Srcs = [{Src, Dst} || {Dst, {preg, Src}} <- Moves],
+    Cycles = [{Src, Dst} || {Src, Dst} <- Srcs, lists:member(Src, Dsts)],
+    case Cycles of
+        [] ->
+            %% No cycles — emit directly
+            [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves];
+        _ ->
+            %% Break cycle: use r11 as temp for first conflicting move
+            [{FirstSrc, FirstDst} | _] = Cycles,
+            %% Save first source to r11
+            PreMoves = [?ENC:encode_mov_rr(r11, FirstSrc)],
+            %% Emit other moves (excluding the one we saved)
+            OtherMoves = [emit_move_x86(Dst, Src) || {Dst, Src} <- Moves, Dst =/= FirstDst],
+            %% Restore from r11 to first destination
+            PostMoves = [?ENC:encode_mov_rr(FirstDst, r11)],
+            PreMoves ++ OtherMoves ++ PostMoves
+    end.
+
+emit_move_x86(ArgReg, {preg, Reg}) ->
+    ?ENC:encode_mov_rr(ArgReg, Reg);
+emit_move_x86(ArgReg, {imm, Val}) ->
+    ?ENC:encode_mov_imm64(ArgReg, Val);
+emit_move_x86(ArgReg, {stack, Slot}) ->
     Offset = -(Slot + 1) * 8,
-    [?ENC:encode_mov_mem_load(ArgReg, rbp, Offset) | move_args_to_regs_x86(Rest, ArgRegs)];
-move_args_to_regs_x86([{vreg, _N} | Rest], [ArgReg | ArgRegs]) ->
-    %% Unallocated vreg (dead code or register pressure) — load 0 as fallback
-    [?ENC:encode_mov_imm64(ArgReg, 0) | move_args_to_regs_x86(Rest, ArgRegs)];
-move_args_to_regs_x86(_, []) ->
-    [].
+    ?ENC:encode_mov_mem_load(ArgReg, rbp, Offset).
 
 %% Encode: mov byte [rsp + Offset], ImmByte
 %% This is: C6 44 24 <offset8> <byte>  (with SIB=0x24 for RSP base)

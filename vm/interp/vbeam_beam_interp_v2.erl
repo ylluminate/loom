@@ -252,8 +252,14 @@ execute_instr({allocate_zero, StackNeed, _Live}, Proc, _Options) ->
 
 execute_instr({deallocate, N}, Proc, _Options) ->
     %% Deallocate stack frame
-    NewY = lists:nthtail(N, Proc#proc.y),
-    {continue, Proc#proc{y = NewY, pc = Proc#proc.pc + 1}};
+    Y = Proc#proc.y,
+    case is_integer(N) andalso N >= 0 andalso N =< length(Y) of
+        true ->
+            NewY = lists:nthtail(N, Y),
+            {continue, Proc#proc{y = NewY, pc = Proc#proc.pc + 1}};
+        false ->
+            {error, {invalid_deallocate, N}}
+    end;
 
 execute_instr({test_heap, _Need, _Live}, Proc, _Options) ->
     %% Heap test - no-op (we use Erlang's heap)
@@ -454,7 +460,7 @@ get_value(Value, _Proc) ->
 get_register({x, N}, #proc{x = X}) ->
     maps:get({x, N}, X, undefined);
 get_register({y, N}, #proc{y = Y}) ->
-    case N < length(Y) of
+    case is_integer(N) andalso N >= 0 andalso N < length(Y) of
         true -> lists:nth(N + 1, Y);
         false -> undefined
     end;
