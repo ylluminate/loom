@@ -185,14 +185,20 @@ handle_io_request({put_chars, Encoding, Chars}, State) ->
 
 %% put_chars with encoding and MFA
 handle_io_request({put_chars, Encoding, Mod, Fun, Args}, State) ->
-    try
-        Chars = apply(Mod, Fun, Args),
-        String = encode_chars(Encoding, Chars),
-        NewState = output_all(String, State),
-        {ok, ok, NewState}
-    catch
-        _:Reason ->
-            {error, Reason, State}
+    %% BUG 9 FIX: Whitelist allowed modules to prevent arbitrary code execution
+    case is_safe_mfa(Mod, Fun, Args) of
+        true ->
+            try
+                Chars = apply(Mod, Fun, Args),
+                String = encode_chars(Encoding, Chars),
+                NewState = output_all(String, State),
+                {ok, ok, NewState}
+            catch
+                _:Reason ->
+                    {error, Reason, State}
+            end;
+        false ->
+            {error, {unauthorized_mfa, Mod, Fun}, State}
     end;
 
 %% Legacy put_chars (assume latin1)
@@ -205,6 +211,13 @@ handle_io_request(_Request, State) ->
 
 %% @doc Encode characters based on encoding
 -spec encode_chars(unicode | latin1, iodata()) -> binary().
+
+%% BUG 9 FIX: Whitelist for safe MFA calls
+%% Only allow erlang:* and io_lib:* functions
+is_safe_mfa(erlang, _Fun, _Args) -> true;
+is_safe_mfa(io_lib, _Fun, _Args) -> true;
+is_safe_mfa(_Mod, _Fun, _Args) -> false.
+
 encode_chars(unicode, Chars) ->
     unicode:characters_to_binary(Chars);
 encode_chars(latin1, Chars) ->

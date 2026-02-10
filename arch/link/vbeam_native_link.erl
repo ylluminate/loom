@@ -231,19 +231,31 @@ patch_binary(Bin, Offset, 4, Value) ->
     %% Validate that Value fits in signed 32-bit before writing
     case Value >= -2147483648 andalso Value =< 2147483647 of
         true ->
-            <<Before:Offset/binary, _Old:4/binary, After/binary>> = Bin,
-            %% Encode as signed 32-bit little-endian
-            Encoded = <<Value:32/little-signed>>,
-            <<Before/binary, Encoded/binary, After/binary>>;
+            BinSize = byte_size(Bin),
+            case Offset + 4 =< BinSize of
+                true ->
+                    <<Before:Offset/binary, _Old:4/binary, After/binary>> = Bin,
+                    %% Encode as signed 32-bit little-endian
+                    Encoded = <<Value:32/little-signed>>,
+                    <<Before/binary, Encoded/binary, After/binary>>;
+                false ->
+                    error({reloc_out_of_bounds, Offset, 4, BinSize})
+            end;
         false ->
             error({relocation_overflow, rel32, Value})
     end;
 
 patch_binary(Bin, Offset, 8, Value) ->
-    <<Before:Offset/binary, _Old:8/binary, After/binary>> = Bin,
-    %% Encode as 64-bit little-endian
-    Encoded = <<Value:64/little-signed>>,
-    <<Before/binary, Encoded/binary, After/binary>>.
+    BinSize = byte_size(Bin),
+    case Offset + 8 =< BinSize of
+        true ->
+            <<Before:Offset/binary, _Old:8/binary, After/binary>> = Bin,
+            %% Encode as 64-bit little-endian
+            Encoded = <<Value:64/little-signed>>,
+            <<Before/binary, Encoded/binary, After/binary>>;
+        false ->
+            error({reloc_out_of_bounds, Offset, 8, BinSize})
+    end.
 
 %% ARM64 ADRP instruction patching: modify immhi:immlo fields.
 patch_adrp(Bin, Offset, PageDelta) ->
@@ -366,7 +378,9 @@ encode_branch(CurrentOffset, TargetOffset, 5) ->
     %% with a leading E8 (CALL) as default
     Disp = TargetOffset - (CurrentOffset + 5),
     <<16#E8, Disp:32/little-signed>>;
-encode_branch(CurrentOffset, TargetOffset, InsnSize) ->
+encode_branch(CurrentOffset, TargetOffset, InsnSize) when InsnSize >= 4 ->
     %% Generic: compute displacement from end of instruction
     Disp = TargetOffset - (CurrentOffset + InsnSize),
-    <<Disp:32/little-signed, 0:((InsnSize - 4) * 8)>>.
+    <<Disp:32/little-signed, 0:((InsnSize - 4) * 8)>>;
+encode_branch(_CurrentOffset, _TargetOffset, InsnSize) ->
+    error({invalid_instruction_size, InsnSize}).

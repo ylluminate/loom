@@ -461,9 +461,8 @@ is_scratch_instruction(_) -> false.
 scratch_regs_for_pseudo_ops(arm64) ->
     [x9, x10, x11, x12, x13, x14, x15];
 scratch_regs_for_pseudo_ops(x86_64) ->
-    %% x86_64 pseudo-ops clobber many registers during lowering (BUG #4 FIX)
-    %% Include ALL registers that pseudo-op lowering uses as scratch
-    [rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11].
+    %% x86_64 pseudo-ops may use rax/rcx/rdx as scratch
+    [r10, r11].
 
 %% Pre-assign parameter registers.
 param_assignments(x86_64, NumParams) ->

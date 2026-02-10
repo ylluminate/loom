@@ -238,33 +238,25 @@ init([]) ->
     RingBuffer = ring_new(?DEFAULT_RING_SIZE),
     {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}}}.
 
-handle_call({register_handler, IrqNum, Pid}, _From, #state{handlers = Handlers, monitors = Monitors} = State) ->
-    %% Check if an existing handler is registered for this IRQ
-    {CleanedMonitors, CleanedHandlers} = case maps:get(IrqNum, Handlers, undefined) of
+handle_call({register_handler, IrqNum, Pid}, From, #state{handlers = Handlers, monitors = Monitors} = State) ->
+    %% BUG 10 FIX: Check ownership before allowing replacement
+    case maps:get(IrqNum, Handlers, undefined) of
         undefined ->
-            {Monitors, Handlers};
-        _OldPid ->
-            %% Find and demonitor the old handler's monitor ref
-            OldMonitorRef = maps:fold(fun(Ref, Irq, Acc) ->
-                case Irq =:= IrqNum of
-                    true -> Ref;
-                    false -> Acc
-                end
-            end, undefined, Monitors),
-            case OldMonitorRef of
-                undefined ->
-                    {Monitors, Handlers};
-                Ref ->
-                    demonitor(Ref, [flush]),
-                    {maps:remove(Ref, Monitors), maps:remove(IrqNum, Handlers)}
+            %% No existing handler - proceed with registration
+            register_handler_impl(IrqNum, Pid, Handlers, Monitors, State);
+        OldPid ->
+            %% Handler exists - verify caller owns it
+            {CallerPid, _Tag} = From,
+            case CallerPid =:= OldPid orelse CallerPid =:= self() of
+                true ->
+                    %% Owner or bridge itself - allow replacement
+                    register_handler_impl(IrqNum, Pid, Handlers, Monitors, State);
+                false ->
+                    %% Unauthorized replacement attempt
+                    {reply, {error, unauthorized_replacement}, State}
             end
-    end,
+    end;
 
-    %% Monitor the new handler PID
-    MonitorRef = monitor(process, Pid),
-    NewHandlers = CleanedHandlers#{IrqNum => Pid},
-    NewMonitors = CleanedMonitors#{MonitorRef => IrqNum},
-    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}};
 
 handle_call({unregister_handler, IrqNum}, _From, #state{handlers = Handlers, monitors = Monitors} = State) ->
     %% Demonitor if handler exists
@@ -347,3 +339,33 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+%% BUG 10 FIX: Helper function for actual registration logic
+register_handler_impl(IrqNum, Pid, Handlers, Monitors, State) ->
+    %% Check if an existing handler is registered for this IRQ
+    {CleanedMonitors, CleanedHandlers} = case maps:get(IrqNum, Handlers, undefined) of
+        undefined ->
+            {Monitors, Handlers};
+        _OldPid ->
+            %% Find and demonitor the old handler's monitor ref
+            OldMonitorRef = maps:fold(fun(Ref, Irq, Acc) ->
+                case Irq =:= IrqNum of
+                    true -> Ref;
+                    false -> Acc
+                end
+            end, undefined, Monitors),
+            case OldMonitorRef of
+                undefined ->
+                    {Monitors, Handlers};
+                Ref ->
+                    demonitor(Ref, [flush]),
+                    {maps:remove(Ref, Monitors), maps:remove(IrqNum, Handlers)}
+            end
+    end,
+
+    %% Monitor the new handler PID
+    MonitorRef = monitor(process, Pid),
+    NewHandlers = CleanedHandlers#{IrqNum => Pid},
+    NewMonitors = CleanedMonitors#{MonitorRef => IrqNum},
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}}.
+

@@ -20,7 +20,8 @@
 init() ->
     case ets:whereis(?TRACKING_TABLE) of
         undefined ->
-            ets:new(?TRACKING_TABLE, [named_table, public, set]);
+            %% BUG 4 FIX: Changed from public to protected to prevent external mutation
+            ets:new(?TRACKING_TABLE, [named_table, protected, set]);
         _ ->
             ok
     end,
@@ -252,11 +253,19 @@ stub_syscall(SyscallNr, Args) ->
     try
         case ets:lookup(?TRACKING_TABLE, SyscallNr) of
             [] ->
-                %% First occurrence - log it
-                Name = syscall_name(SyscallNr),
-                io:format("[vbeam] UNIMPLEMENTED SYSCALL: ~s (~p) args=~p~n",
-                         [Name, SyscallNr, Args]),
-                ets:insert(?TRACKING_TABLE, {SyscallNr, true});
+                %% BUG 5 FIX: Add cardinality check to prevent unbounded ETS growth
+                MaxUnknownSyscalls = 10000,
+                case ets:info(?TRACKING_TABLE, size) of
+                    Size when Size < MaxUnknownSyscalls ->
+                        %% First occurrence - log it
+                        Name = syscall_name(SyscallNr),
+                        io:format("[vbeam] UNIMPLEMENTED SYSCALL: ~s (~p) args=~p~n",
+                                 [Name, SyscallNr, Args]),
+                        ets:insert(?TRACKING_TABLE, {SyscallNr, true});
+                    _ ->
+                        %% Table full - don't insert
+                        ok
+                end;
             _ ->
                 %% Already seen
                 ok

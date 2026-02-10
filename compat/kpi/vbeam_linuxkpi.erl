@@ -39,13 +39,18 @@
 
 %% @doc Allocate kernel memory
 %% Real implementation: allocate from BEAM heap, track in ETS for debugging
-kmalloc(Size, _Flags) ->
+kmalloc(Size, _Flags) when is_integer(Size), Size > 0, Size =< 1073741824 ->
+    %% BUG 6 FIX: Validate size to prevent OOM (max 1GB)
     log_kapi_call(kmalloc, [Size, _Flags]),
     %% Allocate BEAM binary (automatically managed)
     Ptr = make_ref(),
     Memory = <<0:(Size*8)>>,
     %% TODO: Store in ETS table for tracking: {Ptr, Memory, Size}
-    {ok, Ptr, Memory}.
+    {ok, Ptr, Memory};
+kmalloc(Size, _Flags) ->
+    log_kapi_call(kmalloc, [Size, _Flags]),
+    %% Invalid size
+    {error, einval}.
 
 %% @doc Free kernel memory
 kfree(Ptr) ->
@@ -272,17 +277,29 @@ queue_work(Queue, Work) ->
 %% Real implementation: erlang:send_after
 mod_timer(Timer, ExpiresJiffies) ->
     log_kapi_call(mod_timer, [Timer, ExpiresJiffies]),
-    %% TODO: Cancel old timer, start new one
+    %% BUG 7 FIX: Cancel old timer if exists, store new timer ref
+    case get_timer_ref(Timer) of
+        undefined -> ok;
+        OldTRef -> erlang:cancel_timer(OldTRef)
+    end,
     %% Jiffies conversion: 1 jiffy = 1ms on most systems
     TimeoutMs = ExpiresJiffies,
-    _TRef = erlang:send_after(TimeoutMs, self(), {timer_expired, Timer}),
+    TRef = erlang:send_after(TimeoutMs, self(), {timer_expired, Timer}),
+    store_timer_ref(Timer, TRef),
     0. %% Success
 
 %% @doc Delete timer
 del_timer(Timer) ->
     log_kapi_call(del_timer, [Timer]),
-    %% Real implementation: erlang:cancel_timer
-    0. %% Was not active
+    %% BUG 7 FIX: Actually cancel the timer
+    case get_timer_ref(Timer) of
+        undefined ->
+            0; %% Was not active
+        TRef ->
+            erlang:cancel_timer(TRef),
+            remove_timer_ref(Timer),
+            1 %% Was active, now cancelled
+    end.
 
 %% ==================================================================
 %% DMA
@@ -372,6 +389,35 @@ napi_complete(Napi) ->
 %% ==================================================================
 
 %% @doc Log kernel API call for debugging
+
+%% Timer reference storage (persistent_term for simplicity)
+%% In production, use ETS or process dictionary for per-process timers
+-define(TIMER_STORAGE_KEY, {vbeam_linuxkpi, active_timers}).
+
+init_timer_storage() ->
+    case persistent_term:get(?TIMER_STORAGE_KEY, undefined) of
+        undefined ->
+            persistent_term:put(?TIMER_STORAGE_KEY, #{});
+        _ ->
+            ok
+    end.
+
+store_timer_ref(Timer, TRef) ->
+    init_timer_storage(),
+    Timers = persistent_term:get(?TIMER_STORAGE_KEY, #{}),
+    persistent_term:put(?TIMER_STORAGE_KEY, Timers#{Timer => TRef}).
+
+get_timer_ref(Timer) ->
+    init_timer_storage(),
+    Timers = persistent_term:get(?TIMER_STORAGE_KEY, #{}),
+    maps:get(Timer, Timers, undefined).
+
+remove_timer_ref(Timer) ->
+    init_timer_storage(),
+    Timers = persistent_term:get(?TIMER_STORAGE_KEY, #{}),
+    persistent_term:put(?TIMER_STORAGE_KEY, maps:remove(Timer, Timers)).
+
+
 log_kapi_call(Function, Args) ->
     %% Use debug level to avoid spam, can enable selectively
     logger:debug("[KAPI] ~p(~p)", [Function, Args]),

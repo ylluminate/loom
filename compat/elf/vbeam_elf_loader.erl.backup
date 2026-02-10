@@ -341,31 +341,6 @@ parse_elf_header(_) ->
 %% ============================================================================
 
 parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShStrNdx}) ->
-    %% BUG 3 FIX: Validate shnum to prevent memory exhaustion
-    MaxShNum = 65536,
-    ShNum > MaxShNum andalso error({shnum_too_large, ShNum, max, MaxShNum}),
-    
-    %% Validate that section headers fit within the binary
-    RequiredSize = ShOff + (ShNum * ?SHDR_SIZE),
-    RequiredSize > byte_size(Binary) andalso error({section_headers_out_of_bounds, ShOff, ShNum, binary_size, byte_size(Binary)}),
-
-    %% BUG 3 FIX: Validate shnum to prevent memory exhaustion
-    MaxShNum = 65536,
-    case ShNum of
-        N when N > MaxShNum ->
-            error({shnum_too_large, N, max, MaxShNum});
-        _ ->
-            ok
-    end,
-    
-    %% Validate that section headers fit within the binary
-    case ShOff + (ShNum * ?SHDR_SIZE) of
-        RequiredSize when RequiredSize > byte_size(Binary) ->
-            error({section_headers_out_of_bounds, ShOff, ShNum, binary_size, byte_size(Binary)});
-        _ ->
-            ok
-    end,
-
     %% Read all section headers
     SectionHeaders = [
         parse_section_header(Binary, ShOff + (I * ?SHDR_SIZE))
@@ -480,12 +455,6 @@ parse_relocations(_Binary, Sections, _StrTab) ->
     %% Parse each .rela section
     RelocMap = lists:foldl(
         fun(#{name := _Name, data := Data, entsize := EntSize, info := TargetIdx}, Acc) ->
-            %% BUG 1 FIX: Validate EntSize before using as divisor
-            case EntSize of
-                E when E > 0, E =:= ?RELA_SIZE -> ok;
-                _ -> error({invalid_rela_entsize, EntSize, expected, ?RELA_SIZE})
-            end,
-            
             TargetSec = safe_nth(TargetIdx + 1, Sections),
             TargetName = maps:get(name, TargetSec),
 
@@ -622,19 +591,18 @@ patch_data(Data, Offset, Value, Type) ->
     WidthBytes = Width div 8,
     DataSize = byte_size(Data),
 
-    %% BUG 2 FIX: Reject relocations that exceed current section size
-    %% Cap auto-padding to 16MB maximum
-    MaxPadding = 16 * 1024 * 1024,
-    RequiredSize = Offset + WidthBytes,
-    
-    case RequiredSize of
-        N when N > (DataSize + MaxPadding) ->
-            %% Reject: would require excessive padding
-            error({relocation_offset_too_large, Offset, DataSize, max_padding, MaxPadding});
+    %% SECURITY: Validate relocation offset to prevent OOM
+    %% Maximum reasonable section size: 256MB
+    MaxSectionSize = 256 * 1024 * 1024,
+    case Offset + WidthBytes of
+        N when N > MaxSectionSize ->
+            %% Reject relocations that would require excessive padding
+            error({relocation_offset_too_large, Offset, DataSize});
         N when N > DataSize ->
-            %% BUG 2 FIX: Reject if offset exceeds current section size
-            %% (Only allow minimal padding for alignment, not arbitrary offsets)
-            error({relocation_offset_exceeds_section, Offset, DataSize});
+            %% Pad data if needed (validated size)
+            PadSize = N - DataSize,
+            PaddedData = <<Data/binary, 0:(PadSize * 8)>>,
+            patch_data(PaddedData, Offset, Value, Type);
         _ ->
             <<Before:Offset/binary, _:WidthBytes/binary, After/binary>> = Data,
             Patch = case Width of

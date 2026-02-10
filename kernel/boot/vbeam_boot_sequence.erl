@@ -85,9 +85,10 @@ boot_code(Config) ->
         <<16#B0, 16#01>>,           %% mov al, 0x01 (8086 mode)
         <<16#E6, 16#21>>,           %% out 0x21, al
         <<16#E6, 16#A1>>,           %% out 0xA1, al
-        %% Unmask all IRQs (OCW1)
-        <<16#B0, 16#00>>,           %% mov al, 0x00
+        %% Unmask only IRQ 0 (timer) on both PICs (OCW1)
+        <<16#B0, 16#FE>>,           %% mov al, 0xFE (unmask IRQ 0 only)
         <<16#E6, 16#21>>,           %% out 0x21, al (master mask)
+        <<16#B0, 16#FF>>,           %% mov al, 0xFF (mask all on slave)
         <<16#E6, 16#A1>>,           %% out 0xA1, al (slave mask)
 
         %% === Initialize PIT (8254) for ~100Hz timer ===

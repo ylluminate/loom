@@ -253,15 +253,31 @@ decode_instruction(Code, PC) ->
 %% Decode opcodes (simplified - real BEAM uses variable-length encoding)
 decode_opcode(1, Rest, PC) ->
     %% label
-    {Label, _Rest2, NextPC} = decode_int(Rest, PC),
-    {label, Label, NextPC};
+    case decode_int(Rest, PC) of
+        {Label, _Rest2, NextPC} ->
+            {label, Label, NextPC};
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(2, Rest, PC) ->
     %% func_info
-    {Module, Rest2, PC2} = decode_int(Rest, PC),
-    {Function, Rest3, PC3} = decode_int(Rest2, PC2),
-    {Arity, _Rest4, NextPC} = decode_int(Rest3, PC3),
-    {func_info, Module, Function, Arity, NextPC};
+    case decode_int(Rest, PC) of
+        {Module, Rest2, PC2} ->
+            case decode_int(Rest2, PC2) of
+                {Function, Rest3, PC3} ->
+                    case decode_int(Rest3, PC3) of
+                        {Arity, _Rest4, NextPC} ->
+                            {func_info, Module, Function, Arity, NextPC};
+                        {error, Reason} ->
+                            {error, Reason}
+                    end;
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(3, _Rest, PC) ->
     %% int_code_end
@@ -269,9 +285,17 @@ decode_opcode(3, _Rest, PC) ->
 
 decode_opcode(4, Rest, PC) ->
     %% call
-    {Arity, Rest2, PC2} = decode_int(Rest, PC),
-    {Label, _Rest3, NextPC} = decode_int(Rest2, PC2),
-    {call, Arity, Label, NextPC};
+    case decode_int(Rest, PC) of
+        {Arity, Rest2, PC2} ->
+            case decode_int(Rest2, PC2) of
+                {Label, _Rest3, NextPC} ->
+                    {call, Arity, Label, NextPC};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(19, _Rest, PC) ->
     %% return
@@ -279,32 +303,68 @@ decode_opcode(19, _Rest, PC) ->
 
 decode_opcode(64, Rest, PC) ->
     %% move
-    {Src, Rest2, PC2} = decode_arg(Rest, PC),
-    {Dst, _Rest3, NextPC} = decode_arg(Rest2, PC2),
-    {move, Src, Dst, NextPC};
+    case decode_arg(Rest, PC) of
+        {Src, Rest2, PC2} ->
+            case decode_arg(Rest2, PC2) of
+                {Dst, _Rest3, NextPC} ->
+                    {move, Src, Dst, NextPC};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(10, Rest, PC) ->
     %% allocate
-    {StackNeed, Rest2, PC2} = decode_int(Rest, PC),
-    {Live, _Rest3, NextPC} = decode_int(Rest2, PC2),
-    {allocate, StackNeed, Live, NextPC};
+    case decode_int(Rest, PC) of
+        {StackNeed, Rest2, PC2} ->
+            case decode_int(Rest2, PC2) of
+                {Live, _Rest3, NextPC} ->
+                    {allocate, StackNeed, Live, NextPC};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(18, Rest, PC) ->
     %% deallocate
-    {N, _Rest2, NextPC} = decode_int(Rest, PC),
-    {deallocate, N, NextPC};
+    case decode_int(Rest, PC) of
+        {N, _Rest2, NextPC} ->
+            {deallocate, N, NextPC};
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(59, Rest, PC) ->
     %% test_heap
-    {Need, Rest2, PC2} = decode_int(Rest, PC),
-    {Live, _Rest3, NextPC} = decode_int(Rest2, PC2),
-    {test_heap, Need, Live, NextPC};
+    case decode_int(Rest, PC) of
+        {Need, Rest2, PC2} ->
+            case decode_int(Rest2, PC2) of
+                {Live, _Rest3, NextPC} ->
+                    {test_heap, Need, Live, NextPC};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(78, Rest, PC) ->
     %% call_ext
-    {Arity, Rest2, PC2} = decode_int(Rest, PC),
-    {Import, _Rest3, NextPC} = decode_int(Rest2, PC2),
-    {call_ext, Arity, Import, NextPC};
+    case decode_int(Rest, PC) of
+        {Arity, Rest2, PC2} ->
+            case decode_int(Rest2, PC2) of
+                {Import, _Rest3, NextPC} ->
+                    {call_ext, Arity, Import, NextPC};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
 
 decode_opcode(Op, _Rest, PC) ->
     %% Unknown opcode
@@ -312,14 +372,16 @@ decode_opcode(Op, _Rest, PC) ->
     {unknown_opcode, PC + 1}.
 
 %% Decode integer (simplified - just read one byte)
-%% Returns {Value, Rest2} where Rest2 is remaining bytes
+%% Returns {Value, Rest2, NextPC} or {error, Reason}
 decode_int(<<Value:8, Rest2/binary>>, PC) ->
     {Value, Rest2, PC + 1};
+decode_int(<<>>, _PC) ->
+    {error, truncated};
 decode_int(_Rest, _PC) ->
-    {error, truncated_operand}.
+    {error, truncated}.
 
 %% Decode argument (register, literal, etc.)
-%% Returns {Arg, Rest2} where Rest2 is remaining bytes
+%% Returns {Arg, Rest2, NextPC} or {error, Reason}
 decode_arg(<<Tag:4, Value:4, Rest2/binary>>, PC) ->
     Arg = case Tag of
         0 -> {x, Value};  % X register
@@ -330,20 +392,39 @@ decode_arg(<<Tag:4, Value:4, Rest2/binary>>, PC) ->
         _ -> {unknown, Value}
     end,
     {Arg, Rest2, PC + 1};
+decode_arg(<<>>, _PC) ->
+    {error, truncated};
 decode_arg(_Rest, _PC) ->
-    {error, truncated_operand}.
+    {error, truncated}.
+
+%% Safe list access with bounds checking
+safe_nth(N, List) when is_integer(N), N >= 1, N =< length(List) ->
+    {ok, lists:nth(N, List)};
+safe_nth(N, List) when is_integer(N) ->
+    {error, {invalid_index, N, length(List)}};
+safe_nth(_, _) ->
+    {error, invalid_index}.
 
 %% Get value from source
 get_value({x, N}, #proc{x = X}) ->
     maps:get(N, X, undefined);
 get_value({y, N}, #proc{y = Y}) ->
-    lists:nth(N + 1, Y);
+    case safe_nth(N + 1, Y) of
+        {ok, Value} -> Value;
+        {error, _} -> undefined
+    end;
 get_value({atom, N}, #proc{atoms = Atoms}) ->
-    lists:nth(N + 1, Atoms);
+    case safe_nth(N + 1, Atoms) of
+        {ok, Value} -> Value;
+        {error, _} -> undefined
+    end;
 get_value({integer, N}, _Proc) ->
     N;
 get_value({literal, N}, #proc{literals = Literals}) ->
-    lists:nth(N + 1, Literals);
+    case safe_nth(N + 1, Literals) of
+        {ok, Value} -> Value;
+        {error, _} -> undefined
+    end;
 get_value(Value, _Proc) when is_integer(Value); is_atom(Value); is_binary(Value) ->
     Value;
 get_value(_Other, _Proc) ->
@@ -360,23 +441,32 @@ set_register(_Other, _Value, Proc) ->
 
 %% Execute built-in function
 execute_bif(ImportIndex, Arity, #proc{imports = Imports, x = X} = Proc, Options) ->
-    case lists:nth(ImportIndex + 1, Imports) of
-        {ModIndex, FunIndex, Arity} ->
-            Mod = lists:nth(ModIndex, Proc#proc.atoms),
-            Fun = lists:nth(FunIndex, Proc#proc.atoms),
+    case safe_nth(ImportIndex + 1, Imports) of
+        {ok, {ModIndex, FunIndex, Arity}} ->
+            case safe_nth(ModIndex, Proc#proc.atoms) of
+                {ok, Mod} ->
+                    case safe_nth(FunIndex, Proc#proc.atoms) of
+                        {ok, Fun} ->
+                            %% Get arguments from X registers
+                            Args = [maps:get(I, X, undefined) || I <- lists:seq(0, Arity - 1)],
 
-            %% Get arguments from X registers
-            Args = [maps:get(I, X, undefined) || I <- lists:seq(0, Arity - 1)],
-
-            %% Execute the BIF
-            case execute_erlang_bif(Mod, Fun, Args, Options) of
-                {ok, Result} ->
-                    {ok, Result, Proc};
+                            %% Execute the BIF
+                            case execute_erlang_bif(Mod, Fun, Args, Options) of
+                                {ok, Result} ->
+                                    {ok, Result, Proc};
+                                {error, Reason} ->
+                                    {error, Reason}
+                            end;
+                        {error, Reason} ->
+                            {error, Reason}
+                    end;
                 {error, Reason} ->
                     {error, Reason}
             end;
-        _ ->
-            {error, invalid_import}
+        {ok, _} ->
+            {error, invalid_import};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% Execute Erlang BIFs
@@ -396,8 +486,17 @@ execute_erlang_bif(erlang, '-', [A, B], _Options) when is_number(A), is_number(B
 execute_erlang_bif(erlang, '*', [A, B], _Options) when is_number(A), is_number(B) ->
     {ok, A * B};
 
-execute_erlang_bif(erlang, 'div', [A, B], _Options) when is_integer(A), is_integer(B) ->
+execute_erlang_bif(erlang, 'div', [A, B], _Options) when is_integer(A), is_integer(B), B =/= 0 ->
     {ok, A div B};
+
+execute_erlang_bif(erlang, 'div', [_A, 0], _Options) ->
+    {error, badarith};
+
+execute_erlang_bif(erlang, 'rem', [A, B], _Options) when is_integer(A), is_integer(B), B =/= 0 ->
+    {ok, A rem B};
+
+execute_erlang_bif(erlang, 'rem', [_A, 0], _Options) ->
+    {error, badarith};
 
 execute_erlang_bif(erlang, '==', [A, B], _Options) ->
     {ok, A == B};

@@ -42,6 +42,7 @@
 
 -define(IDLE_PID, 0).
 -define(IRQ_TIMER, 32).
+-define(DEFAULT_MAILBOX_LIMIT, 10000).
 
 %%% ==========================================================================
 %%% Types
@@ -365,21 +366,28 @@ handle_call({send_message, ToPid, Message}, _From, State) ->
         undefined ->
             {reply, {error, not_found}, State};
         #{mailbox := Mailbox, status := Status} = Process ->
-            %% NOTE: Messages are shared-heap (not copied). This matches our modeled semantics.
-            %% On bare metal with strict per-process heaps, this would require deep-copy.
-            NewMailbox = queue:in(Message, Mailbox),
-            UpdatedProcess = Process#{mailbox => NewMailbox},
-            NewProcesses = Processes#{ToPid => UpdatedProcess},
+            %% BUG 8 FIX: Check mailbox size to prevent unbounded growth
+            MailboxSize = queue:len(Mailbox),
+            case MailboxSize >= ?DEFAULT_MAILBOX_LIMIT of
+                true ->
+                    {reply, {error, mailbox_full}, State};
+                false ->
+                    %% NOTE: Messages are shared-heap (not copied). This matches our modeled semantics.
+                    %% On bare metal with strict per-process heaps, this would require deep-copy.
+                    NewMailbox = queue:in(Message, Mailbox),
+                    UpdatedProcess = Process#{mailbox => NewMailbox},
+                    NewProcesses = Processes#{ToPid => UpdatedProcess},
 
-            %% If process was blocked, move to ready
-            NewState = case Status of
+                    %% If process was blocked, move to ready
+                    NewState = case Status of
                 blocked ->
                     make_ready(ToPid, UpdatedProcess, State#state{processes = NewProcesses});
-                _ ->
-                    State#state{processes = NewProcesses}
-            end,
+                    _ ->
+                        State#state{processes = NewProcesses}
+                    end,
 
-            {reply, ok, NewState}
+                    {reply, ok, NewState}
+            end
     end;
 
 handle_call({receive_message, Pid}, _From, #state{processes = Processes} = State) ->

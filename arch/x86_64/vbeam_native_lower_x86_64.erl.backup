@@ -20,7 +20,7 @@ lower_function(#{name := Name, body := Body, arity := _Arity,
                  spill_slots := SpillSlots} = _Fn, LinkState) ->
     %% Scan body to find which callee-saved registers are actually used
     UsedCalleeSaved = find_used_callee_saved(Body),
-    FrameSize = compute_frame_size(SpillSlots, UsedCalleeSaved),
+    FrameSize = compute_frame_size(SpillSlots),
     Prologue = emit_prologue(FrameSize, UsedCalleeSaved),
     %% Thread UsedCalleeSaved through body lowering for ret instruction
     BodyParts = lower_body(Body, Name, UsedCalleeSaved),
@@ -29,25 +29,14 @@ lower_function(#{name := Name, body := Body, arity := _Arity,
     {Parts, LinkState}.
 
 %% Compute stack frame size (16-byte aligned).
-compute_frame_size(SpillSlots, UsedCalleeSaved) ->
+compute_frame_size(SpillSlots) ->
     %% Each spill slot is 8 bytes
-    SpillSize = SpillSlots * 8,
-    %% Callee-saved registers are also 8 bytes each
-    CalleeSaveSize = length(UsedCalleeSaved) * 8,
-    %% Total raw size
-    RawSize = SpillSize + CalleeSaveSize,
-    %% BUG #3: Add alignment padding if odd number of callee-saved registers
-    %% to maintain 16-byte alignment at call sites
-    AlignmentPadding = case length(UsedCalleeSaved) rem 2 of
-        1 -> 8;  %% Odd count, add 8 bytes
-        0 -> 0   %% Even count, no padding needed
-    end,
-    TotalSize = RawSize + AlignmentPadding,
+    RawSize = SpillSlots * 8,
     %% Round up to 16-byte alignment (after push rbp, rsp is 16-aligned)
-    case TotalSize rem 16 of
-        0 when TotalSize =:= 0 -> 0;
-        0 -> TotalSize;
-        _ -> TotalSize + (16 - (TotalSize rem 16))
+    case RawSize rem 16 of
+        0 when RawSize =:= 0 -> 0;
+        0 -> RawSize;
+        _ -> RawSize + (16 - (RawSize rem 16))
     end.
 
 %% Emit function prologue: push rbp; mov rbp, rsp; sub rsp, FrameSize; save callee-saved
@@ -113,15 +102,15 @@ lower_instruction({mov_imm, {preg, Dst}, Imm}, _FnName, _UsedCalleeSaved) when i
     end;
 
 %% MOV with stack operands (spilled registers)
-lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mov, {stack, Slot}, {preg, Src}}, _FnName, UsedCalleeSaved) ->
     %% Store to stack: MOV [rbp - offset], Src
     %% Offset must account for pushed callee-saved registers
-    Offset = -((Slot + 1) * 8 ),
+    Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_store(rbp, Offset, Src)];
-lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, _UsedCalleeSaved) ->
+lower_instruction({mov, {preg, Dst}, {stack, Slot}}, _FnName, UsedCalleeSaved) ->
     %% Load from stack: MOV Dst, [rbp - offset]
     %% Offset must account for pushed callee-saved registers
-    Offset = -((Slot + 1) * 8 ),
+    Offset = -((Slot + 1) * 8 + length(UsedCalleeSaved) * 8),
     [?ENC:encode_mov_mem_load(Dst, rbp, Offset)];
 
 %% LOAD from memory
@@ -327,9 +316,11 @@ lower_instruction(ret, _FnName, UsedCalleeSaved) ->
 %% PUSH
 lower_instruction({push, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_push(Reg)];
-lower_instruction({push, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
-    %% x86_64 PUSH imm32: 68 + imm32 (sign-extended to 64-bit)
-    [?ENC:encode_push_imm32(Imm)];
+lower_instruction({push, {imm, _Imm}}, _FnName, _UsedCalleeSaved) ->
+    %% x86_64 PUSH imm32: 68 + imm32
+    %% For simplicity, mov to rax then push
+    %% (This is rare in generated code)
+    [];
 
 %% POP
 lower_instruction({pop, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
@@ -652,7 +643,7 @@ lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, El
         encode_and_imm_x86(r11, -8),
         ?ENC:encode_add_rr(HeapReg, r11),
 
-        %% Copy old data (BUG #2 FIX: byte-by-byte for arbitrary element sizes)
+        %% Copy old data
         ?ENC:encode_mov_rr(r11, rdx),
         ?ENC:encode_imul_rr(r11, r8),              %% old bytes = len * elem_size
         ?ENC:encode_mov_imm64(r9, 0),
@@ -660,16 +651,13 @@ lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, El
         ?ENC:encode_cmp_rr(r9, r11),
         ?ENC:encode_jcc_rel32(ge, 0),
         {reloc, rel32, CopyDoneLbl, -4},
-        %% Load one byte: movzx rcx, byte [rsi + r9]
         ?ENC:encode_mov_rr(rax, rsi),
         ?ENC:encode_add_rr(rax, r9),
-        encode_movzx_byte_mem(rcx, rax),
-        %% Store one byte: mov byte [r10 + r9], cl
-        ?ENC:encode_mov_rr(rax, r10),
-        ?ENC:encode_add_rr(rax, r9),
-        encode_mov_byte_reg_to_mem(rax, rcx),
-        %% Increment by 1 byte (not 8)
-        ?ENC:encode_add_imm(r9, 1),
+        ?ENC:encode_mov_mem_load(rax, rax, 0),
+        ?ENC:encode_mov_rr(rcx, r10),
+        ?ENC:encode_add_rr(rcx, r9),
+        ?ENC:encode_mov_mem_store(rcx, 0, rax),
+        ?ENC:encode_add_imm(r9, 8),
         ?ENC:encode_jmp_rel32(0),
         {reloc, rel32, CopyLoopLbl, -4},
         {label, CopyDoneLbl},
@@ -1294,7 +1282,7 @@ emit_move_x86(ArgReg, {preg, Reg}) ->
 emit_move_x86(ArgReg, {imm, Val}) ->
     ?ENC:encode_mov_imm64(ArgReg, Val);
 emit_move_x86(ArgReg, {stack, Slot}) ->
-    Offset = -((Slot + 1) * 8),
+    Offset = -(Slot + 1) * 8,
     ?ENC:encode_mov_mem_load(ArgReg, rbp, Offset).
 
 %% Encode: mov byte [rsp + Offset], ImmByte

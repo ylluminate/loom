@@ -1,0 +1,21 @@
+Baseline: `make compile && make check && make test` passed (`exit 0`).
+
+HIGH|vm/interp/vbeam_beam_interp.erl:399|`execute_erlang_bif/4` performs `A div B` without checking `B =/= 0`; malformed bytecode can raise `badarith` and crash execution.|Add `B =/= 0` guard and return `{error,badarith}` on zero divisors.
+HIGH|vm/interp/vbeam_beam_interp.erl:318|`decode_int/2` returns a 2-tuple on truncation while callers pattern-match 3 values, causing `badmatch` on malformed code.|Make decode helpers return consistent tagged errors and propagate them instead of tuple-shape matching.
+HIGH|vm/interp/vbeam_beam_interp.erl:340|`lists:nth/2` is used for Y/atom/literal/import lookups without bounds checks; crafted indices can crash the interpreter.|Validate index ranges before access and fail with explicit `{error,invalid_index}`.
+HIGH|compat/elf/vbeam_elf_loader.erl:461|Relocation parsing divides by `EntSize` without validating it; `EntSize=0` or malformed values trigger `badarith` DoS.|Require `EntSize > 0` and `EntSize =:= ?RELA_SIZE` before computing relocation counts.
+HIGH|compat/elf/vbeam_elf_loader.erl:597|Relocation patching auto-pads section data to attacker-controlled offsets (up to 256MB), enabling memory exhaustion during load.|Reject relocations beyond section bounds (or use a much smaller hard cap) instead of auto-padding.
+HIGH|compat/syscall/vbeam_linux_syscall.erl:23|Syscall tracking ETS table is `public`; any process can mutate/delete it, enabling tampering and racey behavior.|Create table as `protected` or `private` and centralize updates in owner process.
+HIGH|kernel/sched/vbeam_scheduler.erl:370|Process mailbox enqueue is unbounded; message floods can consume all memory (DoS).|Add mailbox limits, sender throttling/backpressure, and overflow handling policy.
+HIGH|kernel/io/vbeam_io_server.erl:189|I/O server executes arbitrary `{Mod,Fun,Args}` via `apply/3` from `io_request`, enabling untrusted code execution/DoS in server context.|Whitelist allowed MFA targets (or disable MFA requests) and reject non-approved calls.
+HIGH|kernel/io/vbeam_irq_bridge.erl:241|Any caller can replace IRQ handlers with `register_handler/2`, allowing interrupt hijack and denial of service.|Enforce ownership/authorization checks before replacing existing handlers.
+
+MEDIUM|vm/parser/vbeam_beam_standalone.erl:565|Extended operand list count is trusted and fed to recursive decoding without upper bounds, enabling deep recursion/CPU DoS.|Validate count is non-negative and below a strict limit before decoding list operands.
+MEDIUM|vm/parser/vbeam_beam_standalone.erl:271|Import/export/fun table parsers trust declared counts and silently return partial data on truncation, allowing malformed BEAM to pass parse stage.|Bound counts by remaining chunk size and return hard parse errors on truncation.
+MEDIUM|compat/elf/vbeam_elf_loader.erl:343|`shnum` from ELF header directly drives section-header parsing with no file-size sanity check, causing excessive work/allocation on crafted headers.|Validate `shoff + shnum*?SHDR_SIZE =< byte_size(Binary)` and cap maximum section count.
+MEDIUM|compat/syscall/vbeam_linux_syscall.erl:253|Unknown syscall numbers are inserted into tracking ETS without range/cardinality limits; random numbers can grow table indefinitely (DoS).|Clamp syscall numbers to valid range and cap/rate-limit unknown-syscall tracking.
+MEDIUM|compat/kpi/vbeam_linuxkpi.erl:46|`kmalloc/2` builds `<<0:(Size*8)>>` with no bounds/type validation; large or invalid sizes can cause OOM or `badarg`.|Validate `Size` type/range and enforce per-allocation and global memory limits.
+MEDIUM|compat/kpi/vbeam_linuxkpi.erl:278|`mod_timer/2` creates timers but drops timer refs; `del_timer/1` does not cancel them, leaking timers and stale callbacks.|Store timer refs keyed by timer id and cancel/remove them in `del_timer/1` and re-arm paths.
+MEDIUM|arch/link/vbeam_native_link.erl:234|Binary patching pattern-matches at relocation offsets without bounds checks; malformed offsets crash linker with `badmatch`.|Check `Offset + Size =< byte_size(Bin)` and return structured relocation errors.
+
+LOW|arch/link/vbeam_native_link.erl:369|Generic `encode_branch/3` allows `InsnSize < 4`, leading to negative bit-size expression and runtime failure.|Guard `InsnSize >= 4` and reject invalid instruction sizes early.

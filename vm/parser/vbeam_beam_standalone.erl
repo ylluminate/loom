@@ -268,21 +268,63 @@ parse_atom_list(Binary, Count, Acc) ->
 
 parse_imports(_Rest, 0, Acc) ->
     lists:reverse(Acc);
-parse_imports(<<Module:32, Function:32, Arity:32, Rest/binary>>, Count, Acc) ->
-    parse_imports(Rest, Count - 1, [{Module, Function, Arity} | Acc]);
+parse_imports(Rest, Count, Acc) when Count > 0 ->
+    %% Bound count by remaining bytes (12 bytes per entry)
+    MaxCount = byte_size(Rest) div 12,
+    if
+        Count > MaxCount ->
+            {error, {impossibly_large_import_count, Count, MaxCount}};
+        true ->
+            parse_imports_loop(Rest, Count, Acc)
+    end;
 parse_imports(_, _, Acc) ->
     lists:reverse(Acc).
 
+parse_imports_loop(_Rest, 0, Acc) ->
+    lists:reverse(Acc);
+parse_imports_loop(<<Module:32, Function:32, Arity:32, Rest/binary>>, Count, Acc) ->
+    parse_imports_loop(Rest, Count - 1, [{Module, Function, Arity} | Acc]);
+parse_imports_loop(_, _, Acc) ->
+    {error, {truncated_imports, lists:reverse(Acc)}}.
+
 parse_exports(_Rest, 0, Acc) ->
     lists:reverse(Acc);
-parse_exports(<<Function:32, Arity:32, Label:32, Rest/binary>>, Count, Acc) ->
-    parse_exports(Rest, Count - 1, [{Function, Arity, Label} | Acc]);
+parse_exports(Rest, Count, Acc) when Count > 0 ->
+    %% Bound count by remaining bytes (12 bytes per entry)
+    MaxCount = byte_size(Rest) div 12,
+    if
+        Count > MaxCount ->
+            {error, {impossibly_large_export_count, Count, MaxCount}};
+        true ->
+            parse_exports_loop(Rest, Count, Acc)
+    end;
 parse_exports(_, _, Acc) ->
     lists:reverse(Acc).
 
+parse_exports_loop(_Rest, 0, Acc) ->
+    lists:reverse(Acc);
+parse_exports_loop(<<Function:32, Arity:32, Label:32, Rest/binary>>, Count, Acc) ->
+    parse_exports_loop(Rest, Count - 1, [{Function, Arity, Label} | Acc]);
+parse_exports_loop(_, _, Acc) ->
+    {error, {truncated_exports, lists:reverse(Acc)}}.
+
 parse_funs(_Rest, 0, Acc) ->
     lists:reverse(Acc);
-parse_funs(<<Function:32, Arity:32, CodePos:32, Index:32,
+parse_funs(Rest, Count, Acc) when Count > 0 ->
+    %% Bound count by remaining bytes (24 bytes per entry)
+    MaxCount = byte_size(Rest) div 24,
+    if
+        Count > MaxCount ->
+            {error, {impossibly_large_fun_count, Count, MaxCount}};
+        true ->
+            parse_funs_loop(Rest, Count, Acc)
+    end;
+parse_funs(_, _, Acc) ->
+    lists:reverse(Acc).
+
+parse_funs_loop(_Rest, 0, Acc) ->
+    lists:reverse(Acc);
+parse_funs_loop(<<Function:32, Arity:32, CodePos:32, Index:32,
              NumFree:32, OldUniq:32, Rest/binary>>, Count, Acc) ->
     Fun = #{function => Function,
             arity => Arity,
@@ -290,9 +332,9 @@ parse_funs(<<Function:32, Arity:32, CodePos:32, Index:32,
             index => Index,
             num_free => NumFree,
             old_uniq => OldUniq},
-    parse_funs(Rest, Count - 1, [Fun | Acc]);
-parse_funs(_, _, Acc) ->
-    lists:reverse(Acc).
+    parse_funs_loop(Rest, Count - 1, [Fun | Acc]);
+parse_funs_loop(_, _, Acc) ->
+    {error, {truncated_funs, lists:reverse(Acc)}}.
 
 parse_literals(<<Count:32, Rest/binary>>) ->
     parse_literal_list(Rest, Count, []).
@@ -562,13 +604,16 @@ decode_extended(0, Rest, _Atoms) ->
 decode_extended(1, Rest, Atoms) ->
     %% List - count (as compact term) followed by count elements
     case decode_operand(Rest, Atoms) of
-        {{integer, Count}, Rest2} ->
+        {{integer, Count}, Rest2} when Count >= 0, Count =< 1000 ->
             case decode_operands(Rest2, Count, Atoms, []) of
                 {Items, Rest3} ->
                     {{list, Items}, Rest3};
                 error ->
                     error
             end;
+        {{integer, _Count}, _Rest2} ->
+            %% Count out of bounds (>1000)
+            error;
         _ ->
             error
     end;
