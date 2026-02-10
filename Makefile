@@ -153,10 +153,10 @@ nucleus: boot-compile arch-compile ## Build UEFI bootable nucleus.efi
 qemu: qemu-test ## Boot in QEMU (alias)
 
 qemu-test: nucleus ## Boot nucleus in QEMU, verify serial output
-	$(Q)./tools/test_nucleus_qemu.sh
+	$(Q)./tools/test_nucleus_qemu.escript
 
 qemu-interactive: nucleus ## Boot nucleus in QEMU with interactive console
-	$(Q)./tools/test_nucleus_qemu.sh --interactive
+	$(Q)./tools/test_nucleus_qemu.escript --interactive
 
 # ── Tests ─────────────────────────────────────────────────────────────
 
@@ -189,13 +189,13 @@ test-vm: compile ## Run VM unit tests
 	done
 
 test-native: ## Run native ARM64 tests
-	$(Q)./tools/test_native_arm64.sh
+	$(Q)./tools/test_native.escript --arch=arm64
 
 test-native-x86: ## Run native x86_64 ELF tests (Docker/QEMU)
-	$(Q)./tools/test_native_x86_64.sh
+	$(Q)./tools/test_native.escript --arch=x86_64
 
 test-native-uefi: ## Run native x86_64 UEFI PE tests (QEMU)
-	$(Q)./tools/test_native_x86_64_uefi.sh
+	$(Q)./tools/test_native.escript --arch=uefi
 
 # ── Quality ───────────────────────────────────────────────────────────
 
