@@ -544,12 +544,17 @@ patch_data(Data, _Offset, _Value, 0) ->
 patch_data(Data, Offset, Value, Type) ->
     Width = reloc_width(Type),
     WidthBytes = Width div 8,
-
-    %% Ensure data is large enough
     DataSize = byte_size(Data),
+
+    %% SECURITY: Validate relocation offset to prevent OOM
+    %% Maximum reasonable section size: 256MB
+    MaxSectionSize = 256 * 1024 * 1024,
     case Offset + WidthBytes of
+        N when N > MaxSectionSize ->
+            %% Reject relocations that would require excessive padding
+            error({relocation_offset_too_large, Offset, DataSize});
         N when N > DataSize ->
-            %% Pad data if needed
+            %% Pad data if needed (validated size)
             PadSize = N - DataSize,
             PaddedData = <<Data/binary, 0:(PadSize * 8)>>,
             patch_data(PaddedData, Offset, Value, Type);

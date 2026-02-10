@@ -20,16 +20,34 @@ test() ->
             %% Decode instructions
             Instructions = vbeam_beam_standalone:decode_instructions(Code, Atoms),
             io:format("  Instructions: ~p~n", [length(Instructions)]),
-            
-            %% Count known vs unknown opcodes
-            {Known, Unknown} = lists:foldl(fun
-                ({{unknown_opcode, _}, _}, {K, U}) -> {K, U+1};
-                (_, {K, U}) -> {K+1, U}
-            end, {0, 0}, Instructions),
-            
-            io:format("  Known opcodes: ~p (~.1f%)~n", [Known, 100.0 * Known / (Known + Unknown)]),
-            io:format("  Unknown opcodes: ~p (~.1f%)~n", [Unknown, 100.0 * Unknown / (Known + Unknown)]),
-            
+
+            %% Guard against divide-by-zero
+            case length(Instructions) of
+                0 ->
+                    io:format("ERROR: 0 instructions decoded~n"),
+                    error(no_instructions_decoded);
+                Total ->
+                    %% Count known vs unknown opcodes
+                    {Known, Unknown} = lists:foldl(fun
+                        ({{unknown_opcode, _}, _}, {K, U}) -> {K, U+1};
+                        (_, {K, U}) -> {K+1, U}
+                    end, {0, 0}, Instructions),
+
+                    KnownPercent = 100.0 * Known / Total,
+                    UnknownPercent = 100.0 * Unknown / Total,
+
+                    io:format("  Known opcodes: ~p (~.1f%)~n", [Known, KnownPercent]),
+                    io:format("  Unknown opcodes: ~p (~.1f%)~n", [Unknown, UnknownPercent]),
+
+                    %% Assert known opcodes >= 90% threshold
+                    case KnownPercent >= 90.0 of
+                        true -> ok;
+                        false ->
+                            io:format("ERROR: Known opcodes below 90% threshold (~.1f%)~n", [KnownPercent]),
+                            error({known_opcodes_below_threshold, KnownPercent})
+                    end
+            end,
+
             ok;
         {error, Reason} ->
             io:format("ERROR: Failed to parse ~s: ~p~n", [BeamFile, Reason]),

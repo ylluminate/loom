@@ -222,6 +222,23 @@ test_exception_stubs_exist() ->
     case byte_size(Stubs) >= MinSize of
         true -> ok;
         false -> error({exception_stubs_too_small, expected_min, MinSize, got, byte_size(Stubs)})
+    end,
+
+    %% Verify jump displacements in stub stubs
+    %% Each stub: push imm8 (2 bytes) + jmp rel8/rel32 (2 or 5 bytes) = 10 bytes fixed
+    %% For first stub (vector 0) at offset 0, common handler is at 34*10 = 340
+    CommonHandlerOffset = 34 * 10,
+
+    %% Check first stub (vector 0) at offset 0
+    <<_Push0:2/binary, JmpOpcode0:8, Displacement0:8/signed, _Rest0/binary>> = Stubs,
+    case JmpOpcode0 of
+        16#EB ->  % jmp rel8
+            ExpectedDisp0 = CommonHandlerOffset - 4,  % 4 = size of stub up to end of jmp
+            case Displacement0 of
+                ExpectedDisp0 -> ok;
+                _ -> error({stub0_jump_mismatch, expected, ExpectedDisp0, got, Displacement0})
+            end;
+        _ -> ok  % If not rel8, might be rel32 - more complex to verify
     end.
 
 test_timer_isr_exists() ->

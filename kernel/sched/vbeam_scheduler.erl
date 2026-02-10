@@ -118,9 +118,9 @@ send_message(ToPid, Message) ->
     gen_server:call(?MODULE, {send_message, ToPid, Message}).
 
 %% @doc Receive next message from process's mailbox.
-%% Returns {ok, Message} or {error, empty}.
-%% If empty, process should become blocked.
--spec receive_message(pid_internal()) -> {ok, term()} | {error, empty}.
+%% Returns {ok, Message}, {error, empty}, or {error, not_found}.
+%% If empty, process becomes blocked.
+-spec receive_message(pid_internal()) -> {ok, term()} | {error, empty | not_found}.
 receive_message(Pid) ->
     gen_server:call(?MODULE, {receive_message, Pid}).
 
@@ -141,7 +141,7 @@ stats() ->
 %%   2. Send divisor low byte to 0x40
 %%   3. Send divisor high byte to 0x40
 -spec pit_init_code(pos_integer()) -> binary().
-pit_init_code(FreqHz) ->
+pit_init_code(FreqHz) when FreqHz > 0 ->
     Divisor = 1193182 div FreqHz,
     LowByte = Divisor band 16#FF,
     HighByte = (Divisor bsr 8) band 16#FF,
@@ -369,7 +369,11 @@ handle_call({receive_message, Pid}, _From, #state{processes = Processes} = State
                     NewProcesses = Processes#{Pid => UpdatedProcess},
                     {reply, {ok, Message}, State#state{processes = NewProcesses}};
                 {empty, _} ->
-                    {reply, {error, empty}, State}
+                    %% Transition to blocked state and remove from ready queues
+                    UpdatedProcess = Process#{status => blocked},
+                    NewProcesses = Processes#{Pid => UpdatedProcess},
+                    NewState = remove_from_queues(Pid, State#state{processes = NewProcesses}),
+                    {reply, {error, empty}, NewState}
             end
     end;
 
@@ -410,7 +414,11 @@ handle_info({irq, ?IRQ_TIMER, _Timestamp}, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{processes = Processes, page_alloc = PageAlloc} = _State) ->
+    %% Free all process heaps
+    _FinalPageAlloc = maps:fold(fun(_Pid, #{heap := Heap}, AccPageAlloc) ->
+        vbeam_heap:free_heap(Heap, AccPageAlloc)
+    end, PageAlloc, Processes),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->

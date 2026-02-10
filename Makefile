@@ -103,44 +103,69 @@ compile: $(EBIN) boot-compile kernel-compile vm-compile arch-compile compat-comp
 
 # Per-subsystem compile targets
 boot-compile: $(EBIN) ## Compile boot subsystem
-	$(Q)for f in $(BOOT_SRC); do \
+	$(Q)FAIL=0; \
+	for f in $(BOOT_SRC); do \
 		mod=$$(basename "$$f" .erl); \
-		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null && \
-			printf "  $(_G)OK$(_N)  $$mod\n" || \
+		if $(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; then \
+			printf "  $(_G)OK$(_N)  $$mod\n"; \
+		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
-	done
+			FAIL=$$((FAIL + 1)); \
+		fi; \
+	done; \
+	test $$FAIL -eq 0
 
 kernel-compile: $(EBIN) ## Compile kernel subsystem
-	$(Q)for f in $(KERNEL_SRC); do \
+	$(Q)FAIL=0; \
+	for f in $(KERNEL_SRC); do \
 		mod=$$(basename "$$f" .erl); \
-		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null && \
-			printf "  $(_G)OK$(_N)  $$mod\n" || \
+		if $(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; then \
+			printf "  $(_G)OK$(_N)  $$mod\n"; \
+		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
-	done
+			FAIL=$$((FAIL + 1)); \
+		fi; \
+	done; \
+	test $$FAIL -eq 0
 
 vm-compile: $(EBIN) ## Compile VM subsystem
-	$(Q)for f in $(VM_SRC); do \
+	$(Q)FAIL=0; \
+	for f in $(VM_SRC); do \
 		mod=$$(basename "$$f" .erl); \
-		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null && \
-			printf "  $(_G)OK$(_N)  $$mod\n" || \
+		if $(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; then \
+			printf "  $(_G)OK$(_N)  $$mod\n"; \
+		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
-	done
+			FAIL=$$((FAIL + 1)); \
+		fi; \
+	done; \
+	test $$FAIL -eq 0
 
 arch-compile: $(EBIN) ## Compile architecture backends
-	$(Q)for f in $(ARCH_SRC); do \
+	$(Q)FAIL=0; \
+	for f in $(ARCH_SRC); do \
 		mod=$$(basename "$$f" .erl); \
-		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null && \
-			printf "  $(_G)OK$(_N)  $$mod\n" || \
+		if $(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; then \
+			printf "  $(_G)OK$(_N)  $$mod\n"; \
+		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
-	done
+			FAIL=$$((FAIL + 1)); \
+		fi; \
+	done; \
+	test $$FAIL -eq 0
 
 compat-compile: $(EBIN) ## Compile compatibility layer
-	$(Q)for f in $(COMPAT_SRC); do \
+	$(Q)FAIL=0; \
+	for f in $(COMPAT_SRC); do \
 		mod=$$(basename "$$f" .erl); \
-		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null && \
-			printf "  $(_G)OK$(_N)  $$mod\n" || \
+		if $(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; then \
+			printf "  $(_G)OK$(_N)  $$mod\n"; \
+		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
-	done
+			FAIL=$$((FAIL + 1)); \
+		fi; \
+	done; \
+	test $$FAIL -eq 0
 
 # ── Nucleus (UEFI Boot) ──────────────────────────────────────────────
 
@@ -164,29 +189,43 @@ test: test-kernel test-vm ## Run all test suites
 
 test-kernel: compile ## Run kernel unit tests
 	@printf "\n  $(_B)Kernel Tests$(_N)\n"
-	$(Q)for f in tests/kernel/*_test.erl; do \
+	$(Q)FAIL=0; \
+	for f in tests/kernel/*_test.erl; do \
 		[ -f "$$f" ] || continue; \
 		mod=$$(basename "$$f" .erl); \
-		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; \
+		if ! $(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; then \
+			printf "  $(_R)FAIL$(_N)  $$mod (compile)\n"; \
+			FAIL=$$((FAIL + 1)); \
+			continue; \
+		fi; \
 		if $(ERL) -noshell -pa $(EBIN) -eval "case $$mod:test() of ok -> halt(0); _ -> halt(1) end" 2>/dev/null; then \
 			printf "  $(_G)PASS$(_N)  $$mod\n"; \
 		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
+			FAIL=$$((FAIL + 1)); \
 		fi; \
-	done
+	done; \
+	test $$FAIL -eq 0
 
 test-vm: compile ## Run VM unit tests
 	@printf "\n  $(_B)VM Tests$(_N)\n"
-	$(Q)for f in tests/vm/*.erl; do \
+	$(Q)FAIL=0; \
+	for f in tests/vm/*.erl; do \
 		[ -f "$$f" ] || continue; \
 		mod=$$(basename "$$f" .erl); \
-		$(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; \
+		if ! $(ERLC) $(ERLC_FLAGS) -o $(EBIN) "$$f" 2>/dev/null; then \
+			printf "  $(_R)FAIL$(_N)  $$mod (compile)\n"; \
+			FAIL=$$((FAIL + 1)); \
+			continue; \
+		fi; \
 		if $(ERL) -noshell -pa $(EBIN) -eval "case $$mod:test() of ok -> halt(0); _ -> halt(1) end" 2>/dev/null; then \
 			printf "  $(_G)PASS$(_N)  $$mod\n"; \
 		else \
 			printf "  $(_R)FAIL$(_N)  $$mod\n"; \
+			FAIL=$$((FAIL + 1)); \
 		fi; \
-	done
+	done; \
+	test $$FAIL -eq 0
 
 test-native: ## Run native ARM64 tests
 	$(Q)./tools/test_native.escript --arch=arm64

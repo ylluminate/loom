@@ -34,6 +34,7 @@
 -define(CHAR_WIDTH, 8).
 -define(CHAR_HEIGHT, 16).
 -define(TAB_WIDTH, 8).
+-define(MAX_LOG_SIZE, 1000).
 
 %%% ----------------------------------------------------------------------------
 %%% Types
@@ -50,7 +51,9 @@
     serial => boolean(),
     framebuffer => false | fb_info(),
     log => boolean(),
-    log_buffer => binary(),
+    log_buffer => [binary()],  % Ring buffer of log entries
+    log_count => non_neg_integer(),
+    max_log_size => pos_integer(),
     cursor_x => non_neg_integer(),
     cursor_y => non_neg_integer(),
     margin => non_neg_integer()
@@ -71,11 +74,15 @@ start_link(Opts) ->
 
 %% @doc Set this I/O server as the group leader for the calling process.
 %% After this, io:format/2 etc. will route through this server.
--spec set_group_leader() -> true.
+-spec set_group_leader() -> true | {error, not_started}.
 set_group_leader() ->
     %% Get the actual pid of the registered server
-    Pid = whereis(?SERVER),
-    group_leader(Pid, self()).
+    case whereis(?SERVER) of
+        undefined ->
+            {error, not_started};
+        Pid ->
+            group_leader(Pid, self())
+    end.
 
 %% @doc Direct write (bypasses I/O protocol, for kernel messages).
 -spec write(iodata()) -> ok.
@@ -101,6 +108,7 @@ init(Opts) ->
     Serial = maps:get(serial, Opts, true),
     Framebuffer = maps:get(framebuffer, Opts, false),
     Log = maps:get(log, Opts, true),
+    MaxLogSize = maps:get(max_log_size, Opts, ?MAX_LOG_SIZE),
 
     %% Initial cursor position (left margin, top of screen)
     Margin = 8,
@@ -109,7 +117,9 @@ init(Opts) ->
         serial => Serial,
         framebuffer => Framebuffer,
         log => Log,
-        log_buffer => <<>>,
+        log_buffer => [],
+        log_count => 0,
+        max_log_size => MaxLogSize,
         cursor_x => Margin,
         cursor_y => 20,
         margin => Margin
@@ -119,7 +129,9 @@ init(Opts) ->
 
 %% @private
 handle_call(get_log, _From, #{log_buffer := LogBuf} = State) ->
-    {reply, LogBuf, State};
+    %% Concatenate all log entries
+    CombinedLog = iolist_to_binary(lists:reverse(LogBuf)),
+    {reply, CombinedLog, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -304,7 +316,15 @@ advance_cursor(_Char, X, Y, Margin, Width, _Height) ->
             {NewX, Y}
     end.
 
-%% @doc Append to in-memory log buffer
+%% @doc Append to in-memory log buffer (ring buffer with max size)
 -spec output_log(binary(), state()) -> state().
-output_log(String, #{log_buffer := LogBuf} = State) ->
-    State#{log_buffer := <<LogBuf/binary, String/binary>>}.
+output_log(String, #{log_buffer := LogBuf, log_count := Count, max_log_size := MaxSize} = State) ->
+    NewLogBuf = case Count >= MaxSize of
+        true ->
+            %% Drop oldest entry (at tail of list)
+            [String | lists:droplast(LogBuf)];
+        false ->
+            [String | LogBuf]
+    end,
+    NewCount = min(Count + 1, MaxSize),
+    State#{log_buffer := NewLogBuf, log_count := NewCount}.

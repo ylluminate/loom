@@ -20,6 +20,7 @@ run() ->
     test_multiple_alloc(),
     test_contiguous_alloc(),
     test_mark_reserved(),
+    test_mark_reserved_reverse_range(),
     test_exhaustion(),
     test_fragmentation(),
     test_edge_cases(),
@@ -158,6 +159,21 @@ test_mark_reserved() ->
     io:format("PASS~n"),
     ok.
 
+test_mark_reserved_reverse_range() ->
+    io:format("Test: Mark reserved with reverse range (StartAddr > EndAddr)... "),
+    State0 = vbeam_page_alloc:init(16 * ?MB),
+    Stats0 = vbeam_page_alloc:stats(State0),
+
+    %% Try to reserve with StartAddr > EndAddr (invalid range)
+    State1 = vbeam_page_alloc:mark_reserved(State0, 8 * ?MB, 4 * ?MB),
+
+    %% Stats should be unchanged - no crash, no negative page count
+    Stats1 = vbeam_page_alloc:stats(State1),
+    Stats0 = Stats1,
+
+    io:format("PASS~n"),
+    ok.
+
 test_exhaustion() ->
     io:format("Test: Memory exhaustion... "),
     %% Small memory pool for easier exhaustion
@@ -231,15 +247,15 @@ test_edge_cases() ->
     Stats2 = vbeam_page_alloc:stats(State2),
     0 = maps:get(free, Stats2),
 
-    %% Double free (should just clear bit again - idempotent)
+    %% Double free (should be idempotent - no accounting change)
     State3 = vbeam_page_alloc:init(16 * ?MB),
     {ok, Addr, State4} = vbeam_page_alloc:alloc_page(State3),
     State5 = vbeam_page_alloc:free_page(State4, Addr),
     Stats5 = vbeam_page_alloc:stats(State5),
     State6 = vbeam_page_alloc:free_page(State5, Addr), %% Double free
     Stats6 = vbeam_page_alloc:stats(State6),
-    %% Stats should be same (or free_count might increase by 1 - current impl)
-    true = maps:get(free, Stats6) >= maps:get(free, Stats5),
+    %% Stats should be exactly the same - double-free should not change accounting
+    Stats5 = Stats6,
 
     io:format("PASS~n"),
     ok.

@@ -68,8 +68,10 @@
 -type phys_addr() :: non_neg_integer().
 -type size_hint() :: small | medium | large.
 -type alloc_state() :: term().  %% vbeam_page_alloc state
+-type proc_id() :: non_neg_integer().
+
 -type registry() :: #{
-    heaps => #{pid() => heap()},
+    heaps => #{proc_id() => heap()},
     next_id => heap_id()
 }.
 
@@ -253,7 +255,7 @@ registry_new() ->
     }.
 
 %% @doc Add heap to registry with process ID
--spec registry_add(registry(), pid(), heap()) -> registry().
+-spec registry_add(registry(), proc_id(), heap()) -> registry().
 registry_add(#{heaps := Heaps, next_id := NextId} = Registry, Pid, Heap) ->
     %% Assign ID if heap doesn't have one
     HeapWithId = case maps:get(id, Heap, undefined) of
@@ -268,13 +270,13 @@ registry_add(#{heaps := Heaps, next_id := NextId} = Registry, Pid, Heap) ->
     }.
 
 %% @doc Remove heap from registry by process ID
--spec registry_remove(registry(), pid()) -> registry().
+-spec registry_remove(registry(), proc_id()) -> registry().
 registry_remove(#{heaps := Heaps} = Registry, Pid) ->
     NewHeaps = maps:remove(Pid, Heaps),
     Registry#{heaps => NewHeaps}.
 
 %% @doc Get heap by process ID
--spec registry_get(registry(), pid()) -> {ok, heap()} | {error, not_found}.
+-spec registry_get(registry(), proc_id()) -> {ok, heap()} | {error, not_found}.
 registry_get(#{heaps := Heaps}, Pid) ->
     case maps:get(Pid, Heaps, undefined) of
         undefined -> {error, not_found};

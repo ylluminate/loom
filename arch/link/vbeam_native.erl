@@ -32,8 +32,8 @@ main(Args) ->
                         {ok, Binary} ->
                             OutFile = maps:get(output, Opts, "a.out"),
                             ok = file:write_file(OutFile, Binary),
-                            %% Make executable on Unix
-                            os:cmd("chmod +x " ++ OutFile),
+                            %% Make executable on Unix (safe file API)
+                            ok = file:change_mode(OutFile, 8#755),
                             io:format("~s: ~B bytes written (~p ~p)~n",
                                       [OutFile, byte_size(Binary),
                                        maps:get(target, Module2),
@@ -260,7 +260,8 @@ inject_runtime_builtins(#{functions := Functions} = Module) ->
     %% Auto-generate stubs for remaining unresolved symbols.
     %% This allows programs to compile even when some methods/functions
     %% are not yet implemented. The stubs return 0.
-    AutoStubs = [make_auto_stub(Name) || Name <- StillUnresolved],
+    Target = maps:get(target, Module, arm64),
+    AutoStubs = [make_auto_stub(Name, Target) || Name <- StillUnresolved],
     AllNew = Builtins ++ AutoStubs,
     case AllNew of
         [] -> Module;
@@ -269,7 +270,12 @@ inject_runtime_builtins(#{functions := Functions} = Module) ->
 
 %% Generate a minimal auto-stub function that returns 0.
 %% This allows programs to link even if a function has no real implementation.
-make_auto_stub(Name) ->
+%% The stub is target-aware: uses x0 for arm64, rax for x86_64.
+make_auto_stub(Name, Target) ->
+    ReturnReg = case Target of
+        arm64 -> x0;
+        x86_64 -> rax
+    end,
     #{
         name => Name,
         arity => 1,
@@ -277,7 +283,7 @@ make_auto_stub(Name) ->
         params => [{vreg, 0}],
         locals => 1,
         body => [
-            {mov_imm, {preg, x0}, 0},
+            {mov_imm, {preg, ReturnReg}, 0},
             ret
         ]
     }.
@@ -904,9 +910,22 @@ parse_opts([], Opts) -> Opts;
 parse_opts(["-o", File | Rest], Opts) ->
     parse_opts(Rest, Opts#{output => File});
 parse_opts(["-target", T | Rest], Opts) ->
-    parse_opts(Rest, Opts#{target_override => list_to_atom(T)});
+    %% Whitelist target architectures (prevent atom exhaustion)
+    Target = case T of
+        "x86_64" -> x86_64;
+        "arm64" -> arm64;
+        _ -> error({invalid_target, T})
+    end,
+    parse_opts(Rest, Opts#{target_override => Target});
 parse_opts(["-format", F | Rest], Opts) ->
-    parse_opts(Rest, Opts#{format_override => list_to_atom(F)});
+    %% Whitelist output formats (prevent atom exhaustion)
+    Format = case F of
+        "elf64" -> elf64;
+        "macho" -> macho;
+        "pe" -> pe;
+        _ -> error({invalid_format, F})
+    end,
+    parse_opts(Rest, Opts#{format_override => Format});
 parse_opts([_ | Rest], Opts) ->
     parse_opts(Rest, Opts).
 

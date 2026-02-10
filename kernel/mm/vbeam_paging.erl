@@ -109,19 +109,29 @@ enable_paging_code() ->
 %% @doc Create a page table entry with given physical address, flags, and level
 -spec page_table_entry(non_neg_integer(), [atom()], atom()) -> binary().
 page_table_entry(PhysAddr, Flags, Level) ->
-    %% Validate alignment (must be 4KB aligned)
-    case PhysAddr rem ?PAGE_SIZE of
-        0 -> ok;
-        _ -> error({misaligned_address, PhysAddr})
+    %% Validate alignment: 2MB for 2MB pages, 4KB for others
+    case {Level, lists:member(ps, Flags)} of
+        {pd, true} ->
+            %% 2MB page requires 2MB alignment
+            case PhysAddr rem ?PAGE_2MB of
+                0 -> ok;
+                _ -> error({misaligned_2mb_page, PhysAddr})
+            end;
+        _ ->
+            %% 4KB alignment for other entries
+            case PhysAddr rem ?PAGE_SIZE of
+                0 -> ok;
+                _ -> error({misaligned_address, PhysAddr})
+            end
     end,
 
     %% Convert flag atoms to bitmask
     FlagBits = flags_to_bits(Flags),
 
-    %% For PD entries with PS flag, clear bits 12-20 (must be zero)
+    %% For PD entries with PS flag, bits 12-20 must be zero (reserved)
     %% For 2MB pages, only bits 21-51 are valid for address
     AddrMask = case {Level, lists:member(ps, Flags)} of
-        {pd, true} -> 16#000FFFFFFFFFF000;  %% 2MB page: bits 21-51
+        {pd, true} -> 16#000FFFFFFFE00000;  %% 2MB page: bits 21-51 (mask bits 12-20)
         _ -> 16#000FFFFFFFFFF000             %% 4KB page: bits 12-51
     end,
 

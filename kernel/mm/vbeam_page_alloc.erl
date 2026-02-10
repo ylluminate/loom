@@ -83,12 +83,19 @@ free_page(State, PhysAddr) ->
     PageNum = PhysAddr div ?PAGE_SIZE,
     #{bitmap := Bitmap, free_count := FreeCount} = State,
 
-    %% Clear the bit (set to 0)
-    NewBitmap = clear_bit(Bitmap, PageNum),
-    State#{
-        bitmap := NewBitmap,
-        free_count := FreeCount + 1
-    }.
+    %% Check if page is actually allocated before freeing
+    case get_bit(Bitmap, PageNum) of
+        1 ->
+            %% Page is allocated - free it
+            NewBitmap = clear_bit(Bitmap, PageNum),
+            State#{
+                bitmap := NewBitmap,
+                free_count := FreeCount + 1
+            };
+        0 ->
+            %% Page is already free - double-free, return unchanged
+            State
+    end.
 
 %% @doc Free multiple pages
 -spec free_pages(state(), [phys_addr()]) -> state().
@@ -97,6 +104,9 @@ free_pages(State, PhysAddrs) ->
 
 %% @doc Mark a physical address range as reserved
 -spec mark_reserved(state(), phys_addr(), phys_addr()) -> state().
+mark_reserved(State, StartAddr, EndAddr) when StartAddr > EndAddr ->
+    %% Invalid range - return state unchanged
+    State;
 mark_reserved(State, StartAddr, EndAddr) ->
     StartPage = StartAddr div ?PAGE_SIZE,
     EndPage = EndAddr div ?PAGE_SIZE,
@@ -179,7 +189,7 @@ count_free_in_range_loop(Bitmap, Page, EndPage, Count) ->
 mark_pages_allocated(Bitmap, StartPage, Count) ->
     mark_pages_loop(Bitmap, StartPage, Count).
 
-mark_pages_loop(Bitmap, _Page, 0) ->
+mark_pages_loop(Bitmap, _Page, Count) when Count =< 0 ->
     Bitmap;
 mark_pages_loop(Bitmap, Page, Count) ->
     NewBitmap = set_bit(Bitmap, Page),

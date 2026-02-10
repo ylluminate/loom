@@ -107,7 +107,8 @@ ring_size(#{head := Head, tail := Tail}) ->
 
 -record(state, {
     ring_buffer :: map(),
-    handlers :: #{non_neg_integer() => pid()}
+    handlers :: #{non_neg_integer() => pid()},
+    monitors :: #{reference() => non_neg_integer()}  % monitor_ref => irq_num
 }).
 
 %%% ==========================================================================
@@ -226,15 +227,37 @@ isr_ring_buffer_write() ->
 
 init([]) ->
     RingBuffer = ring_new(?DEFAULT_RING_SIZE),
-    {ok, #state{ring_buffer = RingBuffer, handlers = #{}}}.
+    {ok, #state{ring_buffer = RingBuffer, handlers = #{}, monitors = #{}}}.
 
-handle_call({register_handler, IrqNum, Pid}, _From, #state{handlers = Handlers} = State) ->
+handle_call({register_handler, IrqNum, Pid}, _From, #state{handlers = Handlers, monitors = Monitors} = State) ->
+    %% Monitor the handler PID to detect when it dies
+    MonitorRef = monitor(process, Pid),
     NewHandlers = Handlers#{IrqNum => Pid},
-    {reply, ok, State#state{handlers = NewHandlers}};
+    NewMonitors = Monitors#{MonitorRef => IrqNum},
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}};
 
-handle_call({unregister_handler, IrqNum}, _From, #state{handlers = Handlers} = State) ->
+handle_call({unregister_handler, IrqNum}, _From, #state{handlers = Handlers, monitors = Monitors} = State) ->
+    %% Demonitor if handler exists
+    NewMonitors = case maps:get(IrqNum, Handlers, undefined) of
+        undefined ->
+            Monitors;
+        _Pid ->
+            %% Find and remove monitor reference
+            MonitorRef = maps:fold(fun(Ref, Irq, Acc) ->
+                case Irq =:= IrqNum of
+                    true -> Ref;
+                    false -> Acc
+                end
+            end, undefined, Monitors),
+            case MonitorRef of
+                undefined -> Monitors;
+                Ref ->
+                    demonitor(Ref, [flush]),
+                    maps:remove(Ref, Monitors)
+            end
+    end,
     NewHandlers = maps:remove(IrqNum, Handlers),
-    {reply, ok, State#state{handlers = NewHandlers}};
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors}};
 
 handle_call(get_handlers, _From, #state{handlers = Handlers} = State) ->
     {reply, Handlers, State};
@@ -242,15 +265,22 @@ handle_call(get_handlers, _From, #state{handlers = Handlers} = State) ->
 handle_call(tick, _From, #state{ring_buffer = RingBuf, handlers = Handlers} = State) ->
     {Events, NewRingBuf} = ring_pop_all(RingBuf),
 
-    %% Deliver each event to its registered handler
+    %% Deliver each event to its registered handler (only if handler is alive)
     DeliveredCount = lists:foldl(fun({IrqNum, Timestamp}, Count) ->
         case maps:get(IrqNum, Handlers, undefined) of
             undefined ->
                 %% No handler registered, drop event
                 Count;
             Pid when is_pid(Pid) ->
-                Pid ! {irq, IrqNum, Timestamp},
-                Count + 1
+                %% Only count as delivered if process is alive
+                case is_process_alive(Pid) of
+                    true ->
+                        Pid ! {irq, IrqNum, Timestamp},
+                        Count + 1;
+                    false ->
+                        %% Handler died but not yet cleaned up by monitor
+                        Count
+                end
         end
     end, 0, Events),
 
@@ -265,6 +295,19 @@ handle_cast({simulate_irq, IrqNum, Timestamp}, #state{ring_buffer = RingBuf} = S
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
+
+%% Handle monitor DOWN messages when a handler dies
+handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, #state{handlers = Handlers, monitors = Monitors} = State) ->
+    case maps:get(MonitorRef, Monitors, undefined) of
+        undefined ->
+            %% Unknown monitor, ignore
+            {noreply, State};
+        IrqNum ->
+            %% Remove dead handler
+            NewHandlers = maps:remove(IrqNum, Handlers),
+            NewMonitors = maps:remove(MonitorRef, Monitors),
+            {noreply, State#state{handlers = NewHandlers, monitors = NewMonitors}}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.

@@ -53,18 +53,24 @@ run() ->
             %% Verify our module name is there
             case lists:member(simple_test, Atoms) of
                 true -> io:format("   ✓ Module name 'simple_test' found~n");
-                false -> io:format("   ✗ ERROR: Module name not found~n")
+                false ->
+                    io:format("   ✗ ERROR: Module name not found~n"),
+                    error(module_name_not_found)
             end,
 
             %% Verify function names
             case lists:member(add, Atoms) of
                 true -> io:format("   ✓ Function 'add' found~n");
-                false -> io:format("   ✗ ERROR: Function 'add' not found~n")
+                false ->
+                    io:format("   ✗ ERROR: Function 'add' not found~n"),
+                    error(function_add_not_found)
             end,
 
             case lists:member(factorial, Atoms) of
                 true -> io:format("   ✓ Function 'factorial' found~n~n");
-                false -> io:format("   ✗ ERROR: Function 'factorial' not found~n~n")
+                false ->
+                    io:format("   ✗ ERROR: Function 'factorial' not found~n~n"),
+                    error(function_factorial_not_found)
             end,
 
             %% Step 4: Verify exports
