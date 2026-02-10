@@ -27,7 +27,7 @@
          simulate_irq/1,
          tick/1,
          ack_irq/1,  % FINDING 8 FIX: Allow handlers to acknowledge receipt
-         isr_ring_buffer_write/0]).
+         isr_ring_buffer_write/1]).  % FINDING R39-4 FIX: Now takes IrqNum parameter
 
 %% Ring buffer operations
 -export([ring_new/1,
@@ -174,9 +174,9 @@ ack_irq(IrqNum) when is_integer(IrqNum), IrqNum >= 0 ->
 %%   8. Restore registers
 %%   9. iretq
 %%
-%% For now, returns minimal stub that demonstrates the structure.
--spec isr_ring_buffer_write() -> binary().
-isr_ring_buffer_write() ->
+%% FINDING R39-4 FIX: Takes IrqNum parameter to embed as immediate instead of reading from stack
+-spec isr_ring_buffer_write(non_neg_integer()) -> binary().
+isr_ring_buffer_write(IrqNum) ->
     %% Ring buffer layout in physical memory:
     %%   [head:8][tail:8][size:8][data: N * 16 bytes]
     %% Each entry: [irq_num:8][timestamp:8]
@@ -207,8 +207,9 @@ isr_ring_buffer_write() ->
         <<16#48, 16#C1, 16#E2, 16#04>>,                        % shl rdx, 4 (multiply by 16)
         <<16#48, 16#83, 16#C2, 16#18>>,                        % add rdx, 24
 
-        %% Write IRQ number (from stack at [rsp+56], after 7 pushed regs)
-        <<16#48, 16#8B, 16#4C, 16#24, 16#38>>,                 % mov rcx, [rsp+56]
+        %% FINDING R39-4 FIX: Write IRQ number from immediate parameter, not from stack
+        %% mov rcx, IrqNum (embedded immediate)
+        <<16#48, 16#B9>>, <<IrqNum:64/little>>,                % mov rcx, IrqNum
         <<16#4A, 16#89, 16#0C, 16#1A>>,                        % mov [r11+rdx], rcx (use r11 base)
 
         %% Save entry offset to R8 (rdx will be clobbered by rdtsc)

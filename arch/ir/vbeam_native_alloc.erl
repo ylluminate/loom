@@ -186,11 +186,11 @@ emit_alloc(x86_64, DstReg, N) ->
         %% CRITICAL FIX (Finding 10): Add wraparound check before bounds check
         %% If heap_ptr < dst_reg after add, unsigned overflow occurred
         ?X86_ENC:encode_cmp_rr(HeapReg, DstReg),
-        ?X86_ENC:encode_jb(0),  % unsigned: new < old
+        ?X86_ENC:encode_jcc_rel32(ltu, 0),  % unsigned: new < old
         {reloc, rel32, OomLbl, -4},
         %% Bounds check: heap_ptr > heap_end?
         ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
-        ?X86_ENC:encode_jbe(0),  % FIXED: unsigned below-or-equal
+        ?X86_ENC:encode_jcc_rel32(leu, 0),  % FIXED: unsigned below-or-equal
         {reloc, rel32, OkLbl, -4},
         %% OOM path: trap via int3
         {label, OomLbl},
@@ -277,11 +277,11 @@ emit_alloc_reg(x86_64, DstReg, SizeReg) ->
         ?X86_ENC:encode_add_rr(HeapReg, TmpReg),
         %% CRITICAL FIX (Finding 4): Wraparound check uses unsigned 'jb'
         ?X86_ENC:encode_cmp_rr(HeapReg, DstReg),
-        ?X86_ENC:encode_jb(0),  % unsigned: new < old
+        ?X86_ENC:encode_jcc_rel32(ltu, 0),  % unsigned: new < old
         {reloc, rel32, OverflowLbl, -4},
         %% CRITICAL FIX (Finding 4): Bounds check uses unsigned 'jbe' (below-or-equal)
         ?X86_ENC:encode_cmp_rr(HeapReg, HeapEndReg),
-        ?X86_ENC:encode_jbe(0),  % unsigned: heap_ptr <= heap_end
+        ?X86_ENC:encode_jcc_rel32(leu, 0),  % unsigned: heap_ptr <= heap_end
         {reloc, rel32, OkLbl, -4},
         %% OOM path
         {label, OomLbl},

@@ -278,6 +278,7 @@ cond_code(le)  -> 16#8E;   %% JLE (signed)
 cond_code(gt)  -> 16#8F;   %% JG (signed)
 cond_code(ltu) -> 16#82;   %% JB / JNAE (unsigned below)
 cond_code(geu) -> 16#83;   %% JAE / JNB (unsigned above-or-equal)
+cond_code(nc)  -> 16#83;   %% JNC / JNAE (no carry, same as geu)
 cond_code(leu) -> 16#86;   %% JBE / JNA (unsigned below-or-equal)
 cond_code(gtu) -> 16#87.   %% JA / JNBE (unsigned above)
 

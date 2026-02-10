@@ -402,18 +402,26 @@ build_common_handler() ->
         %% add al, '0'
         encode_add_al_imm(16#30),
 
+        %% FINDING R39-6 FIX: Save exception char to BL before UART wait loop
+        %% mov bl, al
+        <<16#88, 16#C3>>,  % mov bl, al
+
         %% Output to serial (COM1 0x3F8)
         %% Wait for TX ready
         %% mov edx, 0x3FD (LSR)
         encode_mov_edx_imm(16#3FD),
 
         %% wait_tx_ready:
-        %% in al, dx
+        %% in al, dx (this clobbers AL, but we saved to BL)
         encode_inb_dx(),
         %% test al, 0x20
         encode_test_al_imm(16#20),
         %% jz wait_tx_ready (loop if not ready, offset -7)
         <<16#74, 16#F6>>,
+
+        %% FINDING R39-6 FIX: Restore exception char from BL
+        %% mov al, bl
+        <<16#88, 16#D8>>,  % mov al, bl
 
         %% mov edx, 0x3F8 (THR)
         encode_mov_edx_imm(16#3F8),

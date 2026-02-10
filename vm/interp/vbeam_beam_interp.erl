@@ -82,13 +82,14 @@ init_proc(Chunks) ->
     CodeBinary = maps:get(code, Code),
 
     %% Get atom table
+    %% FINDING R39-2 FIX: Convert atom binaries to atoms for interpreter compatibility
     Atoms = case maps:get('AtU8', Chunks, undefined) of
         undefined ->
             case maps:get('Atom', Chunks, undefined) of
                 undefined -> [];
-                {AtomList, _} -> AtomList
+                {AtomList, _} -> convert_atoms_to_atoms(AtomList)
             end;
-        {AtomList, _} -> AtomList
+        {AtomList, _} -> convert_atoms_to_atoms(AtomList)
     end,
 
     %% Get other tables
@@ -123,6 +124,12 @@ build_label_map(Code, PC, Acc) ->
         {unknown_opcode, NextPC} ->
             %% FINDING 9 FIX: Handle 2-tuple unknown opcode decode result
             build_label_map(Code, NextPC, Acc);
+        {int_code_end, NextPC} ->
+            %% FINDING R39-1 FIX: Handle 2-tuple int_code_end
+            build_label_map(Code, NextPC, Acc);
+        {return, NextPC} ->
+            %% FINDING R39-1 FIX: Handle 2-tuple return
+            build_label_map(Code, NextPC, Acc);
         {_, _, NextPC} ->
             build_label_map(Code, NextPC, Acc);
         done ->
@@ -130,6 +137,7 @@ build_label_map(Code, PC, Acc) ->
     end.
 
 %% Find function entry label
+%% FINDING R39-2 FIX: Atoms list now contains atoms, not binaries
 find_function_label(#proc{exports = Exports, atoms = Atoms}, FunName, Arity) ->
     %% Safely convert to atom - only if it already exists
     FunAtom = case FunName of
@@ -149,6 +157,7 @@ find_function_label(#proc{exports = Exports, atoms = Atoms}, FunName, Arity) ->
         undefined ->
             error;
         _ ->
+            %% Find atom index (Atoms is now a list of atoms, not binaries)
             case lists:keyfind(FunAtom, 1, lists:zip(Atoms, lists:seq(1, length(Atoms)))) of
                 {FunAtom, FunIndex} ->
                     case lists:keyfind({FunIndex, Arity, '_'}, 1,
@@ -166,6 +175,23 @@ find_function_label(#proc{exports = Exports, atoms = Atoms}, FunName, Arity) ->
                     error
             end
     end.
+
+%% Convert atom binaries from parser to proper atoms
+%% Safely creates atoms only if they don't exceed the atom table limit
+convert_atoms_to_atoms(AtomBinaries) when is_list(AtomBinaries) ->
+    lists:map(fun(Bin) when is_binary(Bin) ->
+        %% Convert binary to atom safely
+        try
+            binary_to_atom(Bin, utf8)
+        catch
+            error:_ ->
+                %% If conversion fails, keep as binary
+                Bin
+        end;
+        (Other) -> Other
+    end, AtomBinaries);
+convert_atoms_to_atoms(Other) ->
+    Other.
 
 %% Main interpreter loop
 run(#proc{reductions = Reds} = Proc, Options) ->

@@ -235,7 +235,7 @@ receive_all_irqs(N, Acc) ->
 %%% ==========================================================================
 
 test_isr_code_generation() ->
-    Code = vbeam_irq_bridge:isr_ring_buffer_write(),
+    Code = vbeam_irq_bridge:isr_ring_buffer_write(32),
 
     %% Verify it's a non-empty binary
     true = is_binary(Code),

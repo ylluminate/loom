@@ -278,13 +278,16 @@ mark_pages_loop(Bitmap, Page, Count) ->
     mark_pages_loop(NewBitmap, Page + 1, Count - 1).
 
 %% @doc Find N contiguous free pages starting from Hint
+%% FINDING R39-3 FIX: Correct wrap-around search for Count>1
+%% Second pass iterates from 0 up to Hint-1, but must validate Start + Count <= Total, not Start + Count <= Hint
 find_contiguous(Bitmap, Count, Hint, Total) ->
     %% Try from hint to end
     case find_contiguous_range(Bitmap, Count, Hint, Total) of
         {ok, _} = Result -> Result;
         not_found ->
-            %% Wrap around: try from 0 to hint
-            find_contiguous_range(Bitmap, Count, 0, Hint)
+            %% Wrap around: try from 0 up to Hint-1
+            %% Pass Total as upper bound so guard correctly validates Start + Count <= Total
+            find_contiguous_range_below(Bitmap, Count, 0, Hint, Total)
     end.
 
 find_contiguous_range(_Bitmap, Count, Start, End) when Start + Count > End ->
@@ -293,6 +296,17 @@ find_contiguous_range(Bitmap, Count, Start, End) ->
     case check_contiguous(Bitmap, Start, Count) of
         true -> {ok, Start};
         false -> find_contiguous_range(Bitmap, Count, Start + 1, End)
+    end.
+
+%% FINDING R39-3 FIX: Search from Start up to UpperLimit-1, validating Start + Count <= Total
+find_contiguous_range_below(_Bitmap, _Count, Start, UpperLimit, _Total) when Start >= UpperLimit ->
+    not_found;
+find_contiguous_range_below(_Bitmap, Count, Start, _UpperLimit, Total) when Start + Count > Total ->
+    not_found;
+find_contiguous_range_below(Bitmap, Count, Start, UpperLimit, Total) ->
+    case check_contiguous(Bitmap, Start, Count) of
+        true -> {ok, Start};
+        false -> find_contiguous_range_below(Bitmap, Count, Start + 1, UpperLimit, Total)
     end.
 
 %% @doc Check if N consecutive pages are free starting from StartPage

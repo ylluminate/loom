@@ -768,9 +768,22 @@ decode_extended(4, Rest, Atoms) ->
         _ ->
             error
     end;
-decode_extended(_, Rest, _Atoms) ->
-    %% Unknown extended type
-    {{unknown, extended}, Rest}.
+decode_extended(5, Rest, Atoms) ->
+    %% Typed register (OTP 22+) — type annotation + register as two sub-operands
+    case decode_operand(Rest, Atoms) of
+        {TypeOp, Rest2} ->
+            case decode_operand(Rest2, Atoms) of
+                {RegOp, Rest3} ->
+                    {{typed_register, TypeOp, RegOp}, Rest3};
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end;
+decode_extended(SubType, _Rest, _Atoms) ->
+    %% FINDING R39-5 FIX: Return error for unknown extended subtypes instead of accepting them
+    {error, {unknown_extended_subtype, SubType}}.
 
 %% Decode allocation list entries (type/val pairs as compact terms)
 decode_alloc_list(Rest, 0, _Atoms, Acc) ->

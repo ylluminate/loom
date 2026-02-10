@@ -240,16 +240,31 @@ lower_instruction({add, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCallee
          ?ENC:encode_add_rr(Dst, B)]
     end;
 lower_instruction({add, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 6): encode_add_imm uses imm32 (sign-extended).
+    %% If Imm is outside [-2^31, 2^31-1], use mov_imm64 to scratch and add_rr.
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
-    Parts0 ++ [?ENC:encode_add_imm(Dst, Imm)];
+    case Imm >= -16#80000000 andalso Imm =< 16#7FFFFFFF of
+        true ->
+            Parts0 ++ [?ENC:encode_add_imm(Dst, Imm)];
+        false ->
+            %% Out of range: mov r11, Imm; add Dst, r11
+            Parts0 ++ [?ENC:encode_mov_imm64(r11, Imm), ?ENC:encode_add_rr(Dst, r11)]
+    end;
 
 %% SUB
 lower_instruction({sub, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
     Parts0 ++ [?ENC:encode_sub_rr(Dst, B)];
 lower_instruction({sub, {preg, Dst}, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 6): encode_sub_imm uses imm32 (sign-extended).
     Parts0 = if Dst =/= A -> [?ENC:encode_mov_rr(Dst, A)]; true -> [] end,
-    Parts0 ++ [?ENC:encode_sub_imm(Dst, Imm)];
+    case Imm >= -16#80000000 andalso Imm =< 16#7FFFFFFF of
+        true ->
+            Parts0 ++ [?ENC:encode_sub_imm(Dst, Imm)];
+        false ->
+            %% Out of range: mov r11, Imm; sub Dst, r11
+            Parts0 ++ [?ENC:encode_mov_imm64(r11, Imm), ?ENC:encode_sub_rr(Dst, r11)]
+    end;
 
 %% MUL (IMUL r64, r64)
 lower_instruction({mul, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
@@ -399,7 +414,14 @@ lower_instruction({not_, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSaved) -
 lower_instruction({cmp, {preg, A}, {preg, B}}, _FnName, _UsedCalleeSaved) ->
     [?ENC:encode_cmp_rr(A, B)];
 lower_instruction({cmp, {preg, A}, {imm, Imm}}, _FnName, _UsedCalleeSaved) ->
-    [?ENC:encode_cmp_imm(A, Imm)];
+    %% CRITICAL FIX (Finding 6): encode_cmp_imm uses imm32 (sign-extended).
+    case Imm >= -16#80000000 andalso Imm =< 16#7FFFFFFF of
+        true ->
+            [?ENC:encode_cmp_imm(A, Imm)];
+        false ->
+            %% Out of range: mov r11, Imm; cmp A, r11
+            [?ENC:encode_mov_imm64(r11, Imm), ?ENC:encode_cmp_rr(A, r11)]
+    end;
 
 %% JMP (unconditional)
 lower_instruction({jmp, Label}, _FnName, _UsedCalleeSaved) ->

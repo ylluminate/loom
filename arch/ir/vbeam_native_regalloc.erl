@@ -363,8 +363,15 @@ available_regs_call_aware(Target, Intervals, CallPositions) ->
         fun(I) -> spans_call(I, CallPositions) end, Intervals),
     BaseRegs = case HasCallSpanners of
         true ->
-            %% Put callee-saved FIRST so call-spanning vregs get them
-            callee_saved_regs(Target) ++ caller_saved_regs(Target);
+            %% CRITICAL FIX (Finding 4): Build pool from available_regs(Target)
+            %% instead of raw callee/caller lists to avoid reintroducing excluded
+            %% scratch regs (r11, x16/x17) that were removed by available_regs/1.
+            %% Reorder to put callee-saved first, but use filtered list.
+            AvailableList = available_regs(Target),
+            CalleeSaved = callee_saved_regs(Target),
+            CalleePart = [R || R <- CalleeSaved, lists:member(R, AvailableList)],
+            CallerPart = [R || R <- AvailableList, not lists:member(R, CalleeSaved)],
+            CalleePart ++ CallerPart;
         false ->
             %% No calls to worry about — use original order
             available_regs(Target)

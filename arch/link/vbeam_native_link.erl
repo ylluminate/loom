@@ -48,27 +48,27 @@ new() ->
     #{symbols => [], relocs => []}.
 
 %% @doc Add a symbol to the linker state.
-%% Detects duplicate symbols with different offsets and logs warnings.
+%% Detects duplicate symbols with different offsets and returns error.
 -spec add_symbol(linker_state(), binary(), non_neg_integer(),
-                 text | data | bss, boolean()) -> linker_state().
+                 text | data | bss, boolean()) ->
+    linker_state() | {error, {duplicate_symbol, binary()}}.
 add_symbol(#{symbols := Syms} = State, Name, Offset, Section, Exported) ->
     %% Check for existing symbol with same name but different offset
     case lists:any(fun(#symbol{name = N, offset = O, section = S}) ->
                        N =:= Name andalso (O =/= Offset orelse S =/= Section)
                    end, Syms) of
         true ->
-            io:format("WARNING: Duplicate symbol ~s at offset ~p in ~p (may overwrite)~n",
-                      [Name, Offset, Section]);
+            %% CRITICAL FIX (Finding 5): Return error instead of warning
+            {error, {duplicate_symbol, Name}};
         false ->
-            ok
-    end,
-    Sym = #symbol{
-        name = Name,
-        offset = Offset,
-        section = Section,
-        exported = Exported
-    },
-    State#{symbols := [Sym | Syms]}.
+            Sym = #symbol{
+                name = Name,
+                offset = Offset,
+                section = Section,
+                exported = Exported
+            },
+            State#{symbols := [Sym | Syms]}
+    end.
 
 %% @doc Add a relocation entry to the linker state.
 -spec add_reloc(linker_state(), non_neg_integer(), binary(),
@@ -88,13 +88,16 @@ add_reloc(#{relocs := Relocs} = State, Offset, Symbol, Type, Addend) ->
 %% TextBase, DataBase, BssBase: virtual addresses of each section.
 -spec resolve(linker_state(), non_neg_integer(), non_neg_integer(),
               non_neg_integer()) ->
-    {ok, [patch()]} | {error, {unresolved_symbols, [binary()]}}.
+    {ok, [patch()]} | {error, {unresolved_symbols, [binary()]} | {duplicate_symbol, binary()}}.
 resolve(#{symbols := Syms, relocs := Relocs}, TextBase, DataBase, BssBase) ->
     %% Build symbol address lookup map
-    SymMap = build_sym_map(Syms, TextBase, DataBase, BssBase),
-
-    %% Resolve each relocation
-    resolve_relocs(Relocs, SymMap, TextBase, []).
+    case build_sym_map(Syms, TextBase, DataBase, BssBase) of
+        {ok, SymMap} ->
+            %% Resolve each relocation
+            resolve_relocs(Relocs, SymMap, TextBase, []);
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Apply a list of patches to a code binary.
 %% Patches: {Offset, Size, Value} for simple byte writes,
@@ -141,26 +144,31 @@ resolve_labels(Instructions) ->
 %% ============================================================================
 
 %% @doc Build a map from symbol name to absolute virtual address.
-%% Detects duplicate symbol names with different addresses and logs warnings.
+%% Detects duplicate symbol names with different addresses and returns error.
 -spec build_sym_map([#symbol{}], non_neg_integer(), non_neg_integer(),
-                    non_neg_integer()) -> #{binary() => non_neg_integer()}.
+                    non_neg_integer()) ->
+    {ok, #{binary() => non_neg_integer()}} | {error, {duplicate_symbol, binary()}}.
 build_sym_map(Syms, TextBase, DataBase, BssBase) ->
-    lists:foldl(
-        fun(#symbol{name = Name, offset = Off, section = Sec}, Acc) ->
-            Base = section_base(Sec, TextBase, DataBase, BssBase),
-            Addr = Base + Off,
-            case maps:find(Name, Acc) of
-                {ok, ExistingAddr} when ExistingAddr =/= Addr ->
-                    %% Duplicate symbol with different address - log warning
-                    io:format("WARNING: Symbol collision: ~s at 0x~.16B (overwriting 0x~.16B)~n",
-                              [Name, Addr, ExistingAddr]),
-                    Acc#{Name => Addr};
-                _ ->
-                    Acc#{Name => Addr}
-            end
-        end,
-        #{},
-        Syms).
+    try
+        Map = lists:foldl(
+            fun(#symbol{name = Name, offset = Off, section = Sec}, Acc) ->
+                Base = section_base(Sec, TextBase, DataBase, BssBase),
+                Addr = Base + Off,
+                case maps:find(Name, Acc) of
+                    {ok, ExistingAddr} when ExistingAddr =/= Addr ->
+                        %% CRITICAL FIX (Finding 5): Return error instead of warning
+                        throw({duplicate_symbol, Name});
+                    _ ->
+                        Acc#{Name => Addr}
+                end
+            end,
+            #{},
+            Syms),
+        {ok, Map}
+    catch
+        throw:{duplicate_symbol, DupName} ->
+            {error, {duplicate_symbol, DupName}}
+    end.
 
 section_base(text, TextBase, _DataBase, _BssBase) -> TextBase;
 section_base(data, _TextBase, DataBase, _BssBase) -> DataBase;

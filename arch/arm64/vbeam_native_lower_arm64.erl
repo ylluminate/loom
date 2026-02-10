@@ -1502,6 +1502,10 @@ lower_instruction({fdiv, {preg, Dst}, {preg, A}, {preg, B}},
 lower_instruction({raw, Bytes}, _FnName, _FS, _Fmt, _UC) when is_binary(Bytes) ->
     [Bytes];
 
+%% TRAP instruction (emit BRK #0)
+lower_instruction(trap, _FnName, _FS, _Fmt, _UC) ->
+    [?ENC:encode_brk(0)];
+
 %% Catch-all
 lower_instruction(Inst, _FnName, _FS, _Fmt, _UC) ->
     error({unhandled_arm64_instruction, Inst}).
