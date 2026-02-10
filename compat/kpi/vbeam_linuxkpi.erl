@@ -51,8 +51,9 @@ init() ->
     try
         case ets:whereis(?TIMER_TABLE) of
             undefined ->
-                %% FINDING R43-10 FIX: protected, not public - all timer operations go through this module
-                ets:new(?TIMER_TABLE, [named_table, protected, set]),
+                %% FINDING R44-11 FIX: Must be public - caller processes write directly (no gen_server routing)
+                %% protected would crash with badarg since callers aren't the table owner
+                ets:new(?TIMER_TABLE, [named_table, public, set]),
                 ok;
             _ ->
                 ok

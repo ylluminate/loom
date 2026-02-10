@@ -364,6 +364,8 @@ is_call_instruction({string_concat, _, _, _}) -> true;
 is_call_instruction({string_cmp, _, _, _}) -> true;
 is_call_instruction({array_append, _, _, _}) -> true;
 is_call_instruction({array_append, _, _, _, _}) -> true;
+%% CRITICAL FIX (Round 44, Finding 5): map_put growth clobbers r12/r13 and other caller-saved regs
+is_call_instruction({map_put, _, _, _, _}) -> true;
 is_call_instruction(_) -> false.
 
 %% Check if a vreg's live interval spans any call position.

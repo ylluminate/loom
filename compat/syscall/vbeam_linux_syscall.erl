@@ -47,6 +47,9 @@ dispatch(SyscallNr, Args) when is_integer(SyscallNr), is_list(Args) ->
         error:Reason ->
             logger:warning("[syscall] Error in syscall ~p: ~p", [SyscallNr, Reason]),
             {error, ?EINVAL};
+        %% FINDING R44-12 FIX: Let exit/exit_group syscalls propagate (60, 231)
+        exit:Reason when SyscallNr =:= 60; SyscallNr =:= 231 ->
+            exit(Reason);  % Re-throw intended termination
         exit:Reason ->
             logger:warning("[syscall] Exit in syscall ~p: ~p", [SyscallNr, Reason]),
             {error, ?EINVAL};

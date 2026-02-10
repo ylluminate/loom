@@ -47,11 +47,22 @@ test_self_parsing() ->
             io:format("  Exports: ~p~n", [length(Exports)]),
             io:format("  Code size: ~p bytes~n", [byte_size(Code)]),
             
-            %% Decode instructions (may return partial on unknown opcodes)
+            %% Decode instructions
+            %% FINDING R44-17 FIX: Distinguish between partial decode (acceptable with warning)
+            %% and actual decode failures (error). Unknown opcodes produce partial results.
             Instructions = case vbeam_beam_standalone:decode_instructions(Code, Atoms) of
-                {ok, Instrs} -> Instrs;
-                {error, {decode_failed, _Reason, PartialInstrs}} -> PartialInstrs;
-                Instrs when is_list(Instrs) -> Instrs
+                {ok, Instrs} ->
+                    Instrs;
+                {error, {decode_failed, {unknown_opcode, _} = Reason, PartialInstrs}} ->
+                    %% Unknown opcodes are expected - use partial results with warning
+                    io:format("  WARNING: ~p (using partial decode)~n", [Reason]),
+                    PartialInstrs;
+                {error, {decode_failed, Reason, _PartialInstrs}} ->
+                    %% Other decode failures are actual errors
+                    io:format("  ERROR: Decode failed: ~p~n", [Reason]),
+                    erlang:error({decode_failed, Reason});
+                Instrs when is_list(Instrs) ->
+                    Instrs
             end,
             io:format("  Instructions: ~p~n", [length(Instructions)]),
 

@@ -123,15 +123,17 @@ do_compile(#{target := Target, format := Format, functions := Functions,
     %% 3. Add data symbols
     {DataBin, LinkState1} = layout_data(DataEntries, LinkState0),
 
-    %% CRITICAL FIX (Finding 5): BSS section for zero-initialized globals.
-    %% Currently the IR doesn't emit BSS entries, so BssSize is always 0.
-    %% When the IR supports {bss, Name, Size} entries, compute BssSize here:
-    %%   BssSize = lists:sum([S || {bss, _, S} <- DataEntries])
-    %% and thread it through to emit_binary for each format emitter.
-    BssSize = 0,
+    %% CRITICAL FIX (Round 44, Finding 6): Extract and process BSS entries
+    BssEntries = [{Name, Size} || {bss, Name, Size} <- DataEntries],
+    BssSize = lists:sum([Size || {_, Size} <- BssEntries]),
+
+    %% Add BSS symbols to linker state (after data layout so we have DataBase)
+    DataBase = data_base(Format, 0, Target),  %% Compute data base early for BSS
+    BssBase = DataBase + byte_size(DataBin),
+    LinkState1b = add_bss_symbols(BssEntries, LinkState1, BssBase),
 
     %% 4. Resolve labels and concatenate code
-    {CodeBin, LinkState2} = resolve_code(CodeParts, LinkState1),
+    {CodeBin, LinkState2} = resolve_code(CodeParts, LinkState1b),
 
     %% 5. Find entry point (function named "main" or first exported)
     EntryOffset = find_entry(CodeParts),
@@ -139,10 +141,11 @@ do_compile(#{target := Target, format := Format, functions := Functions,
     %% 6. Link (resolve relocations)
     TextBase = text_base(Format),
     %% CRITICAL FIX (Finding 2): Pass Target to data_base for arch-specific page size
-    DataBase = data_base(Format, byte_size(CodeBin), Target),
+    %% Recompute DataBase with actual code size
+    DataBaseActual = data_base(Format, byte_size(CodeBin), Target),
     %% CRITICAL FIX (Finding 5): BSS base follows data section
-    BssBase = DataBase + byte_size(DataBin),
-    case vbeam_native_link:resolve(LinkState2, TextBase, DataBase, BssBase + BssSize) of
+    BssBaseActual = DataBaseActual + byte_size(DataBin),
+    case vbeam_native_link:resolve(LinkState2, TextBase, DataBaseActual, BssBaseActual + BssSize) of
         {ok, Patches} ->
             %% CRITICAL FIX (Finding 5): Wrap apply_patches in try/catch to convert
             %% relocation errors (overflow, out-of-bounds) to proper error tuples.
@@ -198,6 +201,19 @@ layout_data(DataEntries, LinkState) ->
              AlignedOff + byte_size(Bytes)}
         end, {<<>>, LinkState, 0}, DataEntries),
     {DataBin, LS}.
+
+%% Add BSS symbols to linker state at their computed base addresses.
+%% CRITICAL FIX (Round 44, Finding 6): BSS entries need symbols for linking.
+add_bss_symbols(BssEntries, LinkState, BssBase) ->
+    {LS, _Offset} = lists:foldl(
+        fun({Name, Size}, {LS0, Off}) ->
+            %% Add BSS symbol at current offset (8-byte aligned)
+            Padding = align_padding(Off, 8),
+            AlignedOff = Off + Padding,
+            LS1 = vbeam_native_link:add_symbol(LS0, Name, AlignedOff, bss, true),
+            {LS1, AlignedOff + Size}
+        end, {LinkState, BssBase}, BssEntries),
+    LS.
 
 %% Resolve code: concatenate function code parts, compute label offsets.
 resolve_code(CodeParts, LinkState) ->

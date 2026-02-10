@@ -5,6 +5,9 @@
 %% Wrapper for make test-kernel compatibility
 test() -> run_all().
 
+%% FINDING R44-16 NOTE: Tests use allow_legacy_irq => true for simplicity.
+%% Token-authenticated IRQ path testing is TODO. Current tests keep passing
+%% to maintain baseline functionality while new auth path is validated separately.
 -define(CONFIG, #{time_slice => 1000, max_processes => 256, allow_legacy_irq => true}).
 
 %%% ==========================================================================

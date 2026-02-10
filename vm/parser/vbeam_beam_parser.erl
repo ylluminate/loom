@@ -256,24 +256,27 @@ parse_atom_list(Rest, 0, Acc) ->
 parse_atom_list(<<Len:8, Atom:Len/binary, Rest/binary>>, Count, Acc) ->
     %% Keep atoms as binaries to avoid exhausting atom table
     parse_atom_list(Rest, Count - 1, [Atom | Acc]);
-parse_atom_list(_, _, Acc) ->
-    {lists:reverse(Acc), <<>>}.
+parse_atom_list(_, _, _Acc) ->
+    %% FINDING R44-13 FIX: Return error on truncation instead of partial list
+    {error, truncated_atom_table}.
 
 %% Parse import table
 parse_imports(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_imports(<<Module:32, Function:32, Arity:32, Rest/binary>>, Count, Acc) ->
     parse_imports(Rest, Count - 1, [{Module, Function, Arity} | Acc]);
-parse_imports(_, _, Acc) ->
-    lists:reverse(Acc).
+parse_imports(_, _, _Acc) ->
+    %% FINDING R44-13 FIX: Return error on truncation instead of partial list
+    {error, truncated_import_table}.
 
 %% Parse export table
 parse_exports(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_exports(<<Function:32, Arity:32, Label:32, Rest/binary>>, Count, Acc) ->
     parse_exports(Rest, Count - 1, [{Function, Arity, Label} | Acc]);
-parse_exports(_, _, Acc) ->
-    lists:reverse(Acc).
+parse_exports(_, _, _Acc) ->
+    %% FINDING R44-13 FIX: Return error on truncation instead of partial list
+    {error, truncated_export_table}.
 
 %% Parse fun table
 parse_funs(_Rest, 0, Acc) ->
@@ -287,8 +290,9 @@ parse_funs(<<Function:32, Arity:32, CodePos:32, Index:32,
             num_free => NumFree,
             old_uniq => OldUniq},
     parse_funs(Rest, Count - 1, [Fun | Acc]);
-parse_funs(_, _, Acc) ->
-    lists:reverse(Acc).
+parse_funs(_, _, _Acc) ->
+    %% FINDING R44-13 FIX: Return error on truncation instead of partial list
+    {error, truncated_fun_table}.
 
 %% SECURITY: Bounded streaming decompression (prevents zip bomb DoS)
 %% Decompresses data with hard output size cap, aborts if exceeded
@@ -363,5 +367,6 @@ parse_literal_list(<<Size:32, Literal:Size/binary, Rest/binary>>, Count, Acc) ->
                error:badarg -> {error, unsafe_literal}
            end,
     parse_literal_list(Rest, Count - 1, [Term | Acc]);
-parse_literal_list(_, _, Acc) ->
-    lists:reverse(Acc).
+parse_literal_list(_, _, _Acc) ->
+    %% FINDING R44-13 FIX: Return error on truncation instead of partial list
+    {error, truncated_literal_table}.

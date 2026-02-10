@@ -54,6 +54,7 @@
     encode_or_rr/2,
     encode_xor_rr/2,
     encode_shl_cl/1,
+    encode_shl_imm/2,
     encode_shr_cl/1,
     encode_sar_cl/1,
     encode_neg/1,
@@ -433,6 +434,14 @@ encode_shl_cl(Dst) ->
     Rex = rex(1, 0, 0, reg_hi(Dst)),
     ModRM = modrm(2#11, 4, reg_lo(Dst)),
     <<Rex:8, 16#D3:8, ModRM:8>>.
+
+%% @doc SHL r64, imm8  (shift left by immediate)
+%%      Encoding: REX.W + C1 /4 ib
+-spec encode_shl_imm(reg64(), non_neg_integer()) -> binary().
+encode_shl_imm(Dst, Imm) when Imm >= 0, Imm =< 255 ->
+    Rex = rex(1, 0, 0, reg_hi(Dst)),
+    ModRM = modrm(2#11, 4, reg_lo(Dst)),
+    <<Rex:8, 16#C1:8, ModRM:8, Imm:8>>.
 
 %% @doc SHR r64, CL  (logical shift right by CL)
 %%      Encoding: REX.W + D3 /5

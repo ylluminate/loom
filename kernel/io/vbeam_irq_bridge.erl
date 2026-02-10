@@ -163,12 +163,20 @@ tick(ServerRef) ->
 %% @doc Acknowledge IRQ receipt, decrementing pending count.
 %% Handlers should call this after processing each IRQ to allow more deliveries.
 %% FINDING 10 FIX: Use gen_server:call to capture caller PID for authentication
+%% FINDING R44-9 FIX: Wrap in try/catch to handle TOCTOU race if bridge dies during call
 -spec ack_irq(non_neg_integer()) -> ok.
 ack_irq(IrqNum) when is_integer(IrqNum), IrqNum >= 0 ->
     %% Best-effort: noop if IRQ bridge isn't running (e.g. in scheduler-only tests)
     case whereis(?MODULE) of
         undefined -> ok;
-        _Pid -> gen_server:call(?MODULE, {ack_irq, IrqNum})
+        _Pid ->
+            try
+                gen_server:call(?MODULE, {ack_irq, IrqNum}, 100)
+            catch
+                exit:{timeout, _} -> ok;  % Bridge overloaded, best-effort
+                exit:{noproc, _} -> ok;   % Bridge died between whereis and call
+                exit:{{nodedown, _}, _} -> ok  % Distributed case
+            end
     end.
 
 %% @doc Generate x86_64 machine code for ISR stub that writes to ring buffer.
@@ -293,7 +301,7 @@ handle_call({register_handler, IrqNum, Pid, Token}, From, #state{handlers = Hand
     end;
 
 
-handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Handlers, monitors = Monitors, pending_counts = PendingCounts} = State) ->
+handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Handlers, monitors = Monitors, pending_counts = PendingCounts, tokens = Tokens} = State) ->
     %% Check caller ownership — only the process that registered the handler can unregister
     case maps:get(IrqNum, Handlers, undefined) of
         undefined ->
@@ -323,7 +331,9 @@ handle_call({unregister_handler, IrqNum}, {CallerPid, _}, #state{handlers = Hand
     NewHandlers = maps:remove(IrqNum, Handlers),
     %% FINDING 7 FIX: Clear pending count for this IRQ
     NewPendingCounts = maps:remove(IrqNum, PendingCounts),
-    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts}}
+    %% FINDING R44-8 FIX: Clear token state on handler unregister
+    NewTokens = maps:remove(IrqNum, Tokens),
+    {reply, ok, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts, tokens = NewTokens}}
     end;
 
 handle_call(get_handlers, _From, #state{handlers = Handlers} = State) ->
@@ -401,7 +411,7 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% Handle monitor DOWN messages when a handler dies
-handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, #state{handlers = Handlers, monitors = Monitors, pending_counts = PendingCounts} = State) ->
+handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, #state{handlers = Handlers, monitors = Monitors, pending_counts = PendingCounts, tokens = Tokens} = State) ->
     case maps:get(MonitorRef, Monitors, undefined) of
         undefined ->
             %% Unknown monitor, ignore
@@ -412,7 +422,9 @@ handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, #state{handlers = Hand
             NewMonitors = maps:remove(MonitorRef, Monitors),
             %% FINDING 7 FIX: Clear pending count for this IRQ
             NewPendingCounts = maps:remove(IrqNum, PendingCounts),
-            {noreply, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts}}
+            %% FINDING R44-8 FIX: Clear token state on handler death
+            NewTokens = maps:remove(IrqNum, Tokens),
+            {noreply, State#state{handlers = NewHandlers, monitors = NewMonitors, pending_counts = NewPendingCounts, tokens = NewTokens}}
     end;
 
 handle_info(_Info, State) ->

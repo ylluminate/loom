@@ -530,6 +530,7 @@ handle_info({irq, ?IRQ_TIMER, _Timestamp, ProvidedToken},
 
 %% Legacy 3-tuple format (tests, internal use)
 %% FINDING R42-8 FIX: Gate legacy handler behind config or validate sender
+%% FINDING R44-10 FIX: Add deprecation warning when legacy path is used
 handle_info({irq, ?IRQ_TIMER, _Timestamp}, #state{config = Config, irq_bridge_pid = IrqBridgePid} = State) ->
     %% Check if legacy format is allowed AND sender is authorized IRQ bridge
     AllowLegacy = maps:get(allow_legacy_irq, Config, false),
@@ -537,6 +538,8 @@ handle_info({irq, ?IRQ_TIMER, _Timestamp}, #state{config = Config, irq_bridge_pi
     %% Instead, only allow legacy format if explicitly enabled in config
     case AllowLegacy of
         true ->
+            %% FINDING R44-10 FIX: Warn when legacy unauthenticated path is used
+            io:format("[vbeam_scheduler] WARNING: Legacy unauthenticated IRQ path used (deprecated)~n"),
             NewState = tick(State),
             %% FINDING R42-7 FIX: Acknowledge IRQ after processing
             vbeam_irq_bridge:ack_irq(?IRQ_TIMER),

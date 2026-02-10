@@ -774,9 +774,8 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
         ?ENC:encode_jcc_rel32(gtu, 0),                       %% jump if length > index (unsigned)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
-        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
+        ?ENC:encode_mov_imm64(rax, SysExit),
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -788,11 +787,17 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 
 %% ARRAY_SET (immediate index)
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName, _Format, _UsedCalleeSaved) ->
+                  _FnName, Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
     case ElemSize of
         8 -> ok;
         _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
+    %% CRITICAL FIX (Round 44, Finding 7): Format-aware exit syscall
+    SysExit = case Format of
+        elf64 -> 60;
+        macho -> 16#2000001;
+        pe -> 60
     end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_imm_ok_", Uid/binary>>,
@@ -804,9 +809,8 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
         ?ENC:encode_jcc_rel32(gtu, 0),                       %% jump if length > index (unsigned)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
-        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
+        ?ENC:encode_mov_imm64(rax, SysExit),
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -818,11 +822,17 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 
 %% ARRAY_SET (register index)
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
-                  _FnName, _Format, _UsedCalleeSaved) ->
+                  _FnName, Format, _UsedCalleeSaved) ->
     %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
     case ElemSize of
         8 -> ok;
         _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
+    %% CRITICAL FIX (Round 44, Finding 7): Format-aware exit syscall
+    SysExit = case Format of
+        elf64 -> 60;
+        macho -> 16#2000001;
+        pe -> 60
     end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_ok_", Uid/binary>>,
@@ -833,9 +843,8 @@ lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemS
         ?ENC:encode_jcc_rel32(ltu, 0),                       %% jump if unsigned-less-than (idx < len)
         {reloc, rel32, OkLbl, -4},
         %% Out of bounds: exit with code 2
-        %% LIMITATION: Hardcoded to Linux syscalls (sys_exit=60). macOS uses 0x2000001.
         ?ENC:encode_mov_imm64(rdi, 2),
-        ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit (Linux only - macOS would be 0x2000001)
+        ?ENC:encode_mov_imm64(rax, SysExit),
         ?ENC:encode_syscall(),
         %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
         ?ENC:encode_ud2(),
@@ -1090,7 +1099,8 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         %% Allocate new buffer: newcap * 16 bytes
         ?ENC:encode_mov_rr(r12, r13),
         ?ENC:encode_shl_imm(r12, 4),  %% r12 = newcap * 16
-        vbeam_native_alloc:emit_alloc(x86_64, r14, r12),  %% r14 = new buffer ptr
+        vbeam_native_alloc:emit_alloc_reg(x86_64, rax, r12),  %% rax = new buffer ptr
+        ?ENC:encode_mov_rr(rbx, rax),  %% Save new buffer ptr to rbx (rax gets clobbered below)
         %% Restore Map/Val/Key
         ?ENC:encode_pop(Map),
         ?ENC:encode_pop(Val),
@@ -1110,7 +1120,7 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         ?ENC:encode_imul_rr(r9, r8),
         ?ENC:encode_mov_rr(r10, rsi),
         ?ENC:encode_add_rr(r10, r9),   %% r10 = &old[i]
-        ?ENC:encode_mov_rr(r11, r14),
+        ?ENC:encode_mov_rr(r11, rbx),
         ?ENC:encode_add_rr(r11, r9),   %% r11 = &new[i]
         ?ENC:encode_mov_mem_load(rax, r10, 0),
         ?ENC:encode_mov_mem_store(r11, 0, rax),
@@ -1120,14 +1130,14 @@ lower_instruction({map_put, {preg, Dst}, {preg, Map}, {preg, Key}, {preg, Val}},
         ?ENC:encode_jmp_rel32(0),
         {reloc, rel32, CopyLoopLbl, -4},
         {label, CopyDoneLbl},
-        %% Update map header: ptr=r14, len=rdx, cap=r13
-        ?ENC:encode_mov_mem_store(Map, 0, r14),
+        %% Update map header: ptr=rbx, len=rdx, cap=r13
+        ?ENC:encode_mov_mem_store(Map, 0, rbx),
         ?ENC:encode_mov_mem_store(Map, 16, r13),
         %% Now append the new entry
         ?ENC:encode_mov_imm64(r8, 16),
         ?ENC:encode_mov_rr(r9, rdx),
         ?ENC:encode_imul_rr(r9, r8),
-        ?ENC:encode_mov_rr(r10, r14),
+        ?ENC:encode_mov_rr(r10, rbx),
         ?ENC:encode_add_rr(r10, r9),
         ?ENC:encode_mov_mem_store(r10, 0, Key),
         ?ENC:encode_mov_mem_store(r10, 8, Val),

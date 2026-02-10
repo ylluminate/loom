@@ -218,7 +218,7 @@ lower_instruction({sdiv, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _FS, Fmt, 
     lists:flatten([
         ?ENC:encode_cmp_imm(B, 0),       %% Compare divisor with 0
         ?ENC:encode_b_cond(ne, 0),       %% Branch if not equal (B != 0)
-        {reloc, rel32, OkLbl, -4},
+        {reloc, arm64_cond_branch19, OkLbl, -4},
         %% Divide by zero: exit with code 2
         ?ENC:encode_mov_imm64(x0, 2),    %% exit code
         ?ENC:encode_mov_imm64(SysNumReg, ExitNum),
@@ -247,7 +247,7 @@ lower_instruction({srem, {preg, Dst}, {preg, A}, {preg, B}}, _FnName, _FS, Fmt, 
     lists:flatten([
         ?ENC:encode_cmp_imm(B, 0),
         ?ENC:encode_b_cond(ne, 0),
-        {reloc, rel32, OkLbl, -4},
+        {reloc, arm64_cond_branch19, OkLbl, -4},
         ?ENC:encode_mov_imm64(x0, 2),
         ?ENC:encode_mov_imm64(SysNumReg, ExitNum),
         ?ENC:encode_svc(SvcImm),

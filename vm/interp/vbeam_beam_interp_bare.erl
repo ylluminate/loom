@@ -797,8 +797,16 @@ format_bare([$~, $w | Rest], [Arg | Args], Out) ->
     Out(term_to_string(Arg)),
     format_bare(Rest, Args, Out);
 format_bare([$~, $c | Rest], [Arg | Args], Out) ->
-    Out([Arg]),
-    format_bare(Rest, Args, Out);
+    %% FINDING R44-14 FIX: Validate ~c arg is valid byte (0-255)
+    case is_integer(Arg) andalso Arg >= 0 andalso Arg =< 255 of
+        true ->
+            Out([Arg]),
+            format_bare(Rest, Args, Out);
+        false ->
+            %% Invalid ~c argument - output replacement char
+            Out("?"),
+            format_bare(Rest, Args, Out)
+    end;
 format_bare([$~ | Rest], Args, Out) ->
     %% Unknown format spec — skip it
     case Rest of

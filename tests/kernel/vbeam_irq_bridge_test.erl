@@ -7,6 +7,10 @@
 %% Wrapper for make test-kernel compatibility
 test() -> run_all().
 
+%% FINDING R44-16 NOTE: Current tests only exercise legacy 3-tuple IRQ path.
+%% Token-authenticated 4-tuple path tests are TODO. Existing tests remain
+%% unchanged to maintain baseline validation while new auth path matures.
+
 run_all() ->
     io:format("~n=== IRQ Bridge Tests ===~n~n"),
 
