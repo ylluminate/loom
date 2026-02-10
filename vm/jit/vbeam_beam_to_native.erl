@@ -24,10 +24,10 @@ translate_beam(BeamFile) ->
 translate_beam(BeamFile, _Options) ->
     case file:read_file(BeamFile) of
         {ok, BeamBinary} ->
-            case beam_lib:chunks(BeamBinary, [code, atoms]) of
-                {ok, {_Module, Chunks}} ->
-                    translate_chunks(Chunks);
-                {error, beam_lib, Reason} ->
+            case vbeam_beam_standalone:parse_binary(BeamBinary) of
+                {ok, ParsedData} ->
+                    translate_chunks(ParsedData);
+                {error, Reason} ->
                     {error, {beam_parse_error, Reason}}
             end;
         {error, Reason} ->
@@ -95,15 +95,21 @@ serial_puts_code() ->
 %% Internal Translation
 %% ============================================================================
 
-%% Translate chunks from beam file
-translate_chunks(Chunks) ->
-    case proplists:get_value(code, Chunks) of
-        undefined ->
+%% Translate chunks from beam file (standalone parser format)
+translate_chunks(ParsedData) ->
+    %% ParsedData is a map: #{atoms, exports, imports, code, code_info, literals, strings, funs}
+    Atoms = maps:get(atoms, ParsedData, []),
+    CodeBinary = maps:get(code, ParsedData, <<>>),
+
+    case CodeBinary of
+        <<>> ->
             {error, no_code_chunk};
-        CodeChunk ->
-            %% Extract functions from code chunk
-            %% CodeChunk format: {Module, Exports, Attributes, CompileInfo, Code}
-            Functions = extract_functions(CodeChunk),
+        _ ->
+            %% Decode instructions from bytecode using standalone parser
+            Instructions = vbeam_beam_standalone:decode_instructions(CodeBinary, Atoms),
+
+            %% Split flat instruction list into per-function lists
+            Functions = extract_functions(Instructions),
 
             %% Build helper functions
             SerialPutchar = serial_putchar_code(),
@@ -126,11 +132,28 @@ translate_chunks(Chunks) ->
             {ok, #{code => Code, data => Data, entry => EntryOffset}}
     end.
 
-%% Extract function definitions from code chunk
-extract_functions({_Module, _Exports, _Attrs, _CompileInfo, Code}) ->
-    %% Code is a list of function definitions
-    %% Each function: {function, Name, Arity, Entry, Instructions}
-    [Instrs || {function, _Name, _Arity, _Entry, Instrs} <- Code].
+%% Extract function definitions from flat instruction list
+%% Split by func_info markers into per-function instruction lists
+extract_functions(Instructions) ->
+    split_functions(Instructions, [], []).
+
+%% Split instruction list by func_info markers
+split_functions([], _CurrentFun, Acc) ->
+    %% Return accumulated functions (in original order)
+    lists:reverse(Acc);
+
+split_functions([{func_info, [_Mod, _Fun, _Arity]} | Rest], CurrentFun, Acc) ->
+    %% New function starts - save previous if exists, start new
+    NewAcc = case CurrentFun of
+        [] -> Acc;  %% First function
+        _ -> [lists:reverse(CurrentFun) | Acc]
+    end,
+    %% Start new function (don't include func_info in instructions)
+    split_functions(Rest, [], NewAcc);
+
+split_functions([Instr | Rest], CurrentFun, Acc) ->
+    %% Accumulate instruction into current function
+    split_functions(Rest, [Instr | CurrentFun], Acc).
 
 %% Translate a single function's instruction list
 translate_function_internal(Instructions) ->
