@@ -323,7 +323,8 @@ parse_atoms(Binary) ->
 parse_atom_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);
 parse_atom_list(Binary, Count, Acc) ->
-    %% Decode atom length using compact term encoding
+    %% BEAM atom tables use compact-term encoding for name lengths
+    %% (verified by hexdump: 0x80 = compact literal 8, not raw byte 128)
     case decode_compact_term_int(Binary) of
         {Len, Rest} when Len > 0 ->
             case Rest of
@@ -414,10 +415,15 @@ parse_literals(<<Count:32, Rest/binary>>) when Count =< 1_000_000 ->
         true ->
             parse_literal_list(Rest, Count, []);
         false ->
-            []  % Invalid - not enough bytes for declared count
+            %% FINDING 4 FIX: Return error for truncated literal table instead of empty list
+            {error, {truncated_literal_table, declared_count, Count, available_bytes, byte_size(Rest)}}
     end;
+parse_literals(<<Count:32, _/binary>>) ->
+    %% Count exceeds maximum
+    {error, {literal_count_too_large, Count, max, 1_000_000}};
 parse_literals(_) ->
-    [].
+    %% No count field at all
+    {error, truncated_literal_table_header}.
 
 parse_literal_list(_Rest, 0, Acc) ->
     lists:reverse(Acc);

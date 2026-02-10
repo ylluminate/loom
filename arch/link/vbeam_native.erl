@@ -674,11 +674,13 @@ builtin_function_impl(<<"log">>, Target, _Format) ->
     }};
 
 builtin_function_impl(<<"exit">>, Target, Format) ->
+    %% CRITICAL FIX (Round 39, Finding 5): ARM64 Linux uses x8 for syscall number (not x16).
+    %% x16 is used in macOS ABI, but Linux ARM64 uses x8.
     {ArgReg, SyscallReg, ExitNum} = case {Target, Format} of
         {x86_64, elf64} -> {rdi, rax, 60};   %% Linux x86_64: sys_exit = 60
         {x86_64, _} -> {rdi, rax, 1};      %% macOS x86_64: exit = 1
-        {arm64, elf64} -> {x0, x16, 93};     %% Linux arm64: sys_exit = 93
-        {arm64, _} -> {x0, x16, 1}         %% macOS arm64: exit = 1
+        {arm64, elf64} -> {x0, x8, 93};      %% Linux arm64: sys_exit = 93 (x8 for syscall number)
+        {arm64, _} -> {x0, x16, 1}         %% macOS arm64: exit = 1 (x16 for syscall number)
     end,
     {ok, #{
         name => <<"exit">>,
@@ -696,11 +698,13 @@ builtin_function_impl(<<"exit">>, Target, Format) ->
     }};
 
 builtin_function_impl(<<"panic">>, Target, Format) ->
+    %% CRITICAL FIX (Round 39, Finding 5): ARM64 Linux uses x8 for syscall number (not x16).
+    %% x16 is used in macOS ABI, but Linux ARM64 uses x8.
     {ArgReg, SyscallReg, ExitNum} = case {Target, Format} of
         {x86_64, elf64} -> {rdi, rax, 60};   %% Linux x86_64: sys_exit = 60
         {x86_64, _} -> {rdi, rax, 1};      %% macOS x86_64: exit = 1
-        {arm64, elf64} -> {x0, x16, 93};     %% Linux arm64: sys_exit = 93
-        {arm64, _} -> {x0, x16, 1}         %% macOS arm64: exit = 1
+        {arm64, elf64} -> {x0, x8, 93};      %% Linux arm64: sys_exit = 93 (x8 for syscall number)
+        {arm64, _} -> {x0, x16, 1}         %% macOS arm64: exit = 1 (x16 for syscall number)
     end,
     {ok, #{
         name => <<"panic">>,

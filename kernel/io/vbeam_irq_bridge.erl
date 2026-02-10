@@ -222,6 +222,11 @@ isr_ring_buffer_write(IrqNum) ->
         <<16#4B, 16#89, 16#54, 16#03, 16#08>>,                 % mov [r11+r8+8], rdx (use r11 base)
 
         %% Increment tail
+        %% NOTE: This ISR code trusts BEAM-side tick to drain the ring buffer fast enough.
+        %% On overflow (tail - head >= size), the oldest entry is lost. The Erlang-side
+        %% ring_push/2 already handles overflow by advancing head. The ISR does not check
+        %% for fullness or advance head to avoid complexity in the interrupt handler.
+        %% Risk: If tick does not run frequently enough, IRQs may be dropped.
         <<16#49, 16#8B, 16#53, 16#08>>,                        % mov rdx, [r11+8]
         <<16#48, 16#FF, 16#C2>>,                               % inc rdx
         <<16#49, 16#89, 16#53, 16#08>>,                        % mov [r11+8], rdx (use r11 base)

@@ -1227,6 +1227,9 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         {reloc, rel32, DoneLbl, -4},
 
         {label, NonZeroLbl},
+        %% CRITICAL FIX (Round 39, Finding 2): Initialize r10 flag BEFORE sign check
+        %% so positive path gets r10=0 without entering negative branch.
+        ?ENC:encode_mov_imm64(r10, 0),
         ?ENC:encode_cmp_imm(rbx, 0),
         ?ENC:encode_jcc_rel32(ge, 0),
         {reloc, rel32, PositiveLbl, -4},
@@ -1234,7 +1237,6 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         %% CRITICAL FIX: INT64_MIN (-9223372036854775808) cannot be negated.
         %% Add 1 before negating, then fix the last digit after conversion.
         %% r10 = flag: 0 = normal, 1 = was INT64_MIN (NOT r15, which is heap pointer!)
-        ?ENC:encode_mov_imm64(r10, 0),
         ?ENC:encode_mov_imm64(rax, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(rbx, rax),
         ?ENC:encode_jcc_rel32(ne, 0),
@@ -1429,6 +1431,10 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         %% Nonzero:
         {label, NonZeroLbl},
 
+        %% CRITICAL FIX (Round 39, Finding 2): Initialize r10 flag BEFORE sign check
+        %% so positive path gets r10=0 without entering negative branch.
+        ?ENC:encode_mov_imm64(r10, 0),     %% flag: 0 = normal
+
         %% Check if negative
         ?ENC:encode_cmp_imm(rbx, 0),
         ?ENC:encode_jcc_rel32(ge, 0),
@@ -1445,7 +1451,6 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
 
         %% CRITICAL FIX (Finding 5): INT64_MIN cannot be negated
         %% Check if value is INT64_MIN, if so add 1 before negating
-        ?ENC:encode_mov_imm64(r10, 0),     %% flag: 0 = normal
         ?ENC:encode_mov_imm64(rax, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(rbx, rax),
         ?ENC:encode_jcc_rel32(ne, 0),
@@ -1671,25 +1676,49 @@ break_all_cycles(Cycles, Moves, UsedCalleeSaved) ->
     NonCycleMoves = [emit_move_x86(Dst, Src, UsedCalleeSaved) || {Dst, Src} <- lists:reverse(NonCycleMoves0)],
     NonCycleMoves ++ CycleMoves.
 
-%% CRITICAL FIX: Break a single cycle by true rotation through temp register r11.
-%% Cycle is [R1, R2, ..., Rn] representing moves R1→R2, R2→R3, ..., Rn→R1.
-%% Algorithm: save R1 to r11, move R2→R1, R3→R2, ..., Rn→R(n-1), r11→Rn.
+%% CRITICAL FIX (Round 39, Finding 4): Walk dependency chain to get true cycle order.
+%% Cycle is [R1, R2, ..., Rn] from SCC, but actual moves might be in different order.
+%% Reconstruct the cycle by following MoveMap edges: Start → MoveMap[Start] → MoveMap[...] → Start.
+%% Algorithm: save First to r11, move each successor, restore last.
 break_one_cycle([], _MoveMap) -> [];
 break_one_cycle([_Single], _MoveMap) -> [];  % Single-element cycle is a no-op
-break_one_cycle([First | Rest] = Cycle, _MoveMap) ->
-    %% CRITICAL FIX: True cycle rotation through temp register r11.
-    %% For cycle [R0, R1, ..., Rn-1] representing R0→R1, R1→R2, ..., Rn-1→R0:
-    %%   1. Save R0 to r11
-    %%   2. R1 → R0 (shift left)
-    %%   3. R2 → R1 (shift left)
-    %%   ...
-    %%   n. Rn-1 → Rn-2 (shift left)
-    %%   n+1. r11 → Rn-1 (restore saved value to last position)
-    SaveFirst = ?ENC:encode_mov_rr(r11, First),
-    ChainMoves = [?ENC:encode_mov_rr(DestReg, SourceReg)
-                  || {DestReg, SourceReg} <- lists:zip(Cycle, Rest)],
-    RestoreLast = ?ENC:encode_mov_rr(lists:last(Cycle), r11),
-    [SaveFirst] ++ ChainMoves ++ [RestoreLast].
+break_one_cycle([First | _Rest] = SCC, MoveMap) ->
+    %% Reconstruct cycle by walking MoveMap edges from First
+    Cycle = reconstruct_cycle(First, MoveMap, [First]),
+    %% Rotate: save First to r11, shift everyone left, restore to last
+    %%   1. Save First to r11
+    %%   2. For each edge in cycle, move source to dest
+    %%   3. r11 → last position
+    case Cycle of
+        [_Single] -> [];  % Single-element cycle (no-op)
+        [H | T] ->
+            SaveFirst = ?ENC:encode_mov_rr(r11, H),
+            %% Build chain moves by following cycle edges
+            ChainMoves = build_chain_moves(Cycle, MoveMap),
+            RestoreLast = ?ENC:encode_mov_rr(lists:last(Cycle), r11),
+            [SaveFirst] ++ ChainMoves ++ [RestoreLast]
+    end.
+
+%% Reconstruct cycle by following MoveMap edges from Start until we return to Start
+reconstruct_cycle(Start, MoveMap, Acc) ->
+    case maps:get(Start, MoveMap, none) of
+        {preg, Next} ->
+            case lists:member(Next, Acc) of
+                true ->
+                    %% Completed cycle
+                    lists:reverse(Acc);
+                false ->
+                    reconstruct_cycle(Next, MoveMap, [Next | Acc])
+            end;
+        _ ->
+            %% No next edge or not a register, return what we have
+            lists:reverse(Acc)
+    end.
+
+%% Build move instructions by following cycle order
+build_chain_moves([_Last], _MoveMap) -> [];
+build_chain_moves([Dst | [Src | _] = Rest], MoveMap) ->
+    [?ENC:encode_mov_rr(Dst, Src) | build_chain_moves(Rest, MoveMap)].
 
 emit_move_x86(ArgReg, {preg, Reg}, _UsedCalleeSaved) ->
     ?ENC:encode_mov_rr(ArgReg, Reg);

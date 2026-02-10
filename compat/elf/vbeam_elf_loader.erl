@@ -431,19 +431,14 @@ parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShSt
     ShStrTabHdr = element(ShStrNdx + 1, SectionHeadersTuple),
     ShStrTabData = extract_section_data(Binary, ShStrTabHdr),
 
-    %% Resolve section names and add section index
-    Sections = [
-        (resolve_section_name(Hdr, ShStrTabData, Binary))#{section_index => I}
-        || {I, Hdr} <- lists:zip(lists:seq(0, ShNum - 1), SectionHeaders)
-    ],
-
-    %% FINDING 8 FIX: Track cumulative NOBITS allocation to enforce total cap
+    %% FINDING 3 FIX: Pre-validate cumulative NOBITS size BEFORE materializing sections
+    %% This prevents allocation of individual sections before checking the total cap
     TotalNobitsSize = lists:foldl(
         fun(#{type := nobits, size := Size}, Acc) -> Acc + Size;
            (_, Acc) -> Acc
         end,
         0,
-        Sections
+        SectionHeaders
     ),
     case TotalNobitsSize > ?MAX_TOTAL_NOBITS of
         true ->
@@ -451,6 +446,12 @@ parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShSt
         false ->
             ok
     end,
+
+    %% Resolve section names and add section index (now safe to materialize)
+    Sections = [
+        (resolve_section_name(Hdr, ShStrTabData, Binary))#{section_index => I}
+        || {I, Hdr} <- lists:zip(lists:seq(0, ShNum - 1), SectionHeaders)
+    ],
 
     {ok, Sections, ShStrTabData}.
 

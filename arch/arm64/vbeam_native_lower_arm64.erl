@@ -43,21 +43,31 @@ emit_prologue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_mov_rr(x29, sp)] ++
     save_callee_saved(UsedCallee, 16);
 emit_prologue(FrameSize, UsedCallee) ->
-    %% CRITICAL FIX (Round 35, Finding 2): Set x29 AFTER full stack allocation.
-    %% Large frame: stp x29,x30,[sp,#-16]! then sub sp,sp,#(FrameSize-16) then mov x29,sp
-    %% This ensures x29 points to the FP/LR save slot (at top of frame),
-    %% and spill accesses at positive offsets from x29 point DOWN into the frame.
-    %% If (FrameSize-16) > 4095, materialize in x16 and use register form
-    FrameDelta = FrameSize - 16,
-    SubInstr = case FrameDelta =< 4095 of
+    %% CRITICAL FIX (Round 39, Finding 1): Reserve 16 bytes at TOP for FP/LR.
+    %% Large frame: sub sp,#FrameSize then stp x29,x30,[sp,#(FrameSize-16)] then mov x29,sp
+    %% This ensures FP/LR are at the top [sp + FrameSize - 16], and spills start from sp.
+    %% Spill offsets (computed as 16 + NumCalleeSaved*8 + Slot*8) will not reach FrameSize-16.
+    SubInstr = case FrameSize =< 4095 of
         true ->
-            [?ENC:encode_sub_imm(sp, sp, FrameDelta)];
+            [?ENC:encode_sub_imm(sp, sp, FrameSize)];
         false ->
-            [?ENC:encode_mov_imm64(x16, FrameDelta),
+            [?ENC:encode_mov_imm64(x16, FrameSize),
              ?ENC:encode_sub_rrr(sp, sp, x16)]
     end,
-    [?ENC:encode_stp_pre(x29, x30, sp, -16)] ++
+    StpOffset = FrameSize - 16,
+    %% STP immediate offset range is -512 to 504 (signed 7-bit scaled by 8)
+    %% For offsets beyond this range, compute address in x17
+    StoreInstr = case StpOffset =< 32760 of
+        true ->
+            [?ENC:encode_stp(x29, x30, sp, StpOffset)];
+        false ->
+            %% Offset too large, compute address in x17
+            [?ENC:encode_mov_imm64(x17, StpOffset),
+             ?ENC:encode_add_rrr(x17, sp, x17),
+             ?ENC:encode_stp(x29, x30, x17, 0)]
+    end,
     SubInstr ++
+    StoreInstr ++
     [?ENC:encode_mov_rr(x29, sp)] ++
     save_callee_saved(UsedCallee, 16).
 
@@ -69,21 +79,33 @@ emit_epilogue(FrameSize, UsedCallee) when FrameSize =< 504 ->
      ?ENC:encode_ldp_post(x29, x30, sp, FrameSize),
      ?ENC:encode_ret()];
 emit_epilogue(FrameSize, UsedCallee) ->
-    %% Large frame: restore callee-saved, add FrameDelta back, then ldp x29,x30,[sp],#16
-    %% Must be symmetric with prologue: prologue subtracts FrameDelta, epilogue adds it back
-    FrameDelta = FrameSize - 16,
-    AddInstr = case FrameDelta =< 4095 of
+    %% CRITICAL FIX (Round 39, Finding 1): Symmetric with new prologue.
+    %% Large frame: restore callee-saved, mov sp,x29, ldp x29,x30,[sp,#(FrameSize-16)],
+    %% then add sp,#FrameSize, ret.
+    LdpOffset = FrameSize - 16,
+    %% LDP immediate offset range is -512 to 504 (signed 7-bit scaled by 8)
+    %% For offsets beyond this range, compute address in x17
+    LoadInstr = case LdpOffset =< 32760 of
         true ->
-            [?ENC:encode_add_imm(sp, sp, FrameDelta)];
+            [?ENC:encode_ldp(x29, x30, sp, LdpOffset)];
         false ->
-            [?ENC:encode_mov_imm64(x16, FrameDelta),
+            %% Offset too large, compute address in x17
+            [?ENC:encode_mov_imm64(x17, LdpOffset),
+             ?ENC:encode_add_rrr(x17, sp, x17),
+             ?ENC:encode_ldp(x29, x30, x17, 0)]
+    end,
+    AddInstr = case FrameSize =< 4095 of
+        true ->
+            [?ENC:encode_add_imm(sp, sp, FrameSize)];
+        false ->
+            [?ENC:encode_mov_imm64(x16, FrameSize),
              ?ENC:encode_add_rrr(sp, sp, x16)]
     end,
     restore_callee_saved(UsedCallee, 16) ++
     [?ENC:encode_mov_rr(sp, x29)] ++
+    LoadInstr ++
     AddInstr ++
-    [?ENC:encode_ldp_post(x29, x30, sp, 16),
-     ?ENC:encode_ret()].
+    [?ENC:encode_ret()].
 
 %% Save callee-saved registers to stack frame.
 %% Stores at [x29, #offset], [x29, #offset+8], etc.
@@ -378,6 +400,10 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
         %% Nonzero
         {label, NonZeroLbl},
 
+        %% CRITICAL FIX (Round 39, Finding 3): Initialize x11 flag BEFORE sign check
+        %% so positive path gets x11=0 without entering negative branch.
+        ?ENC:encode_mov_imm64(x11, 0),                %% flag: 0 = normal
+
         %% Check negative
         ?ENC:encode_cmp_imm(x19, 0),
         ?ENC:encode_b_cond(ge, 0),
@@ -396,7 +422,6 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
         %% Check if value is INT64_MIN, if so add 1 before negating
         %% CRITICAL FIX (Round 38, Finding 5): Use x11 as flag register instead of x10.
         %% x10 is used as quotient register in the division loop below.
-        ?ENC:encode_mov_imm64(x11, 0),                %% flag: 0 = normal
         ?ENC:encode_mov_imm64(x9, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(x19, x9),
         ?ENC:encode_b_cond(ne, 0),
@@ -1344,10 +1369,13 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         %% Nonzero
         {label, NonZeroLbl},
 
+        %% CRITICAL FIX (Round 39, Finding 3): Initialize flags BEFORE sign check
+        %% so positive path gets x14=0 and x15=0 without entering negative branch.
+        ?ENC:encode_mov_imm64(x14, 0),        %% x14 = 0 (assume positive)
+        ?ENC:encode_mov_imm64(x15, 0),        %% x15 = 0 (INT64_MIN flag)
+
         %% Check negative and save sign in x14
         ?ENC:encode_cmp_imm(x19, 0),
-        %% FIXED: Initialize x14 before branching so positive path gets 0, negative gets 1
-        ?ENC:encode_mov_imm64(x14, 0),        %% x14 = 0 (assume positive)
         ?ENC:encode_b_cond(ge, 0),
         {reloc, arm64_cond_branch19, PositiveLbl, -4},
 
@@ -1358,7 +1386,6 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         %% CRITICAL FIX: INT64_MIN (-9223372036854775808) cannot be negated.
         %% Add 1 before negating, then fix the last digit after conversion.
         %% x15 = flag: 0 = normal, 1 = was INT64_MIN
-        ?ENC:encode_mov_imm64(x15, 0),
         ?ENC:encode_mov_imm64(x9, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(x19, x9),
         ?ENC:encode_b_cond(ne, 0),
