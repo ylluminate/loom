@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated (UTC): 2026-02-09T17:00:00Z
+Last updated (UTC): 2026-02-10T01:40:00Z
 
 ## Objective (1 sentence)
 
@@ -9,16 +9,18 @@ Loom OS — a research operating system where BEAM runs on bare metal, with UEFI
 ## Current status
 
 ### What Just Happened
-- **OS-style directory restructure** (2026-02-09): Reorganized from flat `src/` dump into proper subsystem hierarchy following Linux/SerenityOS conventions.
-- **Modern Makefile** with automatic source discovery, per-subsystem targets, NO_COLOR support, VERBOSE mode, `_build/` output.
-- **Per-subsystem READMEs** for boot/, kernel/, vm/, arch/, compat/.
-- **All docs updated** to reflect new directory structure.
+- **Hackathon prep complete** (2026-02-09): Full pipeline demo working, all three tracks done.
+- **JIT wired to standalone parser** — removed beam_lib OTP dependency, JIT now uses vbeam_beam_standalone.
+- **Integration test 3/3 passing** — standalone parse + bare-metal interpret proven end-to-end.
+- **Demo pipeline escript** — `tools/demo_pipeline.escript` showcases full pipeline in one command.
+- **All scripts are pure BEAM** — zero bash/python in tools/.
 
 ### What Works
-- `make compile` → 33/33 modules OK
+- `make compile` → 36/36 modules OK (was 33, added test + demo support)
 - `make nucleus` → 5120 bytes
+- `./tools/demo_pipeline.escript` → full pipeline demo (parse → interpret → JIT → nucleus)
+- Integration test: standalone parse + bare-metal interpret end-to-end
 - `make help` → shows all targets with descriptions
-- `make info` → shows module counts and build status
 - `make test-kernel` / `make test-vm` → run subsystem tests
 
 ### Directory Structure
@@ -36,19 +38,20 @@ tools/                            Scripts and utilities
 | File | What |
 |------|------|
 | `boot/vbeam_nucleus_boot.erl` | UEFI PE32+ boot (~738 LOC) |
-| `vm/interp/vbeam_beam_interp_v2.erl` | BEAM interpreter (~530 LOC) |
-| `vm/parser/vbeam_beam_standalone.erl` | Standalone parser (no OTP) |
-| `kernel/sched/vbeam_scheduler.erl` | Preemptive scheduler |
-| `arch/x86_64/vbeam_native_x86_64.erl` | x86_64 backend (53 privileged insns) |
+| `vm/interp/vbeam_beam_interp_bare.erl` | Bare-metal interpreter (856 LOC, zero OTP) |
+| `vm/parser/vbeam_beam_standalone.erl` | Standalone parser (923 LOC, zero OTP) |
+| `vm/jit/vbeam_beam_to_native.erl` | JIT translator (now uses standalone parser) |
+| `tools/demo_pipeline.escript` | Full pipeline demo for hackathon |
+| `tests/vm/test_bare_pipeline.erl` | Integration test (3/3 pass) |
 | `Makefile` | Modern build system (~260 LOC) |
 
 ## What's Next
 
-1. **Hackathon (Feb 10-16)** — demo pipeline: V → BEAM → bare metal
-2. **Bare-metal BEAM interpreter** — remove remaining OTP deps from standalone parser
-3. **Self-hosting milestone** — kernel compiles V code via its own BEAM interpreter
-4. **Driver framework** — supervised driver processes with hot reload
+1. **Hackathon (Feb 10-16)** — submit demos, record video, polish README
+2. **Self-hosting milestone** — kernel compiles V code via its own BEAM interpreter
+3. **Driver framework** — supervised driver processes with hot reload
+4. **V compiler integration** — wire V-to-BEAM output into the standalone pipeline
 
 ## Blockers
 
-- None currently — build verified working after restructure.
+- None — hackathon-ready, all pipelines verified.

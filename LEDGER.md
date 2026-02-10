@@ -66,7 +66,9 @@ tools/                            Scripts and utilities
 - Per-subsystem compile targets (boot, kernel, vm, arch, compat)
 - Color output with NO_COLOR support, VERBOSE mode
 - `_build/` output directory, `make info` for project stats
-- 33/33 modules compile successfully
+- 36/36 modules compile successfully
+- `tools/demo_pipeline.escript` — full pipeline demo (parse → interpret → JIT → nucleus)
+- Integration test: standalone parse + bare-metal interpret 3/3 passing
 
 ## Decisions
 
@@ -79,6 +81,8 @@ tools/                            Scripts and utilities
 | 2026-02-09 | Separate loom from vbeam repo | Clean separation of compiler vs OS concerns |
 | 2026-02-09 | OS-style directory hierarchy | boot/kernel/vm/arch/compat follows Linux/SerenityOS conventions, aids navigation |
 | 2026-02-09 | Tests separated from source | Cleaner source tree, standard practice for OS projects |
+| 2026-02-09 | JIT uses standalone parser (not beam_lib) | Zero OTP deps in entire VM pipeline — ready for bare metal |
+| 2026-02-09 | All tools are Erlang escripts | Pure BEAM tooling, zero bash/python dependency |
 
 ## Origin
 
