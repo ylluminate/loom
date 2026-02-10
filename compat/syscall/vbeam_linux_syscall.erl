@@ -22,7 +22,7 @@ init() ->
     try
         case ets:whereis(?TRACKING_TABLE) of
             undefined ->
-                ets:new(?TRACKING_TABLE, [named_table, protected, set]),
+                ets:new(?TRACKING_TABLE, [named_table, public, set]),
                 ok;
             _ ->
                 ok

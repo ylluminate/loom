@@ -275,18 +275,18 @@ test_2mb_alignment_required() ->
     %% Verify our test address is truly misaligned
     true = (OneMB rem TwoMB) =/= 0,  %% 1MB is NOT 2MB-aligned
 
-    %% For now, SKIP the error-expectation test since source doesn't enforce
-    %% (George said: DO NOT modify source files)
-    %%
-    %% When source is fixed, uncomment this:
-    %% try
-    %%     vbeam_paging:page_table_entry(OneMB, [present, writable, ps], pd),
-    %%     error(should_have_failed_alignment_check)
-    %% catch
-    %%     error:{misaligned_2mb_page, OneMB} -> ok
-    %% end,
+    %% Verify that misaligned 2MB pages are rejected
+    %% NOTE: Can error with either misaligned_2mb_page OR address_bits_lost
+    %%       Both are valid rejections of the bad address
+    try
+        vbeam_paging:page_table_entry(OneMB, [present, writable, ps], pd),
+        error(should_have_failed_alignment_check)
+    catch
+        error:{misaligned_2mb_page, OneMB} -> ok;
+        error:{address_bits_lost, OneMB, 0} -> ok
+    end,
 
-    %% Instead, test that properly aligned addresses DO work
+    %% Also test that properly aligned addresses DO work
     Entry = vbeam_paging:page_table_entry(TwoMB, [present, writable, ps], pd),
     <<Val:64/little>> = Entry,
 

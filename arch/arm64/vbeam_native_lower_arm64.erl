@@ -1190,7 +1190,7 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}},
         %% x15 = flag: 0 = normal, 1 = was INT64_MIN
         ?ENC:encode_mov_imm64(x15, 0),
         ?ENC:encode_mov_imm64(x9, 16#8000000000000000),  %% INT64_MIN
-        ?ENC:encode_cmp_rrr(x19, x9),
+        ?ENC:encode_cmp_rr(x19, x9),
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, <<"__its_not_min_", Uid/binary>>, -4},
         ?ENC:encode_add_imm(x19, x19, 1),     %% x19 = INT64_MIN + 1

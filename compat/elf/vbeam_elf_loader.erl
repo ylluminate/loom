@@ -292,8 +292,10 @@ load_impl(FilePath, SymbolTable) ->
                                     %% BUG 1 FIX: Pass SectionAddrs to extract functions
                                     %% BUG 2 FIX: Wrap find_init_addr in try/catch
                                     case catch find_init_addr(ResolvedElf, SectionAddrs) of
-                                        {'EXIT', {error, no_init_symbol, _}} ->
+                                        {'EXIT', {no_init_symbol, _}} ->
                                             {error, no_init_symbol};
+                                        {'EXIT', Reason} ->
+                                            {error, {init_addr_failed, Reason}};
                                         InitAddr when is_integer(InitAddr) ->
                                             Exports = extract_exports(ResolvedElf, SectionAddrs),
                                             Module = #{

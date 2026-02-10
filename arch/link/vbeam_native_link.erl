@@ -323,6 +323,12 @@ patch_arm64_branch26(Bin, Offset, ByteOffset) ->
 %% B.cond encoding: [01010100][imm19:19][0][cond:4]
 %% imm19 is signed, represents offset/4 (offset in instructions).
 patch_arm64_cond_branch19(Bin, Offset, ByteOffset) ->
+    %% Bounds check: ensure we have 4 bytes at Offset
+    BinSize = byte_size(Bin),
+    case Offset + 4 =< BinSize of
+        false -> error({relocation_out_of_bounds, Offset});
+        true -> ok
+    end,
     %% Validate alignment
     case ByteOffset rem 4 of
         0 -> ok;

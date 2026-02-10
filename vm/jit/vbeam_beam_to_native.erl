@@ -464,14 +464,17 @@ translate_serial_output() ->
 %% ============================================================================
 
 %% SECURITY FIX (Finding #8): Emit error value instead of null pointer
+%% BUG FIX #4: Must clear RSI to prevent lodsb from reading stale pointer
 translate_put_string(_Len, String, {x, 0}) ->
     %% For bare metal, we need RIP-relative addressing
     %% String data isn't available yet - emit code that loads error sentinel
     %% instead of dereferencing null
     _ = String,  % Suppress warning
-    %% Load error sentinel value (-1) instead of 0
-    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF>>;  % mov rax, -1
+    %% Load error sentinel value (-1) and clear RSI
+    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF,  % mov rax, -1
+      16#48, 16#31, 16#F6>>;  % xor rsi, rsi (clear to prevent stale reads)
 
 translate_put_string(_Len, _String, _Dst) ->
-    %% Load error sentinel instead of NOP
-    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF>>.  % mov rax, -1
+    %% Load error sentinel and clear RSI
+    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF,  % mov rax, -1
+      16#48, 16#31, 16#F6>>.  % xor rsi, rsi

@@ -1084,14 +1084,14 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         %% Negate and record sign
         %% CRITICAL FIX: INT64_MIN (-9223372036854775808) cannot be negated.
         %% Add 1 before negating, then fix the last digit after conversion.
-        %% r15 = flag: 0 = normal, 1 = was INT64_MIN
-        ?ENC:encode_mov_imm64(r15, 0),
+        %% r9 = flag: 0 = normal, 1 = was INT64_MIN (NOT r15, which is heap pointer!)
+        ?ENC:encode_mov_imm64(r9, 0),
         ?ENC:encode_mov_imm64(rax, 16#8000000000000000),  %% INT64_MIN
         ?ENC:encode_cmp_rr(rbx, rax),
         ?ENC:encode_jcc_rel32(ne, 0),
         {reloc, rel32, <<"__its_not_min">>, -4},
         ?ENC:encode_add_imm(rbx, 1),      %% rbx = INT64_MIN + 1
-        ?ENC:encode_mov_imm64(r15, 1),    %% flag: was INT64_MIN
+        ?ENC:encode_mov_imm64(r9, 1),    %% flag: was INT64_MIN
         {label, <<"__its_not_min">>},
         ?ENC:encode_neg(rbx),
         ?ENC:encode_mov_imm64(r14, 1),    %% r14 = 1 (was negative)
@@ -1116,8 +1116,8 @@ lower_instruction({int_to_str, {preg, Dst}, {preg, Src}}, _FnName, _UsedCalleeSa
         ?ENC:encode_jcc_rel32(ne, 0),
         {reloc, rel32, DivLoopLbl, -4},
 
-        %% If r15=1, we converted INT64_MIN+1, so increment the last digit ('7'→'8')
-        ?ENC:encode_cmp_imm(r15, 0),
+        %% If r9=1, we converted INT64_MIN+1, so increment the last digit ('7'→'8')
+        ?ENC:encode_cmp_imm(r9, 0),
         ?ENC:encode_jcc_rel32(eq, 0),
         {reloc, rel32, <<"__its_no_fixup">>, -4},
         %% Last digit is at [rsp + r12], increment it

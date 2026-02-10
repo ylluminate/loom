@@ -237,12 +237,20 @@ text_base(pe) -> 16#400000.
 data_base(elf64, _CodeSize) ->
     16#600000;
 data_base(macho, CodeSize) ->
-    %% Mach-O: x86_64 uses 4KB pages, arm64 uses 16KB pages
-    %% For now, assume x86_64 (4KB). TODO: get arch from IR or option.
-    PageSize = 16#1000,  %% 4KB for x86_64
-    align_up(16#100000000 + CodeSize, PageSize);
+    data_base(macho, CodeSize, x86_64);  %% default to x86_64 for backward compat
 data_base(pe, CodeSize) ->
     align_up(16#400000 + CodeSize, 16#1000).
+
+%% 3-arity version with arch selection for Mach-O page size
+data_base(macho, CodeSize, arm64) ->
+    PageSize = 16#4000,  %% 16KB for ARM64
+    align_up(16#100000000 + CodeSize, PageSize);
+data_base(macho, CodeSize, x86_64) ->
+    PageSize = 16#1000,  %% 4KB for x86_64
+    align_up(16#100000000 + CodeSize, PageSize);
+data_base(macho, CodeSize, _) ->
+    PageSize = 16#1000,  %% fallback to 4KB
+    align_up(16#100000000 + CodeSize, PageSize).
 
 %%====================================================================
 %% Runtime builtins injection

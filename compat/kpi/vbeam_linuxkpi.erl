@@ -50,7 +50,7 @@ init() ->
     try
         case ets:whereis(?TIMER_TABLE) of
             undefined ->
-                ets:new(?TIMER_TABLE, [named_table, protected, set]),
+                ets:new(?TIMER_TABLE, [named_table, public, set]),
                 ok;
             _ ->
                 ok
