@@ -493,17 +493,10 @@ translate_serial_output() ->
 %% String Embedding
 %% ============================================================================
 
-%% SECURITY FIX (Finding #8): Emit error value instead of null pointer
-%% CRITICAL FIX (Finding 2): Do NOT clear RSI - serial_output expects it to point to string
-%% The clearing was causing null pointer dereference in translate_serial_output's lodsb instruction
-translate_put_string(_Len, String, {x, 0}) ->
-    %% For bare metal, we need RIP-relative addressing
-    %% String data isn't available yet - emit code that loads error sentinel
-    %% TODO: Implement proper RIP-relative string addressing
-    _ = String,  % Suppress warning
-    %% Load error sentinel value (-1) - but DON'T clear RSI
-    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF>>;  % mov rax, -1
-
+%% SECURITY FIX (Codex R34 Finding #1): Fail translation instead of emitting unsafe code
+%% The serial output loop uses lodsb (reads from RSI), but we have no way to initialize
+%% RSI to a valid string pointer without RIP-relative addressing infrastructure.
+%% Emitting code that leaves RSI uninitialized causes arbitrary memory reads or faults.
 translate_put_string(_Len, _String, _Dst) ->
-    %% Load error sentinel - but DON'T clear RSI
-    <<16#48, 16#C7, 16#C0, 16#FF, 16#FF, 16#FF, 16#FF>>.  % mov rax, -1
+    %% Fail translation until we implement proper string placement/addressing
+    error({unimplemented_opcode, put_string, "requires RIP-relative string addressing"}).

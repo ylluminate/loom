@@ -664,6 +664,7 @@ parse_rela(Data, Offset) ->
     }.
 
 %% FINDING 6 FIX: Parse REL entries (addend implicit, derived from target)
+%% Codex R34 Finding #7: REL relocations use implicit addend from target
 parse_rel(Data, Offset) ->
     <<_:Offset/binary,
       RelOffset:64/little, Info:64/little,
@@ -676,7 +677,12 @@ parse_rel(Data, Offset) ->
         offset => RelOffset,
         type => Type,
         symbol => Sym,
-        addend => 0  % REL format: addend derived from target (simplified as 0)
+        %% TODO: For REL format, the addend should be read from the relocation
+        %% target location (width/type-aware based on Type). Currently simplified
+        %% to 0, which produces incorrect relocations for non-zero addends.
+        %% Proper fix requires reading the target value at RelOffset with
+        %% appropriate width (32-bit/64-bit) based on relocation type.
+        addend => 0
     }.
 
 %% ============================================================================

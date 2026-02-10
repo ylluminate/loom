@@ -806,6 +806,11 @@ lower_instruction({array_len, {preg, Dst}, {preg, Arr}}, _FnName, _UsedCalleeSav
 %% ARRAY_APPEND
 lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 1): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     NeedGrowLbl = <<"__aapp_grow_", Uid/binary>>,
     StoreLbl = <<"__aapp_store_", Uid/binary>>,
@@ -1408,6 +1413,17 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_mov_imm64(rdx, 1),    %% len = 1
         ?ENC:encode_syscall(),
 
+        %% CRITICAL FIX (Finding 5): INT64_MIN cannot be negated
+        %% Check if value is INT64_MIN, if so add 1 before negating
+        ?ENC:encode_mov_imm64(r10, 0),     %% flag: 0 = normal
+        ?ENC:encode_mov_imm64(rax, 16#8000000000000000),  %% INT64_MIN
+        ?ENC:encode_cmp_rr(rbx, rax),
+        ?ENC:encode_jcc_rel32(ne, 0),
+        {reloc, rel32, <<"__pi_not_min_", Uid/binary>>, -4},
+        ?ENC:encode_add_imm(rbx, 1),       %% rbx = INT64_MIN + 1
+        ?ENC:encode_mov_imm64(r10, 1),     %% flag: was INT64_MIN
+        {label, <<"__pi_not_min_", Uid/binary>>},
+
         %% Negate: rbx = -rbx
         ?ENC:encode_neg(rbx),
 
@@ -1432,6 +1448,18 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _UsedCalleeSaved) ->
         ?ENC:encode_cmp_imm(rbx, 0),
         ?ENC:encode_jcc_rel32(ne, 0),
         {reloc, rel32, DivLoopLbl, -4},
+
+        %% CRITICAL FIX (Finding 5): If r10=1, fix last digit ('7'→'8')
+        ?ENC:encode_cmp_imm(r10, 0),
+        ?ENC:encode_jcc_rel32(eq, 0),
+        {reloc, rel32, <<"__pi_no_fixup_", Uid/binary>>, -4},
+        %% Last digit is at [rsp + r12], increment it
+        ?ENC:encode_mov_rr(r13, rsp),
+        ?ENC:encode_add_rr(r13, r12),
+        encode_movzx_byte_mem(rdx, r13),   %% Load last digit
+        ?ENC:encode_add_imm(rdx, 1),       %% '7' → '8'
+        encode_mov_byte_reg_to_mem(r13, rdx),  %% Store back
+        {label, <<"__pi_no_fixup_", Uid/binary>>},
 
         %% Print: write(1, rsp+r12, 128-r12)
         {label, PrintLbl},

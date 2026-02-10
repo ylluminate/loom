@@ -131,7 +131,8 @@ do_compile(#{target := Target, format := Format, functions := Functions,
 
     %% 6. Link (resolve relocations)
     TextBase = text_base(Format),
-    DataBase = data_base(Format, byte_size(CodeBin)),
+    %% CRITICAL FIX (Finding 2): Pass Target to data_base for arch-specific page size
+    DataBase = data_base(Format, byte_size(CodeBin), Target),
     case vbeam_native_link:resolve(LinkState2, TextBase, DataBase, DataBase + byte_size(DataBin)) of
         {ok, Patches} ->
             %% CRITICAL FIX (Finding 5): Wrap apply_patches in try/catch to convert
@@ -305,7 +306,10 @@ data_base(macho, CodeSize) ->
 data_base(pe, CodeSize) ->
     align_up(16#400000 + CodeSize, 16#1000).
 
-%% 3-arity version with arch selection for Mach-O page size
+%% 3-arity version with arch selection
+%% CRITICAL FIX (Finding 2): Arch-aware data_base for correct page alignment
+data_base(elf64, _CodeSize, _Target) ->
+    16#600000;
 data_base(macho, CodeSize, arm64) ->
     PageSize = 16#4000,  %% 16KB for ARM64
     align_up(16#100000000 + CodeSize, PageSize);
@@ -314,7 +318,9 @@ data_base(macho, CodeSize, x86_64) ->
     align_up(16#100000000 + CodeSize, PageSize);
 data_base(macho, CodeSize, _) ->
     PageSize = 16#1000,  %% fallback to 4KB
-    align_up(16#100000000 + CodeSize, PageSize).
+    align_up(16#100000000 + CodeSize, PageSize);
+data_base(pe, CodeSize, _Target) ->
+    align_up(16#400000 + CodeSize, 16#1000).
 
 %%====================================================================
 %% Runtime builtins injection

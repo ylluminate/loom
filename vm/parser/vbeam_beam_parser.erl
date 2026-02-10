@@ -57,8 +57,13 @@ parse_chunk(<<Name:4/binary, Size:32, Data:Size/binary, Rest/binary>>) ->
     case Rest of
         <<_:Padding/binary, AlignedRest/binary>> ->
             ChunkName = chunk_id_to_atom(Name),
-            ParsedData = parse_chunk_data(ChunkName, Data),
-            {ok, ChunkName, ParsedData, AlignedRest};
+            case parse_chunk_data(ChunkName, Data) of
+                {error, Reason} ->
+                    %% Codex R34 Finding #5: Propagate parse errors instead of crashing
+                    {error, {chunk_parse_failed, ChunkName, Reason}};
+                ParsedData ->
+                    {ok, ChunkName, ParsedData, AlignedRest}
+            end;
         _ ->
             {error, truncated_chunk}
     end;
@@ -215,13 +220,16 @@ parse_chunk_data(_Other, Data) ->
 %% Parse atom table
 parse_atoms(<<Count:32, Rest/binary>>) ->
     %% FINDING 8 FIX: Cap atom count to prevent memory exhaustion
+    %% Codex R34 Finding #5: Return error tuple instead of crash
     MaxAtoms = 100000,
     case Count of
         N when N > MaxAtoms ->
-            error({atom_count_too_large, N, max, MaxAtoms});
+            {error, {atom_count_too_large, N, max, MaxAtoms}};
         _ ->
             parse_atom_list(Rest, Count, [])
-    end.
+    end;
+parse_atoms(_) ->
+    {error, malformed_atom_chunk}.
 
 parse_atom_list(Rest, 0, Acc) ->
     {lists:reverse(Acc), Rest};

@@ -81,7 +81,8 @@
     idle_ticks :: non_neg_integer(),
     start_time :: integer(),
     quota_state :: #{atom() => non_neg_integer()},  % Track quota per priority
-    irq_bridge_pid :: pid() | undefined  % BUG 4 FIX: Track authorized IRQ sender
+    irq_bridge_pid :: pid() | undefined,  % BUG 4 FIX: Track authorized IRQ sender
+    irq_capability_token :: reference()   % Codex R34 Finding #2: Unforgeable capability token
 }).
 
 %%% ==========================================================================
@@ -265,6 +266,9 @@ init(Config) ->
     %% BUG 4 FIX: Look up IRQ bridge pid if registered
     IrqBridgePid = whereis(vbeam_irq_bridge),
 
+    %% Codex R34 Finding #2: Generate unforgeable capability token for IRQ authentication
+    IrqCapabilityToken = make_ref(),
+
     State = #state{
         config = Config,
         processes = #{?IDLE_PID => IdleProcess},
@@ -280,7 +284,8 @@ init(Config) ->
         idle_ticks = 0,
         start_time = erlang:monotonic_time(millisecond),
         quota_state = #{high => 0, normal => 0, low => 0},
-        irq_bridge_pid = IrqBridgePid
+        irq_bridge_pid = IrqBridgePid,
+        irq_capability_token = IrqCapabilityToken
     },
 
     {ok, State}.
@@ -491,34 +496,27 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @doc Handle timer interrupt from IRQ bridge
-%% BUG 4 FIX: Authenticate sender to prevent spoofed IRQ messages
-%% Only accept tick messages from the registered vbeam_irq_bridge process
-%% NOTE: When irq_bridge_pid is undefined, ticks are accepted for testing/bootstrap.
-%% This is INTENTIONAL - production should set the bridge PID during init to enforce auth.
-handle_info({irq, ?IRQ_TIMER, _Timestamp}, #state{irq_bridge_pid = AuthPid} = State) ->
-    %% Authenticate tick source. On bare metal, use capability token.
-    case AuthPid of
-        undefined ->
-            %% No bridge registered yet — accept tick (testing/bootstrap)
-            %% SECURITY: Set irq_bridge_pid during system init to enforce authentication
+%% Codex R34 Finding #2: Authenticate IRQ messages with capability token
+%% IRQ messages must include the unforgeable token generated at init.
+%% This prevents any process from spoofing timer ticks.
+handle_info({irq, ?IRQ_TIMER, _Timestamp, ProvidedToken},
+            #state{irq_capability_token = ExpectedToken} = State) ->
+    %% Verify capability token
+    case ProvidedToken of
+        ExpectedToken ->
+            %% Token matches - process the tick
             NewState = tick(State),
             {noreply, NewState};
         _ ->
-            CurrentBridgePid = whereis(vbeam_irq_bridge),
-            case CurrentBridgePid of
-                Pid when Pid =:= AuthPid ->
-                    NewState = tick(State),
-                    {noreply, NewState};
-                undefined ->
-                    %% Bridge died — accept but update
-                    NewState = tick(State#state{irq_bridge_pid = undefined}),
-                    {noreply, NewState};
-                NewPid ->
-                    %% Bridge restarted — update and accept
-                    NewState = tick(State#state{irq_bridge_pid = NewPid}),
-                    {noreply, NewState}
-            end
+            %% Invalid token - reject the message
+            %% Log or ignore spoofed IRQ attempts
+            {noreply, State}
     end;
+
+%% Legacy message format without token - reject for security
+handle_info({irq, ?IRQ_TIMER, _Timestamp}, State) ->
+    %% Old message format without capability token - reject
+    {noreply, State};
 
 handle_info(_Info, State) ->
     {noreply, State}.

@@ -46,12 +46,14 @@
 
 %% @doc Initialize LinuxKPI subsystem (ETS tables, etc.)
 %% BUG 11 FIX: Make init idempotent with try/catch
-%% FINDING 12 FIX: Create protected table (only owner writes)
+%% Codex R34 Finding #3: Change to public table for multi-process timer operations
 init() ->
     try
         case ets:whereis(?TIMER_TABLE) of
             undefined ->
-                ets:new(?TIMER_TABLE, [named_table, protected, set]),
+                %% Must be public: timer operations (insert/delete) are called
+                %% from arbitrary processes, not just the table owner
+                ets:new(?TIMER_TABLE, [named_table, public, set]),
                 ok;
             _ ->
                 ok

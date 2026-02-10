@@ -237,19 +237,29 @@ handle_io_request({put_chars, Encoding, Mod, Fun, Args}, State) ->
             Arity = length(Args),
             case is_safe_mfa(Mod, Fun, Arity) of
                 true when Arity >= 0, Arity =< 3 ->
+                    %% Codex R34 Finding #4: Pre-validate argument size before apply()
+                    %% to prevent memory DoS from format expansion
+                    MaxArgSize = 16 * 1024,  % Limit total argument size
                     try
-                        Chars = apply(Mod, Fun, Args),
-                        %% FINDING 9 FIX: Preflight check with iolist_size before materialization
-                        MaxOutputSize = 64 * 1024,
-                        case iolist_size(Chars) of
-                            Size when Size > MaxOutputSize ->
-                                %% Reject oversized output before materializing
-                                {error, {output_too_large, Size, max, MaxOutputSize}, State};
-                            _Size ->
-                                %% Safe to encode and output
-                                String = encode_chars(Encoding, Chars),
-                                NewState = output_all(String, State),
-                                {ok, ok, NewState}
+                        ArgsSize = erlang:external_size(Args),
+                        case ArgsSize of
+                            Size when Size > MaxArgSize ->
+                                {error, {args_too_large, Size, max, MaxArgSize}, State};
+                            _ ->
+                                %% Args are within bounds, safe to format
+                                Chars = apply(Mod, Fun, Args),
+                                %% FINDING 9 FIX: Preflight check with iolist_size before materialization
+                                MaxOutputSize = 64 * 1024,
+                                case iolist_size(Chars) of
+                                    OutSize when OutSize > MaxOutputSize ->
+                                        %% Reject oversized output before materializing
+                                        {error, {output_too_large, OutSize, max, MaxOutputSize}, State};
+                                    _OutSize ->
+                                        %% Safe to encode and output
+                                        String = encode_chars(Encoding, Chars),
+                                        NewState = output_all(String, State),
+                                        {ok, ok, NewState}
+                                end
                         end
                     catch
                         _:Reason ->

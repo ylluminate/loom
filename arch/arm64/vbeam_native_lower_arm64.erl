@@ -374,6 +374,17 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
         ?ENC:encode_mov_imm64(SysNumReg, WriteNum),
         ?ENC:encode_svc(SvcImm),
 
+        %% CRITICAL FIX (Finding 5): INT64_MIN cannot be negated
+        %% Check if value is INT64_MIN, if so add 1 before negating
+        ?ENC:encode_mov_imm64(x21, 0),                %% flag: 0 = normal
+        ?ENC:encode_mov_imm64(x9, 16#8000000000000000),  %% INT64_MIN
+        ?ENC:encode_cmp_rr(x19, x9),
+        ?ENC:encode_b_cond(ne, 0),
+        {reloc, arm64_cond_branch19, <<"__pi_not_min_", Uid/binary>>, -4},
+        ?ENC:encode_add_imm(x19, x19, 1),             %% x19 = INT64_MIN + 1
+        ?ENC:encode_mov_imm64(x21, 1),                %% flag: was INT64_MIN
+        {label, <<"__pi_not_min_", Uid/binary>>},
+
         %% Negate value
         ?ENC:encode_neg(x19, x19),
 
@@ -396,6 +407,18 @@ lower_instruction({print_int, {preg, Reg}}, _FnName, _FS, Fmt, _UC) ->
         ?ENC:encode_cmp_imm(x19, 0),
         ?ENC:encode_b_cond(ne, 0),
         {reloc, arm64_cond_branch19, DivLoopLbl, -4},
+
+        %% CRITICAL FIX (Finding 5): If x21=1, fix last digit ('7'→'8')
+        ?ENC:encode_cmp_imm(x21, 0),
+        ?ENC:encode_b_cond(eq, 0),
+        {reloc, arm64_cond_branch19, <<"__pi_no_fixup_", Uid/binary>>, -4},
+        %% Last digit is at [sp + x20], increment it
+        ?ENC:encode_add_imm(x12, sp, 0),      %% x12 = sp
+        ?ENC:encode_add_rrr(x12, x12, x20),   %% x12 = sp + x20
+        ?ENC:encode_ldrb(x9, x12, 0),         %% Load last digit
+        ?ENC:encode_add_imm(x9, x9, 1),       %% '7' → '8'
+        ?ENC:encode_strb(x9, x12, 0),         %% Store back
+        {label, <<"__pi_no_fixup_", Uid/binary>>},
 
         %% Print: write(1, sp+x20, 128-x20)
         {label, PrintLbl},
@@ -829,6 +852,11 @@ lower_instruction({array_len, {preg, Dst}, {preg, Arr}},
 %% If len == cap, double capacity and copy.
 lower_instruction({array_append, {preg, Dst}, {preg, Arr}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _FS, _Fmt, _UC) ->
+    %% CRITICAL FIX (Finding 1): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     NeedGrowLbl = <<"__aapp_grow_", Uid/binary>>,
     StoreLbl = <<"__aapp_store_", Uid/binary>>,

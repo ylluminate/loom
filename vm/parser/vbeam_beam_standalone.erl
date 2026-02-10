@@ -527,11 +527,12 @@ decode_instr_loop(<<>>, _Atoms, Acc) ->
     {ok, lists:reverse(Acc)};
 decode_instr_loop(Binary, Atoms, Acc) ->
     case decode_instruction(Binary, Atoms) of
-        {Instr, Rest} ->
-            decode_instr_loop(Rest, Atoms, [Instr | Acc]);
+        %% Codex R34 Finding #6: Match error tuple BEFORE generic tuple pattern
         {error, Reason} ->
             %% Decode failed - return error with partial results for analysis
             {error, {decode_failed, Reason, lists:reverse(Acc)}};
+        {Instr, Rest} when is_binary(Rest) ->
+            decode_instr_loop(Rest, Atoms, [Instr | Acc]);
         error ->
             %% Legacy error format - also fail with partial results
             {error, {decode_failed, unknown, lists:reverse(Acc)}}
@@ -546,7 +547,10 @@ decode_instruction(<<Opcode:8, Rest/binary>>, Atoms) ->
             {error, Reason};
         Arity ->
             case decode_operands(Rest, Arity, Atoms, []) of
-                {Operands, Rest2} ->
+                %% Codex R34 Finding #6: Match error tuple BEFORE generic tuple pattern
+                {error, _Reason} = Error ->
+                    Error;
+                {Operands, Rest2} when is_binary(Rest2) ->
                     {{OpcodeName, Operands}, Rest2};
                 error ->
                     error
@@ -560,7 +564,10 @@ decode_operands(Rest, 0, _Atoms, Acc) ->
     {lists:reverse(Acc), Rest};
 decode_operands(Binary, N, Atoms, Acc) ->
     case decode_operand(Binary, Atoms) of
-        {Operand, Rest} ->
+        %% Codex R34 Finding #6: Match error tuple BEFORE generic tuple pattern
+        {error, _Reason} = Error ->
+            Error;
+        {Operand, Rest} when is_binary(Rest) ->
             decode_operands(Rest, N - 1, Atoms, [Operand | Acc]);
         error ->
             error
@@ -579,9 +586,10 @@ decode_operand(<<Byte:8, Rest/binary>>, Atoms) ->
         _ ->
             %% Decode the integer value, then interpret by tag
             case decode_compact_value(Byte, Rest) of
+                %% Codex R34 Finding #6: Match error tuple BEFORE generic tuple pattern
                 {error, Reason} ->
                     {error, {decode_operand_failed, Reason}};
-                {Val, Rest2} ->
+                {Val, Rest2} when is_binary(Rest2) ->
                     interpret_tag(Tag, Val, Rest2, Atoms)
             end
     end;

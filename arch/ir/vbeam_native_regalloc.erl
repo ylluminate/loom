@@ -415,7 +415,14 @@ insert_param_copies(Body, OrigAssign, NewAssign) ->
         fun(Vreg, OrigReg, Acc) ->
             case maps:find(Vreg, NewAssign) of
                 {ok, NewReg} when NewReg =/= OrigReg ->
-                    [{mov, {preg, NewReg}, {preg, OrigReg}} | Acc];
+                    %% CRITICAL FIX (Finding 4): Handle spilled parameters.
+                    %% If parameter was spilled to stack, emit store from ABI register.
+                    case NewReg of
+                        {stack, Slot} ->
+                            [{store_spill, {preg, OrigReg}, {stack, Slot}} | Acc];
+                        _ when is_atom(NewReg) ->
+                            [{mov, {preg, NewReg}, {preg, OrigReg}} | Acc]
+                    end;
                 _ -> Acc
             end
         end, [], OrigAssign),
@@ -618,6 +625,8 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
     case Inst of
         {mov, Dst, Src} -> {[Src], [Dst]};
         {mov_imm, Dst, _} -> {[], [Dst]};
+        %% CRITICAL FIX (Finding 4): store_spill from parameter prologue
+        {store_spill, Src, _StackSlot} -> {[Src], []};
         {add, Dst, A, B} -> {[A, B], [Dst]};
         {sub, Dst, A, B} -> {[A, B], [Dst]};
         {mul, Dst, A, B} -> {[A, B], [Dst]};
@@ -652,7 +661,8 @@ analyze_inst_operands(Inst) when is_tuple(Inst) ->
         {float_to_str, Dst, Src} -> {[Src], [Dst]};
         {int_to_str, Dst, Src} -> {[Src], [Dst]};
         {string_concat, Dst, A, B} -> {[A, B], [Dst]};
-        {str_len, Dst, Src} -> {[Src], [Dst]};
+        %% CRITICAL FIX (Finding 3): Typo str_len → string_len
+        {string_len, Dst, Src} -> {[Src], [Dst]};
         {array_new, Dst, _, _} -> {[], [Dst]};
         {array_get, Dst, Arr, Idx, _} -> {[Arr, Idx], [Dst]};
         {array_set, Arr, Idx, _, Val} -> {[Arr, Idx, Val], []};
