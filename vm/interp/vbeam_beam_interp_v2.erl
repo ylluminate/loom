@@ -214,8 +214,26 @@ execute_instr({call, _Arity, {f, Label}}, Proc, _Options) ->
             }}
     end;
 
+execute_instr({call, Arity, {Module, Function, Arity}}, Proc, _Options) ->
+    %% Call local function via MFA tuple (beam_disasm format)
+    TargetFun = {Function, Arity},
+    case maps:get(TargetFun, Proc#proc.code_map, undefined) of
+        undefined ->
+            {error, {function_not_found, Module, Function, Arity}};
+        TargetInstrs ->
+            %% Push return address
+            NewStack = [{Proc#proc.module, Proc#proc.current_fun, Proc#proc.pc + 1} | Proc#proc.stack],
+            {continue, Proc#proc{
+                current_fun = TargetFun,
+                current_instrs = TargetInstrs,
+                pc = 0,
+                stack = NewStack
+            }}
+    end;
+
 execute_instr({call_only, _Arity, {f, Label}}, Proc, _Options) ->
     %% Tail call - don't push return address
+    %% NOTE: Don't clear Y stack - current frame (if any) was already deallocated
     case maps:get(Label, Proc#proc.labels, undefined) of
         undefined ->
             {error, {label_not_found, Label}};
@@ -224,8 +242,21 @@ execute_instr({call_only, _Arity, {f, Label}}, Proc, _Options) ->
             {continue, Proc#proc{
                 current_fun = TargetFun,
                 current_instrs = TargetInstrs,
-                pc = 0,
-                y = []  % Clear stack frame on tail call
+                pc = 0
+            }}
+    end;
+
+execute_instr({call_only, Arity, {Module, Function, Arity}}, Proc, _Options) ->
+    %% Tail call via MFA tuple (beam_disasm format)
+    TargetFun = {Function, Arity},
+    case maps:get(TargetFun, Proc#proc.code_map, undefined) of
+        undefined ->
+            {error, {function_not_found, Module, Function, Arity}};
+        TargetInstrs ->
+            {continue, Proc#proc{
+                current_fun = TargetFun,
+                current_instrs = TargetInstrs,
+                pc = 0
             }}
     end;
 

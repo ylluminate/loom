@@ -512,17 +512,14 @@ handle_local_call(Label, State, IsTailCall) ->
                             PC = maps:get(pc, State),
                             [{CurrentFun, PC + 1} | maps:get(stack, State)]
                     end,
-                    NewY = case IsTailCall of
-                        true -> [];
-                        false -> maps:get(y, State)
-                    end,
-                    {continue, State#{
+                    %% FIXED: Don't clear Y stack on tail call - frame already deallocated if needed
+                    NewState = State#{
                         current_fun => TargetFun,
                         current_instrs => TargetInstrs,
                         pc => 0,
-                        stack => NewStack,
-                        y => NewY
-                    }};
+                        stack => NewStack
+                    },
+                    {continue, NewState};
                 {error, Reason} ->
                     {error, Reason}
             end
