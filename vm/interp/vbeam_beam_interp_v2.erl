@@ -631,6 +631,22 @@ execute_bif(io, format, [Format, Args], _Options) ->
 execute_bif(lists, reverse, [List], _Options) when is_list(List) ->
     {ok, lists:reverse(List)};
 
+%% FINDING 7 FIX: Add argument caps for lists:seq/2 and lists:duplicate/2
+execute_bif(lists, seq, [From, To], _Options) when is_integer(From), is_integer(To) ->
+    Range = abs(To - From) + 1,
+    case Range =< 10000 of
+        true ->
+            {ok, lists:seq(From, To)};
+        false ->
+            {error, {argument_too_large, seq, Range, max, 10000}}
+    end;
+
+execute_bif(lists, duplicate, [N, _Elem], _Options) when is_integer(N), N > 10000 ->
+    {error, {argument_too_large, duplicate, N, max, 10000}};
+
+execute_bif(lists, duplicate, [N, Elem], _Options) when is_integer(N), N >= 0 ->
+    {ok, lists:duplicate(N, Elem)};
+
 execute_bif(Mod, Fun, Args, _Options) ->
     %% SECURITY: Enforce strict BIF allowlist — guest code must not execute arbitrary host functions
     %% Only allow specific safe modules and functions
@@ -644,6 +660,9 @@ execute_bif(Mod, Fun, Args, _Options) ->
                 Result ->
                     {ok, Result}
             end;
+        capped ->
+            %% This should not be reached (capped BIFs handled explicitly above)
+            {error, {implementation_error, capped_bif_not_handled}};
         false ->
             {error, {undef, Mod, Fun, length(Args)}}
     end.
@@ -677,15 +696,16 @@ is_allowed_bif(lists, keystore, 4) -> true;
 is_allowed_bif(lists, keydelete, 3) -> true;
 is_allowed_bif(lists, sort, 1) -> true;
 is_allowed_bif(lists, usort, 1) -> true;
-is_allowed_bif(lists, seq, 2) -> true;
 is_allowed_bif(lists, flatten, 1) -> true;
 is_allowed_bif(lists, zip, 2) -> true;
 is_allowed_bif(lists, unzip, 1) -> true;
-is_allowed_bif(lists, duplicate, 2) -> true;
 is_allowed_bif(lists, last, 1) -> true;
 is_allowed_bif(lists, sum, 1) -> true;
 is_allowed_bif(lists, max, 1) -> true;
 is_allowed_bif(lists, min, 1) -> true;
+%% FINDING 7 FIX: Add special wrapper for BIFs that need argument caps
+is_allowed_bif(lists, seq, 2) -> capped;
+is_allowed_bif(lists, duplicate, 2) -> capped;
 is_allowed_bif(maps, new, 0) -> true;
 is_allowed_bif(maps, get, 2) -> true;
 is_allowed_bif(maps, put, 3) -> true;

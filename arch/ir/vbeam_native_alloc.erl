@@ -137,22 +137,25 @@ emit_alloc(arm64, DstReg, N) ->
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__alloc_ok_", Uid/binary>>,
     OomLbl = <<"__alloc_oom_", Uid/binary>>,
-    %% Calculate new heap pointer in x16
+    %% CRITICAL FIX (Finding 1): Choose temp register distinct from DstReg
+    %% to avoid overwriting the new pointer before committing to heap register.
+    TmpReg = if DstReg =:= x16 -> x17; true -> x16 end,
+    %% Calculate new heap pointer in TmpReg
     AdvanceCode = if AlignedN >= 0, AlignedN < 4096 ->
-            ?ARM64_ENC:encode_add_imm(x16, HeapReg, AlignedN);
+            ?ARM64_ENC:encode_add_imm(TmpReg, HeapReg, AlignedN);
            true ->
-            [?ARM64_ENC:encode_mov_imm64(x16, AlignedN),
-             ?ARM64_ENC:encode_add_rrr(x16, HeapReg, x16)]
+            [?ARM64_ENC:encode_mov_imm64(TmpReg, AlignedN),
+             ?ARM64_ENC:encode_add_rrr(TmpReg, HeapReg, TmpReg)]
         end,
     lists:flatten([
         AdvanceCode,
         %% CRITICAL FIX (Finding 10): Add wraparound check before bounds check
         %% If new_ptr < old_ptr, unsigned overflow occurred
-        ?ARM64_ENC:encode_cmp_rr(x16, HeapReg),
+        ?ARM64_ENC:encode_cmp_rr(TmpReg, HeapReg),
         ?ARM64_ENC:encode_b_cond(lo, 0),  % unsigned: new < old
         {reloc, arm64_cond_branch19, OomLbl, -4},
         %% Bounds check: new_ptr > heap_end?
-        ?ARM64_ENC:encode_cmp_rr(x16, HeapEndReg),
+        ?ARM64_ENC:encode_cmp_rr(TmpReg, HeapEndReg),
         ?ARM64_ENC:encode_b_cond(ls, 0),  % unsigned: new <= end (FIXED from 'le')
         {reloc, arm64_cond_branch19, OkLbl, -4},
         %% OOM path: trap
@@ -161,7 +164,7 @@ emit_alloc(arm64, DstReg, N) ->
         %% Success path
         {label, OkLbl},
         ?ARM64_ENC:encode_mov_rr(DstReg, HeapReg),     %% return current ptr
-        ?ARM64_ENC:encode_mov_rr(HeapReg, x16)         %% advance heap pointer
+        ?ARM64_ENC:encode_mov_rr(HeapReg, TmpReg)      %% advance heap pointer
     ]);
 emit_alloc(x86_64, DstReg, N) ->
     AlignedN = align8(N),

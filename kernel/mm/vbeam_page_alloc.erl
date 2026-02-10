@@ -48,15 +48,20 @@
 %% @doc Initialize allocator with total physical memory size
 -spec init(non_neg_integer()) -> state() | {error, term()}.
 init(TotalMemoryBytes) ->
-    %% FINDING 7 FIX: Enforce max 4GB to prevent bitmap overflow
-    MaxMemory = 4 * 1024 * 1024 * 1024,  % 4GB
-    case TotalMemoryBytes > MaxMemory of
+    %% FINDING 3 FIX: Validate minimum memory size (at least one page)
+    case TotalMemoryBytes < ?PAGE_SIZE of
         true ->
-            {error, {memory_too_large, TotalMemoryBytes, max, MaxMemory}};
+            {error, {memory_too_small, TotalMemoryBytes, min, ?PAGE_SIZE}};
         false ->
-            TotalPages = TotalMemoryBytes div ?PAGE_SIZE,
-            BitmapSize = (TotalPages + 7) div 8, %% Round up to nearest byte
-            Bitmap = <<0:(BitmapSize * 8)>>, %% All pages initially free
+            %% FINDING 7 FIX: Enforce max 4GB to prevent bitmap overflow
+            MaxMemory = 4 * 1024 * 1024 * 1024,  % 4GB
+            case TotalMemoryBytes > MaxMemory of
+                true ->
+                    {error, {memory_too_large, TotalMemoryBytes, max, MaxMemory}};
+                false ->
+                    TotalPages = TotalMemoryBytes div ?PAGE_SIZE,
+                    BitmapSize = (TotalPages + 7) div 8, %% Round up to nearest byte
+                    Bitmap = <<0:(BitmapSize * 8)>>, %% All pages initially free
 
             %% Mark first 2MB as reserved (kernel + boot structures)
             ReservedPages = ?KERNEL_RESERVED_SIZE div ?PAGE_SIZE,
@@ -69,8 +74,9 @@ init(TotalMemoryBytes) ->
                 reserved_pages => #{}
             },
 
-            %% Reserve the first 2MB
-            mark_reserved_pages(State0, 0, ReservedPages - 1)
+                    %% Reserve the first 2MB
+                    mark_reserved_pages(State0, 0, ReservedPages - 1)
+            end
     end.
 
 %% @doc Allocate a single page
@@ -83,8 +89,10 @@ alloc_page(State) ->
 
 %% @doc Allocate multiple pages (not necessarily contiguous)
 -spec alloc_pages(state(), pos_integer()) -> {ok, [phys_addr()], state()} | {error, term()}.
-alloc_pages(State, Count) ->
-    alloc_pages_loop(State, Count, []).
+alloc_pages(State, Count) when is_integer(Count), Count > 0 ->
+    alloc_pages_loop(State, Count, []);
+alloc_pages(_State, Count) ->
+    {error, {invalid_count, Count}}.
 
 %% @doc Free a single page
 -spec free_page(state(), phys_addr()) -> state() | {error, invalid_address}.
@@ -179,6 +187,9 @@ stats(#{total_pages := Total, free_count := Free}) ->
 
 %% @doc Allocate N contiguous pages
 -spec alloc_contiguous(state(), pos_integer()) -> {ok, phys_addr(), state()} | {error, term()}.
+alloc_contiguous(_State, Count) when not is_integer(Count); Count =< 0 ->
+    %% FINDING 2 FIX: Reject non-positive counts
+    {error, invalid_count};
 alloc_contiguous(#{free_count := Free}, Count) when Free < Count ->
     {error, out_of_memory};
 alloc_contiguous(State, Count) ->
@@ -187,19 +198,25 @@ alloc_contiguous(State, Count) ->
       next_hint := Hint,
       free_count := FreeCount} = State,
 
-    case find_contiguous(Bitmap, Count, Hint, Total) of
-        {ok, StartPage} ->
-            %% Mark pages as allocated
-            NewBitmap = mark_pages_allocated(Bitmap, StartPage, Count),
-            NewState = State#{
-                bitmap := NewBitmap,
-                free_count := FreeCount - Count,
-                next_hint := (StartPage + Count) rem Total
-            },
-            PhysAddr = StartPage * ?PAGE_SIZE,
-            {ok, PhysAddr, NewState};
-        not_found ->
-            {error, no_contiguous_block}
+    %% FINDING 2 FIX: Guard against Total = 0 before modulo
+    case Total > 0 of
+        false ->
+            {error, invalid_state};
+        true ->
+            case find_contiguous(Bitmap, Count, Hint, Total) of
+                {ok, StartPage} ->
+                    %% Mark pages as allocated
+                    NewBitmap = mark_pages_allocated(Bitmap, StartPage, Count),
+                    NewState = State#{
+                        bitmap := NewBitmap,
+                        free_count := FreeCount - Count,
+                        next_hint := (StartPage + Count) rem Total
+                    },
+                    PhysAddr = StartPage * ?PAGE_SIZE,
+                    {ok, PhysAddr, NewState};
+                not_found ->
+                    {error, no_contiguous_block}
+            end
     end.
 
 %%% ----------------------------------------------------------------------------
@@ -288,7 +305,7 @@ check_contiguous(Bitmap, Start, Count) ->
 %% @doc Allocate multiple non-contiguous pages
 alloc_pages_loop(State, 0, Acc) ->
     {ok, lists:reverse(Acc), State};
-alloc_pages_loop(State, Count, Acc) ->
+alloc_pages_loop(State, Count, Acc) when Count > 0 ->
     case alloc_page(State) of
         {ok, Addr, NewState} ->
             alloc_pages_loop(NewState, Count - 1, [Addr | Acc]);
@@ -296,7 +313,11 @@ alloc_pages_loop(State, Count, Acc) ->
             %% Free already allocated pages and return error with state
             FinalState = free_pages(State, Acc),
             {{error, Reason}, FinalState}
-    end.
+    end;
+alloc_pages_loop(State, _Count, Acc) ->
+    %% FINDING 1 FIX: Defensive clause for negative count
+    FinalState = free_pages(State, Acc),
+    {{error, invalid_count}, FinalState}.
 
 %%% ----------------------------------------------------------------------------
 %%% Bit Manipulation

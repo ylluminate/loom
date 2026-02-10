@@ -679,6 +679,12 @@ lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}}, _Fn
 %% ARRAY_GET (register index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size for bare-metal OS.
+    %% All values are tagged 64-bit words. Smaller sizes cause OOB reads/writes.
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_ok_", Uid/binary>>,
     lists:flatten([
@@ -691,6 +697,8 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
         ?ENC:encode_mov_imm64(rdi, 2),
         ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
         ?ENC:encode_syscall(),
+        %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
+        ?ENC:encode_ud2(),
         %% In bounds: proceed with access
         {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),               %% rax = ptr
@@ -704,6 +712,11 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
 %% ARRAY_GET (immediate index)
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
@@ -717,6 +730,8 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
         ?ENC:encode_mov_imm64(rdi, 2),
         ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
         ?ENC:encode_syscall(),
+        %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
+        ?ENC:encode_ud2(),
         %% In bounds: proceed with access
         {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
@@ -726,6 +741,11 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 %% ARRAY_SET (immediate index)
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
@@ -739,6 +759,8 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
         ?ENC:encode_mov_imm64(rdi, 2),
         ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
         ?ENC:encode_syscall(),
+        %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
+        ?ENC:encode_ud2(),
         %% In bounds: proceed with store
         {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),
@@ -748,6 +770,11 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 %% ARRAY_SET (register index)
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _UsedCalleeSaved) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_ok_", Uid/binary>>,
     lists:flatten([
@@ -760,6 +787,8 @@ lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemS
         ?ENC:encode_mov_imm64(rdi, 2),
         ?ENC:encode_mov_imm64(rax, 60),                      %% sys_exit
         ?ENC:encode_syscall(),
+        %% CRITICAL FIX (Finding 5): Add ud2 trap to prevent fallthrough
+        ?ENC:encode_ud2(),
         %% In bounds: proceed with store
         {label, OkLbl},
         ?ENC:encode_mov_mem_load(rax, Arr, 0),

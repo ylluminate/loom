@@ -326,6 +326,8 @@ is_call_instruction({method_call, _, _, _, _}) -> true;
 is_call_instruction({print_str, _}) -> true;
 is_call_instruction({print_int, _}) -> true;
 is_call_instruction({int_to_str, _, _}) -> true;
+%% CRITICAL FIX (Finding 4): float_to_str expands to int_to_str which clobbers caller-saved regs
+is_call_instruction({float_to_str, _, _}) -> true;
 is_call_instruction(_) -> false.
 
 %% Check if a vreg's live interval spans any call position.
@@ -549,7 +551,7 @@ rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
     %% Identify uses and defs in this instruction
     {Uses, Defs} = analyze_inst_operands(Inst),
     %% For each USE that's spilled, collect {vreg, slot} pairs
-    LoadsNeeded = lists:filtermap(
+    LoadsNeeded0 = lists:filtermap(
         fun({vreg, V}) ->
             case maps:find(V, Assignments) of
                 {ok, {stack, Slot}} -> {true, {V, Slot}};
@@ -558,7 +560,7 @@ rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
            (_) -> false
         end, Uses),
     %% For each DEF that's spilled, collect {vreg, slot} pairs
-    StoresNeeded = lists:filtermap(
+    StoresNeeded0 = lists:filtermap(
         fun({vreg, V}) ->
             case maps:find(V, Assignments) of
                 {ok, {stack, Slot}} -> {true, {V, Slot}};
@@ -566,6 +568,10 @@ rewrite_inst_with_spills(Inst, Assignments, Target) when is_tuple(Inst) ->
             end;
            (_) -> false
         end, Defs),
+    %% CRITICAL FIX (Finding 3): Deduplicate by vreg before counting.
+    %% Repeated use of same spilled vreg inflates count → false too_many_spills crash.
+    LoadsNeeded = lists:usort(LoadsNeeded0),
+    StoresNeeded = lists:usort(StoresNeeded0),
     %% CRITICAL FIX #6: Multiple spills in one instruction need distinct scratch registers.
     %% If >2 spills, error. For 0-2 spills, assign r11/r10 (x86_64) or x15/x14 (arm64).
     NumLoads = length(LoadsNeeded),

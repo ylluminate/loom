@@ -47,22 +47,26 @@ boot_code(Config) ->
     %% RIP-relative addressing setup
 
     %% Get helper code blocks and strip trailing ret (0xC3) for inlining
+    %% FINDING 4 FIX: Pattern-match to propagate errors from paging module
     GDTCode = vbeam_gdt_idt:gdt_load_code(GDTBase),
     IDTCode = vbeam_gdt_idt:idt_load_code(IDTBase),
-    PageCode = vbeam_paging:load_cr3_code(PageTablesBase),
 
-    iolist_to_binary([
-        %% === Disable interrupts during boot setup ===
-        <<16#FA>>,                  %% cli (clear interrupt flag)
+    case vbeam_paging:load_cr3_code(PageTablesBase) of
+        {error, _} = Err ->
+            Err;
+        PageCode when is_binary(PageCode) ->
+            iolist_to_binary([
+                %% === Disable interrupts during boot setup ===
+                <<16#FA>>,                  %% cli (clear interrupt flag)
 
-        %% === Load GDT ===
-        strip_trailing_ret(GDTCode),
+                %% === Load GDT ===
+                strip_trailing_ret(GDTCode),
 
-        %% === Load IDT ===
-        strip_trailing_ret(IDTCode),
+                %% === Load IDT ===
+                strip_trailing_ret(IDTCode),
 
-        %% === Load CR3 (page tables) ===
-        strip_trailing_ret(PageCode),
+                %% === Load CR3 (page tables) ===
+                strip_trailing_ret(PageCode),
 
         %% === Setup stack ===
         %% mov rsp, StackBase + StackSize
@@ -107,10 +111,11 @@ boot_code(Config) ->
         %% === Enable interrupts ===
         <<16#FB>>,                  %% sti
 
-        %% === Idle loop (halt with interrupts enabled) ===
-        <<16#F4>>,                  %% hlt
-        <<16#EB, 16#FD>>            %% jmp -3 (infinite loop: hlt again after interrupt)
-    ]).
+                %% === Idle loop (halt with interrupts enabled) ===
+                <<16#F4>>,                  %% hlt
+                <<16#EB, 16#FD>>            %% jmp -3 (infinite loop: hlt again after interrupt)
+            ])
+    end.
 
 %% @doc Generate boot data section containing GDT, IDT, IDTR, ISR stubs, page tables, and strings.
 %%      Data is packed sequentially but must align with configured base addresses.

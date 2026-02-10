@@ -355,14 +355,22 @@ stub_syscall(SyscallNr, Args) ->
     end,
     {error, ?ENOSYS}.
 
-%% BUG 7 FIX: Truncate arg representation to 200 chars max
+%% FINDING 6 FIX: Add bounded formatting with depth/size limits
 truncate_arg(Arg) ->
-    Str = lists:flatten(io_lib:format("~P", [Arg, 10])),
-    case length(Str) of
-        Len when Len > 200 ->
-            lists:sublist(Str, 200) ++ "...";
-        _ ->
-            Str
+    try
+        %% Use ~P with depth limit 10 to prevent deep term expansion
+        Str = lists:flatten(io_lib:format("~P", [Arg, 10])),
+        case length(Str) of
+            Len when Len > 200 ->
+                lists:sublist(Str, 200) ++ "...";
+            _ ->
+                Str
+        end
+    catch
+        error:system_limit ->
+            "[truncated: system_limit]";
+        _:_ ->
+            "[truncated: format_error]"
     end.
 
 %% @doc Get syscall name from number

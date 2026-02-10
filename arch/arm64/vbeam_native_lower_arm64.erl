@@ -642,13 +642,15 @@ lower_instruction({print_str, {preg, Src}}, _FnName, _FS, Fmt, _UC) ->
 lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}},
                   _FnName, _FS, _Fmt, _UC) ->
     BufSize = ElemSize * InitCap,
+    %% CRITICAL FIX (Finding 1): Use x9 for buffer allocation instead of x16
+    %% to avoid aliasing with emit_alloc's internal temp register.
     lists:flatten([
         %% Allocate element buffer
-        vbeam_native_alloc:emit_alloc(arm64, x16, BufSize),
+        vbeam_native_alloc:emit_alloc(arm64, x9, BufSize),
         %% Allocate header (24 bytes)
         vbeam_native_alloc:emit_alloc(arm64, Dst, 24),
         %% Store header fields
-        ?ENC:encode_str(x16, Dst, 0),                   %% [Dst+0]  = ptr
+        ?ENC:encode_str(x9, Dst, 0),                    %% [Dst+0]  = ptr
         ?ENC:encode_mov_imm64(x17, 0),
         ?ENC:encode_str(x17, Dst, 8),                   %% [Dst+8]  = len (0)
         ?ENC:encode_mov_imm64(x17, InitCap),
@@ -660,6 +662,11 @@ lower_instruction({array_new, {preg, Dst}, {imm, ElemSize}, {imm, InitCap}},
 %% Element address = ptr + index * elem_size
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemSize}},
                   _FnName, _FS, Fmt, _UC) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_ok_", Uid/binary>>,
     %% CRITICAL FIX: Format-aware syscall for OOB error path
@@ -690,6 +697,11 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {preg, Idx}, {imm, ElemS
 %% ARRAY_GET with immediate index
 lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSize}},
                   _FnName, _FS, Fmt, _UC) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_get_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
@@ -724,6 +736,11 @@ lower_instruction({array_get, {preg, Dst}, {preg, Arr}, {imm, Idx}, {imm, ElemSi
 %% ARRAY_SET with immediate index.
 lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _FS, Fmt, _UC) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_imm_ok_", Uid/binary>>,
     Offset = Idx * ElemSize,
@@ -758,6 +775,11 @@ lower_instruction({array_set, {preg, Arr}, {imm, Idx}, {preg, Val}, {imm, ElemSi
 %% ARRAY_SET with register index.
 lower_instruction({array_set, {preg, Arr}, {preg, Idx}, {preg, Val}, {imm, ElemSize}},
                   _FnName, _FS, Fmt, _UC) ->
+    %% CRITICAL FIX (Finding 2): Enforce 64-bit element size
+    case ElemSize of
+        8 -> ok;
+        _ -> error({unsupported_elem_size, ElemSize, "Only 8-byte elements supported"})
+    end,
     Uid = integer_to_binary(erlang:unique_integer([positive])),
     OkLbl = <<"__array_set_ok_", Uid/binary>>,
     %% CRITICAL FIX: Format-aware syscall for OOB error path
@@ -911,10 +933,12 @@ lower_instruction({map_new, {preg, Dst}}, _FnName, _FS, _Fmt, _UC) ->
     %% Initial capacity: 8 entries = 128 bytes
     InitCap = 8,
     BufSize = InitCap * 16,
+    %% CRITICAL FIX (Finding 1): Use x9 for buffer allocation instead of x16
+    %% to avoid aliasing with emit_alloc's internal temp register.
     lists:flatten([
-        vbeam_native_alloc:emit_alloc(arm64, x16, BufSize), %% entry buffer
+        vbeam_native_alloc:emit_alloc(arm64, x9, BufSize),  %% entry buffer
         vbeam_native_alloc:emit_alloc(arm64, Dst, 24),      %% header
-        ?ENC:encode_str(x16, Dst, 0),                       %% ptr
+        ?ENC:encode_str(x9, Dst, 0),                        %% ptr
         ?ENC:encode_mov_imm64(x17, 0),
         ?ENC:encode_str(x17, Dst, 8),                       %% len = 0
         ?ENC:encode_mov_imm64(x17, InitCap),

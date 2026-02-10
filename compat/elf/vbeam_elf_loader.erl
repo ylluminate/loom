@@ -417,6 +417,14 @@ parse_section_headers(Binary, #{shoff := ShOff, shnum := ShNum, shstrndx := ShSt
     %% BUG 9 FIX: Convert list to tuple for O(1) access
     SectionHeadersTuple = list_to_tuple(SectionHeaders),
 
+    %% FINDING 5 FIX: Validate ShStrNdx before tuple indexing
+    case ShStrNdx >= 0 andalso ShStrNdx < ShNum of
+        false ->
+            error({invalid_shstrndx, ShStrNdx, max, ShNum - 1});
+        true ->
+            ok
+    end,
+
     %% Get the .shstrtab section
     ShStrTabHdr = element(ShStrNdx + 1, SectionHeadersTuple),
     ShStrTabData = extract_section_data(Binary, ShStrTabHdr),
